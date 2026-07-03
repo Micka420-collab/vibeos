@@ -1,0 +1,270 @@
+# =============================================================================
+# VibeOS — bootc/OSTree image definition (v0.1.0-dev)
+#
+# Base    : Fedora Kinoite 42 (KDE Plasma 6), bootc-native OCI image,
+#           pinned by DIGEST (supply-chain: never a mutable tag).
+# Target  : ghcr.io/micka420-collab/vibeos
+#           (keep in sync with .github/workflows/build-os.yml)
+# Arch    : linux/amd64 AND linux/arm64 (multi-arch manifest). The NVIDIA
+#           layer below applies to amd64 only. See docs/HARDWARE.md for the
+#           reference machines.
+#
+# Build context is the REPOSITORY ROOT (not os/), because the image pulls
+# files from os/, memory/ and security/:
+#
+#     podman build -t ghcr.io/micka420-collab/vibeos:dev -f os/Containerfile .
+#     podman build --arch arm64 -t ghcr.io/micka420-collab/vibeos:dev-arm64 -f os/Containerfile .
+#
+# OSTree layout rules enforced throughout this file:
+#   * /usr        -> image content (immutable at runtime). Everything we ship
+#                    MUST land under /usr (or /etc for defaults).
+#   * /etc        -> image defaults, 3-way merged with local changes on update.
+#   * /var        -> machine state, created at deploy time. Anything written
+#                    to /var during the build is dead weight and is scrubbed
+#                    before `bootc container lint`.
+#   * /usr/local and /opt are symlinks into /var on OSTree systems: NEVER
+#                    install anything there.
+#
+# See docs/BUILD.md (French) for the full build / ISO / publish workflow.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# PHASE 2 PLACEHOLDER (NOT ACTIVE YET): build vibed from source.
+# Uncomment this stage and the matching `COPY --from=vibed-builder` below once
+# the vibed/ crate is ready to ship. The vibed.service unit shipped in
+# os/rootfs is guarded by ConditionPathExists=/usr/bin/vibed, so activating
+# this stage is the ONLY switch needed to bring the daemon online — the unit
+# is silently skipped (not failed) as long as the binary is absent.
+# vibed/Cargo.lock is committed, so `--locked` builds are reproducible.
+# -----------------------------------------------------------------------------
+# FROM registry.fedoraproject.org/fedora:42 AS vibed-builder
+# RUN dnf -y install cargo rustc openssl-devel pkgconf-pkg-config && dnf clean all
+# COPY vibed/ /src/vibed/
+# WORKDIR /src/vibed
+# RUN cargo build --release --locked \
+#  && strip target/release/vibed
+# -----------------------------------------------------------------------------
+
+# Digest pin of quay.io/fedora/fedora-kinoite:42 (manifest list, amd64+arm64).
+# Tag kept as a comment for humans; bump the digest deliberately, never float.
+FROM quay.io/fedora/fedora-kinoite:42@sha256:7d1e1c6457fe8e2b8c42bcce3bc5b1cc86d2e9346ffb45e2ef3cdd12dc93e258
+
+LABEL org.opencontainers.image.title="VibeOS" \
+      org.opencontainers.image.description="AI-native, security-first, immutable Linux distribution for vibecoding" \
+      org.opencontainers.image.version="0.1.0-dev" \
+      org.opencontainers.image.source="https://github.com/Micka420-collab/vibeos" \
+      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:42@sha256:7d1e1c6457fe8e2b8c42bcce3bc5b1cc86d2e9346ffb45e2ef3cdd12dc93e258"
+
+# TARGETARCH is auto-populated by podman/buildah when building with --platform
+# (amd64 | arm64). Defaulted to amd64 for plain single-arch local builds.
+ARG TARGETARCH=amd64
+# Set to 0 to skip the proprietary NVIDIA driver layer (amd64 only anyway).
+ARG NVIDIA_ENABLED=1
+
+# =============================================================================
+# 1. RPM layers (dnf)
+#    Grouped by intent; keep os/packages.txt in strict sync with these lists.
+#    install_weak_deps=False keeps the image lean and the dependency graph
+#    deterministic.
+# =============================================================================
+
+# --- 1a. Core development toolchain ------------------------------------------
+RUN dnf -y install --setopt=install_weak_deps=False \
+        git \
+        gcc \
+        make \
+        cmake \
+        python3 \
+        python3-pip \
+        nodejs \
+        npm \
+    && dnf clean all
+
+# --- 1b. Terminal quality-of-life + plumbing ----------------------------------
+# socat: MCP bridge between agent CLIs (stdio) and vibed's unix socket
+#        /run/vibed/mcp.sock — documented in agent/README.md and vibed/README.md.
+# zstd : required to extract the official ollama .tar.zst release archives
+#        (layer 4 below).
+RUN dnf -y install --setopt=install_weak_deps=False \
+        ripgrep \
+        fd-find \
+        fzf \
+        tmux \
+        jq \
+        htop \
+        fastfetch \
+        distrobox \
+        socat \
+        zstd \
+    && dnf clean all
+
+# --- 1c. Virtualization / test tooling (kept deliberately minimal) -----------
+# Only guest-side agents so VibeOS behaves well when IT is the VM under test.
+# Host-side virt (libvirt/qemu) is left to distrobox or a later phase.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        qemu-guest-agent \
+        virt-what \
+    && dnf clean all
+
+# =============================================================================
+# 2. VSCodium — community rpm repository (paulcarroty)
+#    LICENSING: official VS Code binaries are proprietary and NOT redistributable
+#    in an ISO (see docs/ECOSYSTEM.md). VSCodium is the MIT build of the same
+#    codebase, wired to the Open VSX marketplace (where Cline/Continue publish).
+#    Shipping the .repo file in /etc means `dnf update codium` also works inside
+#    future image rebuilds; gpgcheck stays enforced end-to-end.
+# =============================================================================
+RUN rpm --import https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/master/pub.gpg \
+    && printf '%s\n' \
+        '[vscodium]' \
+        'name=VSCodium' \
+        'baseurl=https://download.vscodium.com/rpms/' \
+        'enabled=1' \
+        'gpgcheck=1' \
+        'repo_gpgcheck=1' \
+        'gpgkey=https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/master/pub.gpg' \
+        'metadata_expire=1h' \
+        > /etc/yum.repos.d/vscodium.repo \
+    && dnf -y install codium \
+    && dnf clean all
+
+# =============================================================================
+# 3. NVIDIA proprietary driver + CUDA (amd64 ONLY — reference PC has an
+#    RTX 3070 Ti, see docs/HARDWARE.md)
+#
+#    Technique: RPM Fusion akmod-nvidia + `akmods --force` at IMAGE BUILD time
+#    (the Bazzite/Universal Blue pattern). The kernel module is compiled once
+#    here against the exact kernel shipped in the image and becomes immutable
+#    image content — nothing is ever compiled on user machines.
+#
+#    Honest limits (v0.1):
+#      * The kmod is NOT signed for Secure Boot. With Secure Boot enabled the
+#        module will not load; MOK signing of our kmods is Phase 4
+#        (docs/HARDWARE.md, ROADMAP.md). Test with Secure Boot off until then.
+#      * arm64 images get no NVIDIA layer at all (no supported hardware —
+#        docs/HARDWARE.md).
+#    Skipped when TARGETARCH != amd64 or NVIDIA_ENABLED != 1.
+# =============================================================================
+RUN set -eu; \
+    if [ "${TARGETARCH}" != "amd64" ] || [ "${NVIDIA_ENABLED}" != "1" ]; then \
+        echo "NVIDIA layer skipped (TARGETARCH=${TARGETARCH}, NVIDIA_ENABLED=${NVIDIA_ENABLED})"; \
+        exit 0; \
+    fi; \
+    KERNEL_VERSION="$(rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | tail -n 1)"; \
+    echo "Building NVIDIA kmod for kernel ${KERNEL_VERSION}"; \
+    dnf -y install \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-42.noarch.rpm" \
+        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-42.noarch.rpm"; \
+    dnf -y install --setopt=install_weak_deps=False \
+        akmod-nvidia \
+        xorg-x11-drv-nvidia-cuda \
+        "kernel-devel-${KERNEL_VERSION}"; \
+    akmods --force --kernels "${KERNEL_VERSION}" --kmod nvidia; \
+    find "/usr/lib/modules/${KERNEL_VERSION}" -name 'nvidia*.ko*' | grep -q . \
+        || { echo "FATAL: NVIDIA kmod was not built/installed"; exit 1; }; \
+    dnf clean all
+
+# =============================================================================
+# 4. ollama — local LLM runtime (offline-capable half of the hybrid agent
+#    runtime)
+#
+#    METHOD (chosen deliberately for an OSTree image): extract the official
+#    release archive straight into /usr.
+#      * The upstream install.sh is WRONG for us: it installs to /usr/local
+#        (a symlink into /var on OSTree — content would be dropped from the
+#        image) and mutates the system at install time (creates users,
+#        enables units), which must not happen inside an image build.
+#      * The archive layout (bin/ollama + lib/ollama/*) maps 1:1 onto /usr,
+#        so the binary and its bundled runtime libraries become immutable,
+#        signed image content.
+#    Supply chain: version pinned + sha256 verified BEFORE extraction.
+#    Checksums come from the official sha256sum.txt asset of the GitHub
+#    release v0.31.1 (upstream ships .tar.zst archives; verified 2026-07-03).
+#    Models are runtime state and live under the user's home or
+#    /var/lib/ollama — never in the image.
+# =============================================================================
+ARG OLLAMA_VERSION=0.31.1
+ARG OLLAMA_SHA256_AMD64=d297381efc136451f6fabb9dd644a67f70fe51c16815a0c4a95ff0e327a3afb4
+ARG OLLAMA_SHA256_ARM64=47c82a67e59e060a735d1cb50a2acf020126a3a4be3f6847d5b58b7dd59620b6
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) OLLAMA_SHA256="${OLLAMA_SHA256_AMD64}" ;; \
+        arm64) OLLAMA_SHA256="${OLLAMA_SHA256_ARM64}" ;; \
+        *) echo "FATAL: unsupported TARGETARCH '${TARGETARCH}'"; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/ollama.tar.zst \
+        "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-${TARGETARCH}.tar.zst"; \
+    echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c -; \
+    tar --zstd -xf /tmp/ollama.tar.zst -C /usr; \
+    rm -f /tmp/ollama.tar.zst; \
+    /usr/bin/ollama --version
+
+# =============================================================================
+# 5. AI CLIs via npm — versions PINNED (supply chain)
+#    npm's default global prefix on Fedora is /usr/local — a symlink into
+#    /var on OSTree, i.e. NOT part of the image. Force --prefix=/usr so the
+#    CLIs land in /usr/lib/node_modules with their launchers in /usr/bin.
+#    Shipped CLIs: Claude Code, Claude Agent SDK, Gemini CLI, Codex
+#    (see docs/ARCHITECTURE.md §4.4 and ADR-006).
+# =============================================================================
+RUN npm install -g --prefix=/usr \
+        @anthropic-ai/claude-code@2.1.199 \
+        @anthropic-ai/claude-agent-sdk@0.3.199 \
+        @google/gemini-cli@0.49.0 \
+        @openai/codex@0.142.5 \
+    && npm cache clean --force \
+    && rm -rf /root/.npm
+
+# =============================================================================
+# 6. aider via pip — version PINNED (supply chain)
+#    Same OSTree rationale: `pip install` without --prefix targets /usr/local
+#    (-> /var, dropped from the image), so we install into /usr explicitly.
+#    --break-system-packages is required because Fedora marks its Python as
+#    externally managed (PEP 668); this is acceptable at IMAGE BUILD time —
+#    the result is validated and shipped as one immutable, tested unit, not
+#    mutated on a live system.
+# =============================================================================
+RUN python3 -m pip install --no-cache-dir --prefix=/usr --break-system-packages \
+        aider-chat==0.86.2
+
+# =============================================================================
+# 7. VibeOS overlay — systemd units, presets, sysusers, image identity,
+#    policies, genesis
+#    os/rootfs/ mirrors the image filesystem and is copied verbatim onto /.
+#    Units are enabled via /usr/lib/systemd/system-preset/50-vibeos.preset
+#    (shipped by this COPY) rather than `systemctl enable`: systemd applies
+#    presets automatically on first boot (uninitialized /etc/machine-id),
+#    which is the correct mechanism for image-based systems and keeps the
+#    build free of side effects in /etc. The sysusers.d fragment creates the
+#    vibed user and the vibeos-agents group on first boot.
+# =============================================================================
+COPY os/rootfs/ /
+
+# --- Policy engine defaults ---------------------------------------------------
+# Source of truth lives in security/policy.d/ (owned by the security
+# subsystem). Installed to /etc so local admins can override via the OSTree
+# 3-way /etc merge. vibed loads *.toml from this directory in lexicographic
+# order — first matching rule wins — and FAILS CLOSED (refuses to serve) on
+# any invalid file.
+COPY security/policy.d/*.toml /etc/vibeos/policy.d/
+
+# --- Genesis: first-boot memory creation script ------------------------------
+# Source of truth lives in memory/genesis.sh (owned by the memory subsystem).
+# vibeos-genesis.service (shipped above) runs it once, guarded by
+# ConditionPathExists=!/var/lib/vibeos/memory/.initialized.
+# v0.1: the script creates the memory directory layout in CLEAR TEXT (no
+# cryptsetup/mkfs/mount); LUKS + amnesic tmpfs are Phase 3 (docs/MEMORY.md).
+COPY --chmod=0755 memory/genesis.sh /usr/libexec/vibeos/genesis.sh
+
+# --- PHASE 2 (NOT ACTIVE YET): install vibed from the builder stage ----------
+# COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed
+
+# =============================================================================
+# 8. Finalize: scrub machine-local state, then validate the image
+#    /var must ship empty in a bootc image (it is deploy-time machine state);
+#    dnf/npm/pip/akmods leave caches and logs behind. `bootc container lint`
+#    fails the build on layout violations (content in /var, broken
+#    /usr/local, ...). Keep this as the FINAL step.
+# =============================================================================
+RUN rm -rf /var/cache/* /var/log/* /var/lib/dnf /var/tmp/* /root/.cache \
+    && bootc container lint

@@ -1,0 +1,15 @@
+{
+  "name": "VibeOS",
+  "id": "vibeos",
+  "version": "0.1.0-dev",
+  "variant": "kinoite",
+  "base_image": "quay.io/fedora/fedora-kinoite:42@sha256:7d1e1c6457fe8e2b8c42bcce3bc5b1cc86d2e9346ffb45e2ef3cdd12dc93e258",
+  "image_ref": "ghcr.io/micka420-collab/vibeos",
+  "architectures": ["amd64", "arm64"],
+  "build_date": "2026-07-03",
+  "ai_daemon": "vibed",
+  "mcp_socket": "/run/vibed/mcp.sock",
+  "memory_root": "/var/lib/vibeos/memory",
+  "policy_dir": "/etc/vibeos/policy.d",
+  "homepage": "https://github.com/Micka420-collab/vibeos"
+}

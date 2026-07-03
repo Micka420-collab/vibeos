@@ -1,0 +1,22 @@
+# Rust (vibed)
+vibed/target/
+
+# Build outputs (bootc-image-builder, local ISO/disk images)
+**/*.iso
+output/
+vibeos-out/
+*.qcow2
+*.raw
+
+# Local installer config (contains test credentials — never commit)
+config.toml
+
+# Python
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store
+
+# Local Claude Code session state (machine-specific, never commit)
+.claude/

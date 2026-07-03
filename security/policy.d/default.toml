@@ -1,0 +1,136 @@
+# VibeOS default policy
+# Installed as: /etc/vibeos/policy.d/default.toml (copied into the image by the
+# Containerfile). Loaded by the vibed policy engine.
+#
+# ENGINE SEMANTICS (see README.md in this directory):
+#   * Files in /etc/vibeos/policy.d/ are loaded in lexicographic filename
+#     order; only *.toml files are considered.
+#   * Rules are evaluated in order: the FIRST rule whose `tools` glob matches
+#     the tool name wins, and evaluation stops there.
+#   * No matching rule => DENY. Unknown tool => DENY (absolute default-deny).
+#   * action = "allow" on a T0/T1 rule => allowed, subject to path/service
+#     constraints. action = "allow" on a T2/T3 rule => ALWAYS requires human
+#     approval (the tier is a floor); a T2/T3 allow rule whose `approval` is
+#     not "human" is a LOAD ERROR.
+#   * Any unreadable or invalid *.toml in policy.d makes vibed FAIL CLOSED:
+#     it logs the error and exits non-zero (refuses to serve).
+#
+# BUILT-IN HARD DENYLIST: independently of this file, the engine denies in
+# code, for reads AND writes: /var/lib/vibeos/audit/**, /etc/shadow*,
+# **/.ssh/**, **/.gnupg/**, /proc/*/environ, /run/credentials/**, /boot/** ;
+# and for WRITES only: /etc/vibeos/policy.d/** and /var/lib/vibeos/memory/**.
+# The `denied` lists below mirror it as defense in depth; editing them does
+# NOT re-enable access.
+#
+# Glob syntax: `*` matches within one path segment, `**` matches across
+# segments. Same matcher for tool names and paths.
+#
+# SECURITY INVARIANTS (do not weaken without a threat-model review):
+#   * The implicit and explicit default is DENY.
+#   * Agents can never read the audit trail, and can never write the audit
+#     trail, the memory volume or the policy directory.
+#   * T2/T3 actions always require out-of-band human approval.
+
+schema_version = 1
+
+[meta]
+name = "default"
+description = "Baseline VibeOS policy for the v0.1 tool surface (capability tiers T0-T3)."
+
+# ---------------------------------------------------------------------------
+# Rules — evaluated in order, la premiere regle qui matche gagne.
+# ---------------------------------------------------------------------------
+
+# --- T0: observation --------------------------------------------------------
+
+[[rule]]
+id = "os-status"
+tools = ["os.status"]
+tier = "T0"
+action = "allow"
+reason = "Read-only system introspection; no state change of any kind."
+
+[[rule]]
+id = "fs-read"
+tools = ["fs.read"]
+tier = "T0"
+action = "allow"
+reason = "Read-only file access outside the audit trail, secret stores and key material."
+
+# Mirrors the built-in hard denylist (enforced in code even without this list).
+[rule.paths]
+denied = [
+  "/var/lib/vibeos/audit/**",  # audit trail: agents must never read or probe it
+  "/etc/shadow*",              # /etc/shadow and /etc/shadow- (password hashes)
+  "**/.ssh/**",                # SSH key material, wherever it lives
+  "**/.gnupg/**",              # GnuPG key material, wherever it lives
+  "/proc/*/environ",           # process environments may leak secrets
+  "/run/credentials/**",       # decrypted systemd-creds exposed to services
+  "/boot/**",                  # boot chain is none of the agent's business
+]
+
+# --- T1: user-scope mutation ------------------------------------------------
+
+[[rule]]
+id = "fs-write"
+tools = ["fs.write"]
+tier = "T1"
+action = "allow"
+reason = "Writes are confined to user files under /home (and /var/home, its target on Fedora)."
+
+[rule.paths]
+allowed = [
+  "/home/**",
+  "/var/home/**",  # Fedora: /home is a symlink to /var/home; accept both spellings
+]
+# Defense in depth: these paths can never match `allowed` above, and the
+# built-in denylist blocks them in code anyway. Kept explicit so the
+# invariant stays visible where policies are edited. The memory volume is
+# not writable via fs.write; memory writes will go through memory.append
+# (Phase 2 target).
+denied = [
+  "/var/lib/vibeos/memory/**",
+  "/var/lib/vibeos/audit/**",
+  "/etc/vibeos/policy.d/**",
+]
+
+[[rule]]
+id = "memory-query"
+tools = ["memory.query"]
+tier = "T0"
+action = "allow"
+reason = "Read-only query against the VibeOS memory store."
+
+# --- T2: system-scope mutation (human approval is a hard floor) -------------
+
+[[rule]]
+id = "pkg-install"
+tools = ["pkg.install"]
+tier = "T2"
+action = "allow"
+approval = "human"
+reason = "Package installation requires explicit out-of-band human approval."
+
+[[rule]]
+id = "svc-restart"
+tools = ["svc.restart"]
+tier = "T2"
+action = "allow"
+approval = "human"
+reason = "Service restarts require human approval; security-critical units can never be restarted by agents."
+
+[rule.services]
+denied = [
+  "vibed.service",             # agents must not restart their own warden
+  "systemd-journald.service",  # log pipeline stays out of reach
+  "auditd.service",            # audit pipeline stays out of reach
+]
+
+# --- Catch-all: everything not explicitly allowed above is denied -----------
+
+[[rule]]
+id = "default-deny"
+tools = ["*"]
+tier = "T3"  # informational on a deny rule; the action is what matters
+action = "deny"
+reason = "No policy rule allows this tool. The engine denies unmatched tools even without this rule; it exists so the refusal is explicit and self-documenting in the audit trail."

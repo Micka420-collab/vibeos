@@ -1,0 +1,68 @@
+# vibeos-genesis.service — VibeOS first-boot memory creation ("Genesis")
+#
+# VibeOS ships blank: the machine memory does not exist in the image. On first
+# boot this oneshot runs /usr/libexec/vibeos/genesis.sh (source:
+# memory/genesis.sh) which creates the /var/lib/vibeos/memory directory layout
+# and seed files, then stamps /var/lib/vibeos/memory/.initialized on success.
+# The Condition below guarantees exactly-once semantics.
+#
+# Honest v0.1 status (docs/MEMORY.md is the reference):
+#   * The memory is written IN CLEAR TEXT on /var. LUKS encryption of the
+#     backing volume is Phase 3, provided by crypttab + a systemd mount unit —
+#     never by genesis.sh, which performs no cryptsetup/mkfs/mount.
+#   * Amnesic mode is a Phase 3 target: a systemd generator will mount a tmpfs
+#     on /var/lib/vibeos/memory and inject VIBEOS_MEMORY_MODE=amnesic; the
+#     stamp then never persists, so Genesis re-runs at every boot
+#     (Tails-style). genesis.sh already reads VIBEOS_MEMORY_MODE (no CLI
+#     flag), but no generator ships in v0.1.
+
+[Unit]
+Description=VibeOS Genesis (first-boot machine memory creation)
+Documentation=https://github.com/Micka420-collab/vibeos
+# Exactly-once guard: skipped on every boot after the stamp file exists.
+ConditionPathExists=!/var/lib/vibeos/memory/.initialized
+# The memory mountpoint must be fully mounted before we populate it. In v0.1
+# this resolves to plain /var; from Phase 3 it makes Genesis wait for the
+# dedicated (LUKS or tmpfs) mount on /var/lib/vibeos/memory itself.
+RequiresMountsFor=/var/lib/vibeos/memory
+After=local-fs.target
+# Memory must exist before the user session and before the AI daemon.
+Before=display-manager.service vibed.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/vibeos/genesis.sh
+# v0.1 population is fast (directories + small files); the generous timeout
+# anticipates slower first boots on low-end disks.
+TimeoutStartSec=900
+UMask=0077
+# Surface progress on the console during first boot, and in the journal.
+StandardOutput=journal+console
+StandardError=journal+console
+
+# --- Hardening ------------------------------------------------------------------
+# Hardening is deliberately limited to non-mount-namespace options: from
+# Phase 3 the memory volume (LUKS or amnesic tmpfs) is mounted by systemd
+# BEFORE this unit runs (RequiresMountsFor above), and this unit must observe
+# the real system mount table — a private mount namespace (implied by
+# ProtectSystem=, ProtectHome=, ReadWritePaths=, PrivateTmp=, PrivateDevices=,
+# ...) could hide it or interact badly with late mounts. No DevicePolicy
+# either: the hardware inventory step of genesis.sh (lsblk & friends) needs to
+# inspect block devices.
+NoNewPrivileges=yes
+# Blocks the unit itself from loading modules; kernel auto-load via the kmod
+# helper happens outside the unit and still works.
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

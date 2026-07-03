@@ -1,0 +1,11 @@
+# 50-vibeos.preset — default unit enablement for VibeOS
+#
+# Image-based enablement: systemd applies presets automatically on first boot
+# (when /etc/machine-id is uninitialized), so the build never runs
+# `systemctl enable` and /etc stays free of build-time side effects.
+# Both units carry their own runtime guards:
+#   * vibed.service          ConditionPathExists=/usr/bin/vibed (Phase 2 binary)
+#   * vibeos-genesis.service ConditionPathExists=!/var/lib/vibeos/memory/.initialized
+
+enable vibed.service
+enable vibeos-genesis.service

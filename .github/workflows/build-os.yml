@@ -1,0 +1,194 @@
+# build-os.yml — Build, sign and publish the VibeOS bootc image (multi-arch),
+# and produce the install ISOs.
+#
+# Triggers:
+#   * push on main touching os/**, memory/**, security/** or this file
+#       -> build linux/amd64 + linux/arm64, push the manifest to ghcr.io,
+#          cosign keyless signing of the pushed digest
+#   * push tag v*
+#       -> same, image additionally tagged with the version (tag without the
+#          leading "v"), PLUS the `iso` jobs (one per architecture).
+#          NOTE: GitHub does not evaluate `paths` filters on tag pushes, so a
+#          v* tag always builds regardless of which files changed.
+#   * pull_request touching the same paths
+#       -> build only (NO push, NO signing)
+#   * workflow_dispatch (manual)
+#       -> full build + push + sign + ISO jobs
+#
+# Auth: the built-in GITHUB_TOKEN (permissions: packages: write) — no extra
+# secrets required. Signing is cosign KEYLESS (OIDC via id-token: write) — no
+# key material stored anywhere. The resulting ghcr package is private on first
+# push; make it public in the package settings if desired.
+
+name: build-os
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "os/**"
+      - "memory/**"
+      - "security/**"
+      - ".github/workflows/build-os.yml"
+  pull_request:
+    paths:
+      - "os/**"
+      - "memory/**"
+      - "security/**"
+      - ".github/workflows/build-os.yml"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+  packages: write
+  # Required by cosign keyless signing (OIDC identity token).
+  id-token: write
+
+jobs:
+  build:
+    name: Build multi-arch bootc image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Two full OS trees (amd64 + arm64) + the NVIDIA kmod build need room.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # arm64 layers are built under emulation on the amd64 runner.
+      - name: Install qemu-user-static (arm64 emulation)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: Compute image name and tags (ghcr requires lowercase)
+        id: meta
+        run: |
+          echo "image=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
+          tags="latest ${GITHUB_SHA}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tags="${tags} ${GITHUB_REF_NAME#v}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Context is the REPOSITORY ROOT: os/Containerfile copies os/rootfs/,
+      # security/policy.d/ and memory/genesis.sh. `bootc container lint` runs
+      # as the final build step and fails the job on OSTree layout violations.
+      # `platforms` makes buildah produce a multi-arch manifest list; the
+      # Containerfile receives TARGETARCH and skips the NVIDIA layer on arm64.
+      - name: Build image (buildah, linux/amd64 + linux/arm64)
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ steps.meta.outputs.image }}
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64, linux/arm64
+          containerfiles: os/Containerfile
+          context: .
+
+      - name: Push manifest to ghcr.io
+        if: github.event_name != 'pull_request'
+        id: push
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signing: the signature is bound to this workflow's OIDC
+      # identity and logged in the Rekor transparency log. Verification
+      # instructions live in docs/BUILD.md.
+      - name: Sign pushed image (cosign keyless)
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign sign --yes "${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}"
+
+  iso:
+    name: Build install ISO (${{ matrix.arch }})
+    # ISOs are produced on version tags and on manual dispatch only.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The ISO embeds the whole OS image; the default runner is tight on disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install qemu-user-static (arm64 emulation)
+        if: matrix.arch != 'amd64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      # bootc-image-builder reads root podman's container storage: log in and
+      # pull the freshly pushed per-arch image as root.
+      - name: Log in to ghcr.io (root podman)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull ${{ matrix.arch }} image into root container storage
+        run: |
+          sudo podman pull --arch "${{ matrix.arch }}" "${{ needs.build.outputs.image }}:${{ github.sha }}"
+
+      # Test-only credentials baked into the CI ISO — replace with an SSH key
+      # (customizations.user.key) for anything beyond throwaway VMs.
+      - name: Write installer config
+        run: |
+          cat > config.toml <<'EOF'
+          [[customizations.user]]
+          name = "vibe"
+          password = "changeme"
+          groups = ["wheel"]
+          EOF
+
+      - name: Run bootc-image-builder (--type iso, ${{ matrix.arch }})
+        run: |
+          mkdir -p output
+          sudo podman run --rm --privileged \
+            --security-opt label=type:unconfined_t \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            -v ./config.toml:/config.toml:ro \
+            -v ./output:/output \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type iso \
+            --target-arch "${{ matrix.arch }}" \
+            --config /config.toml \
+            "${{ needs.build.outputs.image }}:${{ github.sha }}"
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibeos-iso-${{ matrix.arch }}
+          path: output/bootiso/*.iso
+          if-no-files-found: error
+          retention-days: 14

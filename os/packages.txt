@@ -1,0 +1,61 @@
+# =============================================================================
+# VibeOS package manifest — MUST stay in strict sync with os/Containerfile.
+# This file is documentation + review surface; the Containerfile is the source
+# of truth executed at build time. One entry per line, grouped exactly like
+# the Containerfile layers. Versions are pinned where the Containerfile pins
+# them (supply chain).
+# Architectures: amd64 + arm64, except the NVIDIA layer (amd64 only).
+# =============================================================================
+
+## [dnf] 1a. Core development toolchain
+git
+gcc
+make
+cmake
+python3
+python3-pip
+nodejs
+npm
+
+## [dnf] 1b. Terminal quality-of-life + plumbing
+ripgrep
+fd-find
+fzf
+tmux
+jq
+htop
+fastfetch
+distrobox
+socat
+zstd
+
+## [dnf] 1c. Virtualization / test tooling (minimal, guest-side only)
+qemu-guest-agent
+virt-what
+
+## [dnf — Microsoft rpm repo] 2. Editor
+code
+
+## [dnf — RPM Fusion] 3. NVIDIA driver + CUDA — amd64 ONLY (docs/HARDWARE.md)
+# Skipped entirely when TARGETARCH != amd64 or NVIDIA_ENABLED != 1.
+# kmod compiled at image build time via `akmods --force`; NOT MOK-signed in
+# v0.1 (Secure Boot signing = Phase 4).
+rpmfusion-free-release-42
+rpmfusion-nonfree-release-42
+akmod-nvidia
+xorg-x11-drv-nvidia-cuda
+kernel-devel
+
+## [binary archive -> /usr] 4. Local LLM runtime
+# Pinned via ARG OLLAMA_VERSION + per-arch sha256 (official sha256sum.txt of
+# the GitHub release) in os/Containerfile.
+ollama==0.31.1
+
+## [npm -g --prefix=/usr] 5. AI CLIs (pinned)
+@anthropic-ai/claude-code@2.1.199
+@anthropic-ai/claude-agent-sdk@0.3.199
+@google/gemini-cli@0.49.0
+@openai/codex@0.142.5
+
+## [pip --prefix=/usr] 6. AI CLIs (Python, pinned)
+aider-chat==0.86.2

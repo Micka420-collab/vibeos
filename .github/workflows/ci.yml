@@ -1,0 +1,152 @@
+# ci.yml — Code-level CI for VibeOS:
+#   * rust        vibed daemon (build + tests + clippy -D warnings). The
+#                 integration test suite loads the shipped policy file
+#                 security/policy.d/default.toml through the REAL parser, so a
+#                 policy/parser mismatch fails this job.
+#   * shellcheck  memory/genesis.sh (first-boot Genesis script)
+#   * policy      quick schema validation of security/policy.d/*.toml with
+#                 Python tomllib (canonical [[rule]] schema: id / tools /
+#                 tier / action / approval), mirroring vibed's fail-closed
+#                 load rules.
+
+name: ci
+
+on:
+  push:
+    paths:
+      - "vibed/**"
+      - "memory/**"
+      - "security/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "vibed/**"
+      - "memory/**"
+      - "security/**"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: vibed — build, test, clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vibed
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Build
+        run: cargo build
+
+      # Includes the integration test that loads the repository's
+      # security/policy.d/default.toml with the real policy engine.
+      - name: Test
+        run: cargo test
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy -- -D warnings
+
+  shellcheck:
+    name: genesis.sh — shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: shellcheck memory/genesis.sh
+        run: shellcheck memory/genesis.sh
+
+  policy:
+    name: policy.d — TOML schema validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Fast structural check (the deep check is the Rust integration test in
+      # the `rust` job, which uses vibed's real parser). Mirrors vibed's
+      # fail-closed load rules: unique rule ids, tools/tier/action required,
+      # and action=allow on T2/T3 requires approval="human" (tier is a floor).
+      - name: Validate security/policy.d/*.toml (tomllib)
+        run: |
+          python3 - <<'EOF'
+          import glob
+          import sys
+          import tomllib
+
+          files = sorted(glob.glob("security/policy.d/*.toml"))
+          if not files:
+              sys.exit("FAIL: no *.toml files under security/policy.d/")
+
+          failed = False
+          for path in files:
+              errors = []
+              try:
+                  with open(path, "rb") as fh:
+                      data = tomllib.load(fh)
+              except tomllib.TOMLDecodeError as exc:
+                  print(f"FAIL {path}: invalid TOML: {exc}")
+                  failed = True
+                  continue
+
+              rules = data.get("rule", [])
+              if not isinstance(rules, list) or not rules:
+                  errors.append("no [[rule]] entries")
+                  rules = []
+
+              seen_ids = set()
+              for idx, rule in enumerate(rules, start=1):
+                  where = f"rule #{idx}"
+                  rid = rule.get("id")
+                  if not isinstance(rid, str) or not rid:
+                      errors.append(f"{where}: missing/invalid string 'id'")
+                  elif rid in seen_ids:
+                      errors.append(f"{where}: duplicate id {rid!r}")
+                  else:
+                      seen_ids.add(rid)
+
+                  tools = rule.get("tools")
+                  if not (isinstance(tools, list) and tools
+                          and all(isinstance(t, str) for t in tools)):
+                      errors.append(f"{where}: 'tools' must be a non-empty array of strings")
+
+                  tier = rule.get("tier")
+                  if tier not in ("T0", "T1", "T2", "T3"):
+                      errors.append(f"{where}: 'tier' must be one of T0..T3 (got {tier!r})")
+
+                  action = rule.get("action")
+                  if action not in ("allow", "deny"):
+                      errors.append(f"{where}: 'action' must be allow|deny (got {action!r})")
+
+                  approval = rule.get("approval", "none")
+                  if approval not in ("none", "human"):
+                      errors.append(f"{where}: 'approval' must be none|human (got {approval!r})")
+
+                  if action == "allow" and tier in ("T2", "T3") and approval != "human":
+                      errors.append(
+                          f"{where}: action=allow with tier {tier} requires "
+                          "approval=\"human\" (load error in vibed)")
+
+              if errors:
+                  failed = True
+                  for err in errors:
+                      print(f"FAIL {path}: {err}")
+              else:
+                  print(f"OK   {path}: {len(rules)} rule(s)")
+
+          sys.exit(1 if failed else 0)
+          EOF

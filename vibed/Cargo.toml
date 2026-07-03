@@ -1,0 +1,25 @@
+[package]
+name = "vibed"
+version = "0.1.0"
+edition = "2021"
+# Minimum supported Rust: the WSL2 Ubuntu dev toolchain ships 1.75.
+# Cargo.lock is COMMITTED (supply-chain pinning, see SECURITY.md) and pins
+# indexmap to 2.5.0 / hashbrown to 0.14.5: newer hashbrown releases require
+# the edition2024 cargo feature, unavailable before Rust 1.85. Do not
+# `cargo update` those two without bumping the toolchain everywhere.
+rust-version = "1.75"
+description = "VibeOS system AI daemon: MCP (JSON-RPC 2.0) server over a unix socket, policy-gated and fully audited"
+license = "Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+lto = true
+strip = true
