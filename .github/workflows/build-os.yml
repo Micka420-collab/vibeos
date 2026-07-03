@@ -54,6 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.cfg.outputs.image }}
+      repo: ${{ steps.cfg.outputs.repo }}
       publish: ${{ steps.cfg.outputs.publish }}
       version: ${{ steps.cfg.outputs.version }}
       matrix: ${{ steps.cfg.outputs.matrix }}
@@ -61,6 +62,9 @@ jobs:
       - name: Compute config
         id: cfg
         run: |
+          # repo = owner/name (no registry) for buildah/push; image = full ref
+          # (with registry) for manifest/iso docker:// references.
+          echo "repo=${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
           echo "image=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
           if [[ "${GITHUB_REF}" == refs/tags/v* || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -105,7 +109,7 @@ jobs:
         id: build
         uses: redhat-actions/buildah-build@v2
         with:
-          image: ${{ needs.setup.outputs.image }}
+          image: ${{ needs.setup.outputs.repo }}
           tags: ${{ github.sha }}-${{ matrix.arch }}
           platforms: ${{ matrix.platform }}
           containerfiles: os/Containerfile
@@ -115,7 +119,8 @@ jobs:
         if: needs.setup.outputs.publish == 'true'
         uses: redhat-actions/push-to-registry@v2
         with:
-          image: ${{ needs.setup.outputs.image }}
+          registry: ${{ env.REGISTRY }}
+          image: ${{ needs.setup.outputs.repo }}
           tags: ${{ github.sha }}-${{ matrix.arch }}
 
   manifest:
