@@ -41,6 +41,8 @@
 
 - **2026-07-03** — **`vibed` branché dans l'image (Phase 2)** : le binaire est **embarqué** (compilé en multi-stage dans `os/Containerfile` → `/usr/bin/vibed`), **`vibed.service` démarre au boot**, **charge et applique la politique** installée (`/etc/vibeos/policy.d/`, 7 règles, fail-closed), **sert le serveur MCP** sur `/run/vibed/mcp.sock` (identité de l'appelant via `SO_PEERCRED`), **audite** sous `/var/lib/vibeos/audit/vibed.jsonl`, et expose l'outil MCP **`memory.query`**. Restent Phase 2 : HUD/quickshell (paquet + autostart), `memory.append` + `scope`/`limit`, outils T1 réels, config MCP côté client. `vibed` tourne encore en **root** (`User=vibed` : Phase 4).
 
+- **2026-07-03** — **Audit de cybersécurité adversarial** (workflow multi-agents, 4 lentilles + vérification) : le cœur du moteur de politique est validé sûr (fail-closed, plancher T2/T3 non abaissable, T2 = refus, pas d'enregistrement dynamique d'outils). **2 failles critiques + 3 hautes corrigées** dans les outils fichiers de vibed (root) : `fs.write` symlink-safe (canonicalisation + `O_NOFOLLOW`) et confiné au home de l'appelant (uid `SO_PEERCRED`), denylist `fs.read` étendue aux secrets (SSH/AWS/kube/NM/gshadow/`/proc/**/environ`), rejet des fichiers spéciaux + lecture bornée (anti-DoS), audit enrichi. 47 tests verts. **Reste (décisions supply-chain)** : épingler les Actions par SHA, désactiver les repos COPR après install + NEVRA, `npm --ignore-scripts` + lockfile, `CapabilityBoundingSet` vide, faire *vérifier* cosign côté client, recaler `SECURITY.md`.
+
 ## 📋 Reste à faire (court terme)
 
 1. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 ; valider NVIDIA sur le PC de référence.
