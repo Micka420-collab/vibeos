@@ -106,6 +106,29 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         virt-what \
     && dnf clean all
 
+# --- 1d. Vibecoding terminal stack (Fedora repos) ----------------------------
+# The curated default terminal experience (see docs/ECOSYSTEM.md). First-run
+# configs ship in /etc/skel (see os/rootfs/etc/skel). These packages are all in
+# the Fedora repositories; COPR/binary tools (ghostty, yazi, lazygit, atuin,
+# mise) are layered separately below. The skel configs guard every tool behind
+# `command -v`, so anything not yet installed degrades gracefully.
+#   fish     interactive shell (bash stays /bin/sh)
+#   neovim   terminal editor, base of the "VibeVim" preset
+#   zoxide   smart directory jumping
+#   bat      cat with syntax highlighting (also fzf/yazi previewer)
+#   eza      modern ls with per-file git status
+#   btop     TUI system monitor with GPU support (ollama inference)
+# NOTE: starship, zellij, ghostty, yazi, lazygit, atuin, mise are NOT in the
+# Fedora repos; they are layered from COPR/binaries below (layer 1e).
+RUN dnf -y install --setopt=install_weak_deps=False \
+        fish \
+        neovim \
+        zoxide \
+        bat \
+        eza \
+        btop \
+    && dnf clean all
+
 # =============================================================================
 # 2. VSCodium — community rpm repository (paulcarroty)
 #    LICENSING: official VS Code binaries are proprietary and NOT redistributable

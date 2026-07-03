@@ -33,6 +33,15 @@ zstd
 qemu-guest-agent
 virt-what
 
+## [dnf] 1d. Vibecoding terminal stack (Fedora repos) — see docs/ECOSYSTEM.md
+fish
+neovim
+zoxide
+bat
+eza
+btop
+# starship, zellij, ghostty, yazi, lazygit, atuin, mise: COPR/binary (layer 1e)
+
 ## [dnf — VSCodium community rpm repo] 2. Editor
 # VS Code binaries are proprietary/non-redistributable; VSCodium is the MIT
 # build (Open VSX marketplace). See docs/ECOSYSTEM.md.
