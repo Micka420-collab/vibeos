@@ -10,7 +10,8 @@
 | **Phase actuelle** | Phase 0 « Fondation » ✅ → Phase 1 « Première ISO » (en cours) |
 | **Version** | 0.1.0-dev (pré-alpha) |
 | **Dépôt GitHub** | [`Micka420-collab/vibeos`](https://github.com/Micka420-collab/vibeos) (privé) ✅ en ligne |
-| **Image OS** | `ghcr.io/micka420-collab/vibeos` (amd64 + arm64) — **build local amd64 vert** ✅ (`bootc lint` : 13 checks OK) |
+| **Image OS** | `ghcr.io/micka420-collab/vibeos` (amd64 + arm64) — **build local + CI amd64 verts** ✅ (`bootc lint` : 13 checks OK) |
+| **ISO** | **`install.iso` amd64 générée** ✅ 5,6 Go, bootable (ISO 9660 / Fedora installer) — copiée dans `F:\VibeOS-ISO\` |
 | **Machine de référence** | Ryzen 7 3700X · RTX 3070 Ti · 16 Go — voir [docs/HARDWARE.md](docs/HARDWARE.md) |
 
 ## ✅ Fait
@@ -28,10 +29,14 @@
 - **2026-07-03** — **Build local amd64 vert** : Containerfile confronté au réel dans WSL2/podman, 3 pièges ostree corrigés en boucle (npm `HOME`→/tmp, aider→**opencode** pour Python 3.13, nettoyage `/run`/`/tmp`) ; **VS Code → VSCodium** (licence). `bootc container lint` : 13 checks OK, 0 warning.
 - **2026-07-03** — **Bureau vibecoding + installateur conçus** (24 fichiers) : [docs/DESKTOP.md](docs/DESKTOP.md) (layout Plasma 6, HUD Quickshell, thème VibeOS Dark), dotfiles `/etc/skel` prêts au 1er boot (fish/Starship/Ghostty/Zellij + preset VibeVim), [docs/INSTALLER.md](docs/INSTALLER.md) + kickstart + logo SVG.
 
+- **2026-07-03** — **Première ISO installable amd64 générée** (bootc-image-builder) : `install.iso` 5,6 Go, bootable (ISO 9660 / installateur Fedora embarquant l'image). A nécessité de porter la RAM de WSL2 à **12 Go + 8 Go swap** (`.wslconfig`) — osbuild OOM à 8 Go. Copiée dans `F:\VibeOS-ISO\` pour test en VM Hyper-V.
+- **2026-07-03** — **build-os amd64 vert en CI** (GitHub Actions, 13 min) : l'image build proprement aussi côté CI. Workflow redécoupé : build amd64 sur push/PR, release multi-arch + cosign + ISO sur tag `v*`.
+- **2026-07-03** — README élevé au niveau pro (hero, badges live, navigation, section expérience vibecoding).
+
 ## 🔄 En cours (aujourd'hui)
 
-- **Génération ISO amd64** : l'ISO s'assemble bien dans WSL2 (le fix rootfs `os/rootfs/usr/lib/bootc/install/00-vibeos.toml` a débloqué le manifeste), mais le 1er essai a été tué en cours d'assemblage — **WSL plafonné à 8 Go de RAM**, osbuild manque de mémoire. Correctif : augmenter la RAM WSL (`.wslconfig` : 12 Go + swap) et relancer ; sinon repli sur la génération **ISO en CI** (tag `v*`, runners mieux dotés) — c'est de toute façon l'environnement de release prévu.
-- **README élevé au niveau pro** (hero, badges live, navigation, expérience vibecoding) ✅.
+- **Câblage de la couche terminal vibecoding** dans `os/Containerfile` (Ghostty, fish, Starship, Zellij, yazi, lazygit, atuin, zoxide, bat, eza, btop, mise, nvim) pour livrer l'expérience de `docs/ECOSYSTEM.md` dans l'image — les dotfiles `/etc/skel` sont déjà en place.
+- **Test de l'ISO en VM Hyper-V** (à faire côté Windows) : boot jusqu'à SDDM + session Plasma 6.
 
 ## 📋 Reste à faire (court terme)
 

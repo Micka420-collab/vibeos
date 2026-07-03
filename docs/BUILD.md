@@ -238,7 +238,21 @@ sudo podman run --rm -it --privileged \
 ```
 
 Résultat : `./output/bootiso/install.iso` (installateur Anaconda embarquant
-l'image — installation possible **hors ligne**).
+l'image — installation possible **hors ligne**). Comptez ~5–6 Go pour une image
+avec l'ensemble des outils.
+
+> ⚠️ **Mémoire** : `osbuild` est gourmand. Avec le plafond WSL2 par défaut
+> (8 Go), le build ISO est **tué par l'OOM** en cours d'assemblage. Allouez
+> **≥ 12 Go de RAM + du swap** à WSL2 via `%UserProfile%\.wslconfig` :
+> ```ini
+> [wsl2]
+> memory=12GB
+> swap=8GB
+> ```
+> puis `wsl --shutdown` avant de relancer. (L'image OS, elle, se construit sans
+> problème à 8 Go — seule l'étape ISO exige cette marge.) En CI, les runners
+> GitHub sont suffisamment dotés : la génération d'ISO y est déclenchée sur
+> tag `v*` / `workflow_dispatch`.
 
 Pour une ISO **arm64** depuis un hôte amd64 (qemu-user-static requis,
 section 2.6) : pull de l'image arm64 (`sudo podman pull --arch arm64 ...` ou
