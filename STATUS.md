@@ -33,10 +33,12 @@
 - **2026-07-03** — **build-os amd64 vert en CI** (GitHub Actions, 13 min) : l'image build proprement aussi côté CI. Workflow redécoupé : build amd64 sur push/PR, release multi-arch + cosign + ISO sur tag `v*`.
 - **2026-07-03** — README élevé au niveau pro (hero, badges live, navigation, section expérience vibecoding).
 
+- **2026-07-03** — **Couche terminal vibecoding livrée dans l'image** : fish, neovim, zoxide, bat, eza, btop, atuin (dépôts Fedora) + starship, zellij, lazygit, ghostty, yazi (COPR) + mise (repo officiel). Les 22 binaires vérifiés présents dans l'image, tous les dotfiles `/etc/skel` en place. Thème **VibeOS Dark** livré (`/usr/share/color-schemes/VibeOSDark.colors`).
+
 ## 🔄 En cours (aujourd'hui)
 
-- **Câblage de la couche terminal vibecoding** dans `os/Containerfile` (Ghostty, fish, Starship, Zellij, yazi, lazygit, atuin, zoxide, bat, eza, btop, mise, nvim) pour livrer l'expérience de `docs/ECOSYSTEM.md` dans l'image — les dotfiles `/etc/skel` sont déjà en place.
-- **Test de l'ISO en VM Hyper-V** (à faire côté Windows) : boot jusqu'à SDDM + session Plasma 6.
+- **Release v0.1.0-dev** : pose du tag `v0.1.0-dev` pour déclencher la CI complète (build multi-arch amd64+arm64 + signature cosign + ISO par architecture en artefacts).
+- **Test de l'ISO en VM Hyper-V** (à faire côté Windows, [F:\VibeOS-ISO\](file:///F:/VibeOS-ISO/)) : boot jusqu'à SDDM + session Plasma 6.
 
 ## 📋 Reste à faire (court terme)
 
