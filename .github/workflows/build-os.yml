@@ -92,7 +92,20 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          # The amd64 image carries the NVIDIA/CUDA layer, so image (~12 GB) +
+          # osbuild work tree + ISO (~6 GB) blow past the runner's default free
+          # space. Reclaim aggressively before building.
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/local/lib/node_modules \
+            /usr/share/swift \
+            /usr/local/.ghcup 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
           df -h /
 
       - name: Log in to ghcr.io
@@ -174,7 +187,20 @@ jobs:
     steps:
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          # The amd64 image carries the NVIDIA/CUDA layer, so image (~12 GB) +
+          # osbuild work tree + ISO (~6 GB) blow past the runner's default free
+          # space. Reclaim aggressively before building.
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/local/lib/node_modules \
+            /usr/share/swift \
+            /usr/local/.ghcup 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
           df -h /
 
       - name: Log in to ghcr.io (root podman)
