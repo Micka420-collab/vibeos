@@ -1,35 +1,104 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  vibeos-logo.svg - VibeOS monogram logo (original work, v0.1)
+  vibeos-logo.svg - VibeOS monogram (original work, v0.2 refined)
 
-  Geometric "V" monogram on the VibeOS Dark palette (Catppuccin Mocha fork,
-  MIT): base #1e1e2e, accent mauve #cba6f7, lavender #b4befe. The pulse line
-  under the V nods to the "vibe": a live signal between human and machine.
+  A folded geometric "V" monogram on the VibeOS Dark palette (Catppuccin Mocha
+  fork, MIT). The V reads as two lit facets meeting at a crease — depth from a
+  flat mark — the left plane mauve, the right plane lavender->sapphire. Behind
+  it, two faint signature focus rings echo the desktop's agent/ring motif; a
+  thin mauve pulse beneath is the "vibe" — a live signal between human & machine.
+
+  Design tokens (docs/DESIGN-SYSTEM.md):
+    - accent Mauve #cba6f7, signature gradient mauve->blue (§7), ring motif (§9)
+    - badge on surface-2 (Base) with a glass top edge highlight (§2.4)
+    - radius family, elevation via a soft cast shadow (§4, §5)
 
   Standalone SVG: no external references, no fonts, no scripts.
-  License: Apache-2.0 (VibeOS repository license). PNG renders are generated
-  from this file - see installer/branding/README.md.
+  Build target (image): /usr/share/pixmaps/vibeos/vibeos-logo.svg
+  License: Apache-2.0 (VibeOS repository). PNG renders are generated from this
+  file - see installer/branding/README.md.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img">
   <title>VibeOS</title>
-  <desc>VibeOS logo: a mauve geometric V monogram with a pulse line, on a dark rounded-square badge.</desc>
+  <desc>VibeOS logo: a folded two-tone mauve-and-lavender geometric V monogram over faint focus rings, with a pulse line, on a dark rounded-square badge.</desc>
 
   <defs>
-    <!-- Mauve to lavender sweep - the VibeOS Dark accent range -->
-    <linearGradient id="vibe-accent" x1="0" y1="0" x2="1" y2="1">
+    <!-- Badge: Base with a subtle top-lit vertical fall -->
+    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#212133"/>
+      <stop offset="1" stop-color="#171723"/>
+    </linearGradient>
+
+    <!-- Soft mauve bloom behind the mark (agent-active glow, restrained) -->
+    <radialGradient id="bloom" cx="0.5" cy="0.46" r="0.5">
+      <stop offset="0"   stop-color="#cba6f7" stop-opacity="0.18"/>
+      <stop offset="0.7" stop-color="#cba6f7" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Signature gradient for the focus rings -->
+    <linearGradient id="grad-signature" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0"   stop-color="#cba6f7"/>
+      <stop offset="0.5" stop-color="#b4befe"/>
+      <stop offset="1"   stop-color="#89b4fa"/>
+    </linearGradient>
+
+    <!-- Left facet: mauve settling to blue toward the crease -->
+    <linearGradient id="v-left" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#8aabf6"/>
+    </linearGradient>
+
+    <!-- Right facet: the lit plane, lavender to sapphire (a touch brighter) -->
+    <linearGradient id="v-right" x1="1" y1="0" x2="0.65" y2="1">
+      <stop offset="0" stop-color="#c3caff"/>
+      <stop offset="1" stop-color="#74c7ec"/>
+    </linearGradient>
+
+    <!-- Pulse: mauve -> lavender accent line -->
+    <linearGradient id="accent-line" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#cba6f7"/>
       <stop offset="1" stop-color="#b4befe"/>
     </linearGradient>
+
+    <!-- Clip everything to the rounded badge -->
+    <clipPath id="badge-clip">
+      <rect x="6" y="6" width="244" height="244" rx="56"/>
+    </clipPath>
   </defs>
 
-  <!-- Badge: VibeOS Dark base with a subtle surface border -->
-  <rect x="2" y="2" width="252" height="252" rx="58" fill="#1e1e2e" stroke="#313244" stroke-width="4"/>
+  <!-- Badge plate + hairline border -->
+  <rect x="6" y="6" width="244" height="244" rx="56" fill="url(#badge)"
+        stroke="#cdd6f4" stroke-opacity="0.10" stroke-width="2"/>
 
-  <!-- Monogram: geometric V -->
-  <path d="M60 62 H98 L128 140 L158 62 H196 L147 178 H109 Z" fill="url(#vibe-accent)"/>
+  <g clip-path="url(#badge-clip)">
+    <!-- Glass top-edge spec highlight -->
+    <path d="M 48 13 Q 128 7 208 13" fill="none"
+          stroke="#ffffff" stroke-opacity="0.12" stroke-width="1.5" stroke-linecap="round"/>
 
-  <!-- Pulse: the vibe signal -->
-  <path d="M74 208 H104 L114 196 L128 220 L140 208 H182"
-        fill="none" stroke="#cba6f7" stroke-width="8"
-        stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Mauve bloom -->
+    <rect x="6" y="6" width="244" height="244" fill="url(#bloom)"/>
+
+    <!-- Signature focus rings (the shared agent/ring motif), behind the mark -->
+    <g fill="none" stroke="url(#grad-signature)" stroke-linecap="round">
+      <circle cx="128" cy="116" r="86" stroke-width="2" stroke-opacity="0.16"/>
+      <circle cx="128" cy="116" r="58" stroke-width="2" stroke-opacity="0.10"/>
+    </g>
+
+    <!-- Cast shadow of the V, for elevation off the plate -->
+    <g fill="#0c0c14" opacity="0.35" transform="translate(0,4)">
+      <path d="M64 70 L128 182 L128 150 L96 70 Z"/>
+      <path d="M192 70 L128 182 L128 150 L160 70 Z"/>
+    </g>
+
+    <!-- The folded V: two facets meeting at the apex crease -->
+    <path d="M64 70 L128 182 L128 150 L96 70 Z"  fill="url(#v-left)"/>
+    <path d="M192 70 L128 182 L128 150 L160 70 Z" fill="url(#v-right)"/>
+    <!-- Crease highlight down the shared apex edge -->
+    <path d="M128 150 L128 182" fill="none" stroke="#ffffff" stroke-opacity="0.22" stroke-width="1.25"/>
+
+    <!-- The vibe pulse: a live signal beneath the mark -->
+    <path d="M74 209 H110 L118 197 L128 217 L138 209 H182"
+          fill="none" stroke="url(#accent-line)" stroke-width="4.5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
 </svg>

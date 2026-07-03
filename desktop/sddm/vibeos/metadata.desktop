@@ -1,0 +1,27 @@
+[SddmGreeterTheme]
+# VibeOS — SDDM greeter theme metadata
+# =============================================================================
+# Target (image build): /usr/share/sddm/themes/vibeos/metadata.desktop
+# Source: desktop/sddm/vibeos/metadata.desktop (COPY-ed into the image).
+# Status: 🛣️ Phase 5 (branding). Activation (set [Theme] Current=vibeos) is a
+# Phase 5 task — see desktop/sddm/README.md.
+# =============================================================================
+Name=VibeOS
+Description=VibeOS login — dark glass card over a mauve→blue aurora, JetBrains Mono clock, signature ring.
+Author=VibeOS
+Copyright=(c) VibeOS contributors
+License=Apache-2.0
+Type=sddm-theme
+Version=0.1
+
+# Qt6 / QML theme (SDDM ≥ 0.20 on Qt6, matching Fedora Kinoite 42).
+QtVersion=6
+MainScript=Main.qml
+ConfigFile=theme.conf
+
+# preview.png is an ASSET TO GENERATE (see desktop/sddm/README.md): a 1x
+# render of Main.qml for the "System Settings → Login Screen (SDDM)" gallery.
+Screenshot=preview.png
+
+Email=
+Website=

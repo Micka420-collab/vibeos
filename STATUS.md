@@ -33,7 +33,8 @@
 - **2026-07-03** — **build-os amd64 vert en CI** (GitHub Actions, 13 min) : l'image build proprement aussi côté CI. Workflow redécoupé : build amd64 sur push/PR, release multi-arch + cosign + ISO sur tag `v*`.
 - **2026-07-03** — README élevé au niveau pro (hero, badges live, navigation, section expérience vibecoding).
 
-- **2026-07-03** — **Couche terminal vibecoding livrée dans l'image** : fish, neovim, zoxide, bat, eza, btop, atuin (dépôts Fedora) + starship, zellij, lazygit, ghostty, yazi (COPR) + mise (repo officiel). Les 22 binaires vérifiés présents dans l'image, tous les dotfiles `/etc/skel` en place. Thème **VibeOS Dark** livré (`/usr/share/color-schemes/VibeOSDark.colors`).
+- **2026-07-03** — **Couche terminal vibecoding livrée dans l'image** : fish, neovim, zoxide, bat, eza, btop, atuin (dépôts Fedora) + starship, zellij, lazygit, ghostty, yazi (COPR) + mise (repo officiel) + polices JetBrains Mono/Fira Code. Les 22 binaires vérifiés présents, tous les dotfiles `/etc/skel` en place.
+- **2026-07-03** — **Système de design « VibeOS » + assets livrés** : [docs/DESIGN-SYSTEM.md](docs/DESIGN-SYSTEM.md) (708 lignes : tokens couleur/surfaces/verre/typo/motion, tiers T0–T3, tendances 2026). Assets embarqués dans l'image (sélectionnables ; activation par défaut = Phase 2) : Global Theme Plasma `org.vibeos.dark`, thème Kvantum, wallpapers originaux (Genesis/Void SVG), thème SDDM, splash Plymouth, HUD Quickshell (singleton `Theme.qml` + composants). Maquette visuelle HTML créée (glassmorphism, HUD agents, gouvernance T0→T3).
 
 ## 🔄 En cours (aujourd'hui)
 

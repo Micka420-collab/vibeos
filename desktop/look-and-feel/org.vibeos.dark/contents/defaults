@@ -1,0 +1,113 @@
+# VibeOS Dark — Global Theme (Look-and-Feel) defaults
+# =====================================================
+# Applied by KDE when the user selects "VibeOS Dark"
+# (System Settings ▸ Colors & Themes ▸ Global Theme) or via:
+#     lookandfeeltool -a org.vibeos.dark
+#
+# Install target (image build, read-only /usr):
+#   /usr/share/plasma/look-and-feel/org.vibeos.dark/contents/defaults
+#
+# HONESTY / PHASE — the whole Global Theme is a Phase 2 deliverable
+# (DESKTOP.md §2.6, §9). In the v0.1 image ONLY the color scheme
+# (VibeOSDark.colors) ships; this package is authored now and copied into the
+# image + activated in Phase 2. Icons/cursors stay Breeze in v0.1 (design
+# system §9) — the VibeOS icon/cursor set is Phase 5.
+#
+# FORMAT — KConfig "defaults" file. Each top-level [file][Group] header names
+# the config file KDE writes into (kdeglobals, plasmarc, kwinrc, kcminputrc,
+# ksplashrc) and the group inside it. Every value maps to a token in
+# docs/DESIGN-SYSTEM.md; nothing here is an arbitrary literal.
+
+# ---- Widget style (QtWidgets apps: Dolphin, Kate, System Settings…) ----------
+[kdeglobals][KDE]
+# Kvantum draws rounded controls (radius family, §4.1) and real blur on the
+# floating chrome only — menus & tooltips = glass-elevated (§6.1). App CONTENT
+# windows stay opaque (design rule: no glass on content, §2/§6).
+# Requires the `kvantum` package (Phase 2, declared in os/Containerfile — a
+# separate track) and the VibeOSDark Kvantum theme
+# (desktop/kvantum/VibeOSDark → /usr/share/Kvantum/VibeOSDark).
+# GRACEFUL FALLBACK: if Kvantum is unavailable, set widgetStyle=Breeze — the
+# color scheme below still fully themes the desktop. "kvantum-dark" is the
+# dark-forcing variant for apps that ignore the palette.
+widgetStyle=kvantum
+# Advertise this package as the active Global Theme.
+LookAndFeelPackage=org.vibeos.dark
+# Keep Breeze's calm, standard motion timing (DESKTOP §2.5; design system §8 —
+# "mouvement intentionnel", no gratuitous animation). 1.0 = Plasma default.
+AnimationDurationFactor=1
+
+# ---- Color scheme (the palette source of truth) ------------------------------
+[kdeglobals][General]
+# Matches [General] Name/ColorScheme in desktop/theme/vibeos-dark.colors
+# (→ /usr/share/color-schemes/VibeOSDark.colors). Accent = Mauve #cba6f7,
+# tiers T0–T3 = Blue/Green/Peach/Red (palette.md §2). Do NOT duplicate the
+# palette here — the .colors file is the single Plasma source.
+ColorScheme=VibeOSDark
+# Crisp text on dark surfaces (design system §15 — legibility first).
+XftHintStyle=hintslight
+XftSubPixel=rgb
+# Fonts — design system §3.1. Sans = Inter (UI/titles), Mono = JetBrains Mono
+# (all technical data). HONESTY: Inter must be packaged in the image
+# (google-inter-fonts, Phase 2/5, os/Containerfile). Until then fontconfig
+# falls back to Noto Sans (shipped, Fedora heritage), so the stack degrades
+# gracefully — the desktop never breaks without Inter (§3.1 "honnêteté typo").
+# Qt6 QFont string fields: family,ptSize,pixelSize,styleHint,weight,italic,
+# underline,strikeout,fixedPitch,rawMode,letterSpacing,wordSpacing,stretch,
+# styleStrategy,capitalization,hinting. 10pt ≈ 13px @96dpi = type-body (§3.2).
+font=Inter,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+fixed=JetBrains Mono,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+menuFont=Inter,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+toolBarFont=Inter,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+# 8pt ≈ 11px = type-caption/type-small (§3.2).
+smallestReadableFont=Inter,8,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+
+# ---- Icons (v0.1: Breeze dark; VibeOS icon set = Phase 5, design §9) ----------
+[kdeglobals][Icons]
+Theme=breeze-dark
+
+# ---- Titlebar font (window manager) ------------------------------------------
+[kdeglobals][WM]
+activeFont=Inter,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+
+# ---- Plasma SVG theme (panel & plasmoid chrome) ------------------------------
+[plasmarc][Theme]
+# "default" (Breeze SVG) follows the active color scheme → Mantle chrome, Mauve
+# accent (surface-1, §2.2). The SIGNATURE glass panel/dock (glass-chrome,
+# §6.1 / §11.3) is layered on top via the Panel Colorizer preset — a Phase 2
+# deliverable, not a custom Plasma theme. Keeping "default" avoids forking
+# Plasma internals (DESKTOP §1: "Plasma n'est pas remplacé, il est habillé").
+name=default
+
+# ---- Window decoration (KWin) ------------------------------------------------
+[kwinrc][org.kde.kdecoration2]
+# Breeze decoration — VibeOS deliberately keeps native window corners/borders
+# (DESKTOP §2.5): the VibeOS radius family (§4.1) applies to surfaces we draw
+# (HUD, cards, SDDM, Plymouth), NOT to KWin window frames.
+library=org.kde.breeze
+theme=Breeze
+# Thin borders (DESKTOP §2.5 "bordures fines"). Titlebar tint comes from the
+# color scheme [WM] block (activeBackground = Mantle 24,24,37).
+BorderSize=Tiny
+BorderSizeAuto=false
+
+# ---- Compositor effects: enable the real glass (blur + background contrast) --
+[kwinrc][Plugins]
+# The four-layer glass (§6) needs KWin's Blur + Background Contrast effects ON
+# so translucent menus/tooltips (Kvantum) and the Panel Colorizer panel/dock
+# actually blur what's behind them. Both are Breeze defaults; pinned here so the
+# Global Theme is self-contained. Users with prefers-reduced-transparency fall
+# back to the opaque equivalents (design §6.2) — glass is a rehaussement, never
+# a legibility dependency.
+blurEnabled=true
+contrastEnabled=true
+
+# ---- Cursor (v0.1: Breeze; VibeOS cursor set = Phase 5) ----------------------
+[kcminputrc][Mouse]
+cursorTheme=breeze_cursors
+
+# ---- Plasma startup splash ---------------------------------------------------
+[ksplashrc][KSplash]
+# Breeze splash in v0.1; the VibeOS splash (matching the Phase 5 Plymouth theme,
+# same Crust #11111b + grad-signature arc, §11.1) is Phase 5 branding.
+Theme=org.kde.breeze.desktop
+Engine=KSplashQML

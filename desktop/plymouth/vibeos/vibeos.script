@@ -1,0 +1,162 @@
+// VibeOS — Plymouth boot splash (script module)
+// =============================================================================
+// Target (image build): /usr/share/plymouth/themes/vibeos/vibeos.script
+//   alongside the assets: mark.png, ring.png, wordmark.png (see README).
+// Source: desktop/plymouth/vibeos/vibeos.script (COPY-ed into the image).
+//
+// STATUS — 🛣️ Phase 5 (branding). Original artwork: the mark, the ring and the
+// motion are drawn for VibeOS, not copied from any existing theme (the
+// adi1090x pack is explicitly rejected for unclear asset provenance —
+// docs/DESKTOP.md §5.4).
+//
+// DESIGN — docs/DESIGN-SYSTEM.md §11.1 (Boot). The boot is "the first chord of
+// the score": Crust backdrop (never pure #000), a calm breathing mark, a thin
+// mauve→blue signature ring — the SAME Crust and the SAME signature gradient the
+// login card (§11.2) will show a moment later. Minimal, but in key.
+//
+// GRACEFUL DEGRADATION — if the PNG assets are missing, GetWidth() is 0 and the
+// corresponding sprites simply stay invisible: the splash falls back to the bare
+// gradient backdrop instead of erroring. Honesty rule, applied to boot.
+// =============================================================================
+
+// ---- palette (0..1 floats; source: DESIGN-SYSTEM §2) -----------------------
+// Crust  #11111b -> (17,17,27)/255
+// #16161f (grad-void top) -> (22,22,31)/255  — a barely-there vertical lift
+crust_r = 0.0667; crust_g = 0.0667; crust_b = 0.1059;
+top_r   = 0.0863; top_g   = 0.0863; top_b   = 0.1216;
+
+// text-tertiary Subtext0 #a6adc8 and text-muted Overlay1 #7f849c (status/prompt)
+sub_r = 0.6510; sub_g = 0.6784; sub_b = 0.7843;
+mut_r = 0.4980; mut_g = 0.5176; mut_b = 0.6118;
+txt_r = 0.8039; txt_g = 0.8392; txt_b = 0.9569;   // text-primary #cdd6f4
+
+// ---- backdrop: subtle vertical Crust (grad-void, §7) -----------------------
+Window.SetBackgroundTopColor(top_r, top_g, top_b);
+Window.SetBackgroundBottomColor(crust_r, crust_g, crust_b);
+
+screen_w = Window.GetWidth();
+screen_h = Window.GetHeight();
+cx = Window.GetX() + screen_w / 2;
+cy = Window.GetY() + screen_h / 2;
+
+// ---- assets (see desktop/plymouth/README.md "assets to generate") ----------
+mark_image = Image("mark.png");        // central glyph, Text #cdd6f4, ~128px
+ring_image = Image("ring.png");        // signature ring stroke (mauve→blue), ~200px
+word_image = Image("wordmark.png");    // "VibeOS" wordmark, faint (optional)
+
+// central mark — breathes (opacity oscillates)
+mark = Sprite();
+mark.SetImage(mark_image);
+mark.SetX(cx - mark_image.GetWidth() / 2);
+mark.SetY(cy - mark_image.GetHeight() / 2);
+mark.SetZ(10);
+
+// signature ring — rotates slowly (re-imaged each frame)
+ring = Sprite();
+ring.SetImage(ring_image);
+ring.SetZ(5);
+
+// wordmark — static, faint, below the mark (guarded if the asset is absent)
+word_w = word_image.GetWidth();
+if (word_w > 0)
+  {
+    word = Sprite();
+    word.SetImage(word_image);
+    word.SetX(cx - word_w / 2);
+    word.SetY(cy + 92);
+    word.SetZ(10);
+    word.SetOpacity(0.55);
+  }
+
+// prompt / entry / message sprites (created up front, revealed on demand)
+prompt_sprite  = Sprite();  prompt_sprite.SetOpacity(0);  prompt_sprite.SetZ(20);
+entry_sprite   = Sprite();  entry_sprite.SetOpacity(0);   entry_sprite.SetZ(20);
+message_sprite = Sprite();  message_sprite.SetOpacity(0); message_sprite.SetZ(20);
+
+// ---- animation state -------------------------------------------------------
+tick = 0;          // refresh ticks (~50/sec)
+progress = 0;      // boot progress 0..1
+
+// ---- per-frame refresh -----------------------------------------------------
+fun refresh ()
+  {
+    tick = tick + 1;
+    t = tick / 50;                                   // seconds-ish
+
+    // Breathing mark: opacity 0.72 .. 1.0 on a slow ~2.4s cycle. Calm, causal
+    // motion only (§8.3) — never a fast blink.
+    breath = 0.72 + 0.28 * (0.5 + 0.5 * Math.Sin(t * 2.6));
+    mark.SetOpacity(breath);
+
+    // Signature ring: slow constant spin, gently accelerated by boot progress,
+    // so the sweep reads as "advancing" without a gaudy percentage bar (§11.1).
+    angle = t * 0.9 + progress * 3.0;                // radians
+    rotated = ring_image.Rotate(angle);
+    ring.SetImage(rotated);
+    ring.SetX(cx - rotated.GetWidth() / 2);
+    ring.SetY(cy - rotated.GetHeight() / 2);
+    // Ring fades up during early boot, then holds — subtle, not decorative.
+    ring.SetOpacity(0.35 + 0.45 * progress);
+  }
+Plymouth.SetRefreshFunction(refresh);
+
+// ---- boot progress ---------------------------------------------------------
+fun on_boot_progress (duration, prog)
+  {
+    progress = prog;                                 // 0..1
+  }
+Plymouth.SetBootProgressFunction(on_boot_progress);
+
+// ---- disk unlock / question prompt (LUKS) ----------------------------------
+// Rendered as text (initramfs ships a usable font). A dedicated bullet asset can
+// replace the "•" glyphs later for pixel-crisp dots — see README.
+fun display_password (prompt, bullets)
+  {
+    label = prompt;
+    if (label == "")
+      label = "Déverrouillage du disque";
+
+    p = Image.Text(label, sub_r, sub_g, sub_b);      // text-tertiary
+    prompt_sprite.SetImage(p);
+    prompt_sprite.SetX(cx - p.GetWidth() / 2);
+    prompt_sprite.SetY(cy + 148);
+    prompt_sprite.SetOpacity(1);
+
+    dots = "";
+    i = 0;
+    while (i < bullets)
+      {
+        dots = dots + "•";
+        i = i + 1;
+      }
+    e = Image.Text(dots, txt_r, txt_g, txt_b);       // text-primary
+    entry_sprite.SetImage(e);
+    entry_sprite.SetX(cx - e.GetWidth() / 2);
+    entry_sprite.SetY(cy + 176);
+    entry_sprite.SetOpacity(1);
+  }
+Plymouth.SetDisplayPasswordFunction(display_password);
+
+// ---- normal / progress display: hide any prompt UI -------------------------
+fun display_normal ()
+  {
+    prompt_sprite.SetOpacity(0);
+    entry_sprite.SetOpacity(0);
+  }
+Plymouth.SetDisplayNormalFunction(display_normal);
+
+// ---- boot messages (fsck, service status) — muted line, bottom of screen ---
+fun display_message (text)
+  {
+    if (text == "")
+      {
+        message_sprite.SetOpacity(0);
+        return;
+      }
+    m = Image.Text(text, mut_r, mut_g, mut_b);       // text-muted (non-essential)
+    message_sprite.SetImage(m);
+    message_sprite.SetX(cx - m.GetWidth() / 2);
+    message_sprite.SetY(screen_h - 64);
+    message_sprite.SetOpacity(1);
+  }
+Plymouth.SetMessageFunction(display_message);

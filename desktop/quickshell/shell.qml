@@ -1,88 +1,86 @@
 // VibeOS HUD — Quickshell root (launch with: quickshell -c vibeos)
 //
-// A thin, always-visible top bar layered ON TOP of KDE Plasma 6 (it never
-// replaces the Plasma panel). It answers three questions at a glance:
-//   1. which agents are working, and at what policy tier (AgentStatus)
-//   2. is a T2/T3 action waiting for human approval (PolicyTierIndicator lock)
-//   3. what is the local model / VRAM doing (OllamaGauge)
+// THE signature surface of VibeOS: a slim, frosted-glass top bar layered ON TOP
+// of KDE Plasma 6 (it never replaces the Plasma panel — DESKTOP.md §2.4). It is
+// the vitrine of the design system: glass, tiers, the Mauve accent, mono data and
+// measured motion, all sourced from Theme.* (DESIGN-SYSTEM.md §11.4). It answers
+// three questions at a glance — the vibecoding triptych:
+//   1. WHO is working, at what policy tier            -> AgentStatus
+//   2. Is a T2/T3 action WAITING for me               -> global state + tier locks
+//   3. What is local inference doing (model / VRAM)   -> OllamaGauge
 //
 // ---------------------------------------------------------------------------
-// DATA SOURCE — read this before touching anything
+// DATA SOURCE — read this before touching anything (honesty rule)
 // ---------------------------------------------------------------------------
-// v0.1 (this file, shipped): every value below comes from the MOCK functions
-// in vibed_client.js. `vibedOnline` is hardwired to false because in Phase 1
-// /usr/bin/vibed is not in the image yet. The HUD must render a clean
-// "daemon offline" state — never crash, never show fake "live" data.
+// v0.1 (this file, shipped): every value comes from the MOCK functions in
+// vibed_client.js. `vibedOnline` is hardwired false — in Phase 1 /usr/bin/vibed
+// is not in the image yet. The HUD MUST render a clean "daemon offline" state:
+// never crash, never show fake "live" data (DESKTOP.md §6, graceful degradation).
 //
 // TODO(Phase 2): replace the mocks with a real client on the vibed MCP socket
-// /run/vibed/mcp.sock (line-delimited JSON-RPC 2.0, one JSON object per line,
-// exactly the transport of vibed/src/mcp.rs). Intended wiring, kept here as
-// the reference sketch:
+// /run/vibed/mcp.sock (line-delimited JSON-RPC 2.0, one object per line — exactly
+// the transport of vibed/src/mcp.rs). Reference wiring sketch:
 //
 //   import Quickshell.Io
-//
 //   Socket {
 //       id: vibedSocket
-//       path: "/run/vibed/mcp.sock"          // root:vibeos-agents 0660 —
-//       connected: true                       // session user must be in the
-//       parser: SplitParser {                 // vibeos-agents group
-//           onRead: line => root.handleVibedLine(line)
-//       }
+//       path: "/run/vibed/mcp.sock"          // root:vibeos-agents 0660 — session
+//       connected: true                       // user must be in vibeos-agents group
+//       parser: SplitParser { onRead: line => root.handleVibedLine(line) }
 //       onConnectionStateChanged: {
 //           root.vibedOnline = connected
-//           if (connected) {
-//               write(Vibed.initializeRequest())
-//               write(Vibed.initializedNotification())
-//           }
+//           if (connected) { write(Vibed.initializeRequest()); write(Vibed.initializedNotification()) }
 //       }
 //   }
-//   Timer { // poll T0 tools; both are read-only, allow-by-default tier T0
+//   Timer { // poll the two T0 read-only tools; the HUD is strictly an observer
 //       interval: 5000; running: root.vibedOnline; repeat: true
 //       onTriggered: {
 //           vibedSocket.write(Vibed.toolsCallRequest("os.status", {}))
 //           vibedSocket.write(Vibed.toolsCallRequest("memory.query", { query: "" }))
 //       }
 //   }
-//   (plus a reconnect timer while offline — degradation must stay graceful)
+//   (+ a reconnect timer while offline — degradation must stay graceful)
 //
-// The exact request/response shapes live in vibed_client.js and MUST stay in
-// sync with vibed/src/mcp.rs.
+// Request/response shapes live in vibed_client.js and MUST stay in sync with
+// vibed/src/mcp.rs.
+//
+// Install target (image build, read-only at runtime):
+//   /usr/share/vibeos/quickshell/shell.qml
 // ---------------------------------------------------------------------------
 
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Shapes
 import Quickshell
 import "vibed_client.js" as Vibed
 
 ShellRoot {
     id: root
 
-    // ----- VibeOS Dark palette (fork of Catppuccin Mocha, MIT) -----
-    readonly property color colBase: "#1e1e2e"
-    readonly property color colMantle: "#181825"
-    readonly property color colSurface: "#313244"
-    readonly property color colText: "#cdd6f4"
-    readonly property color colMuted: "#a6adc8"
-    readonly property color colAccent: "#cba6f7"
-    readonly property color colGood: "#a6e3a1"
-    readonly property color colOffline: "#7f849c"
-
-    // ----- HUD state (v0.1: MOCK — see header comment for Phase 2) -----
+    // ----- HUD state (v0.1: MOCK — see header for Phase 2) -----
     // Hardwired offline in v0.1: honest about Phase 1 (no /usr/bin/vibed).
-    // Design preview only: flip to true to see the mocked "online" layout
-    // (agent chips, memory pill, load). Never ship it as true.
+    // DESIGN PREVIEW ONLY: flip to true to see the mocked "online" layout
+    // (agent chips, tier pills, gauges). Never ship it as true.
     property bool vibedOnline: false
-    property var osStatus: Vibed.mockOsStatus()
+    property var osStatus:    Vibed.mockOsStatus()
     property var memoryStatus: Vibed.mockMemoryQuery()
-    property var agents: Vibed.mockAgents()
-    property var ollama: Vibed.mockOllama()
+    property var agents:      Vibed.mockAgents()
+    property var ollama:      Vibed.mockOllama()
+
+    // Derived global state (DESIGN-SYSTEM §11.4 "État global"):
+    //   offline (gray) -> ready -> agents active (mauve) -> approval waiting (peach pulse).
+    readonly property int activeAgents: vibedOnline && agents ? agents.length : 0
+    readonly property bool anyAwaiting: {
+        if (!vibedOnline || !agents) return false
+        for (var i = 0; i < agents.length; ++i)
+            if (agents[i].awaitingApproval === true && agents[i].tier >= 2) return true
+        return false
+    }
 
     // v0.1 demo heartbeat: refreshes the mocks so the prototype feels alive.
     // Purely cosmetic; deleted when the Phase 2 socket wiring lands.
     Timer {
-        interval: 5000
-        running: true
-        repeat: true
+        interval: 5000; running: true; repeat: true
         onTriggered: {
             root.osStatus = Vibed.mockOsStatus()
             root.memoryStatus = Vibed.mockMemoryQuery()
@@ -93,74 +91,163 @@ ShellRoot {
 
     // TODO(Phase 2): parse incoming socket lines here.
     // function handleVibedLine(line) {
-    //     const msg = Vibed.parseLine(line)
-    //     if (!msg) return
-    //     ... route by msg.id to os.status / memory.query state updates,
-    //     using Vibed.parseToolResult(msg) to unwrap the MCP content envelope.
+    //     const msg = Vibed.parseLine(line); if (!msg) return
+    //     const res = Vibed.parseToolResult(msg)   // { tool, ok, data|error }
+    //     if (!res.ok) return                       // policy denial/error -> keep last good state
+    //     if (res.tool === "os.status")    root.osStatus = res.data
+    //     if (res.tool === "memory.query") root.memoryStatus = res.data
     // }
 
     PanelWindow {
         id: bar
 
-        // Top edge, full width. The Plasma panel keeps its own edge; the HUD
-        // is an additional strut-reserving layer, not a replacement.
-        anchors {
-            top: true
-            left: true
-            right: true
-        }
-        implicitHeight: 34
+        // Top edge, full width. The Plasma panel keeps its own edge; the HUD is
+        // an additional strut-reserving layer, not a replacement (DESKTOP §2.4).
+        anchors { top: true; left: true; right: true }
+        // Window is a touch taller than the visible bar: the extra transparent
+        // band lets the elevation shadow bleed over the content below.
+        implicitHeight: Theme.barHeight + Theme.barShadowPad
+        exclusiveZone: Theme.barHeight
         color: "transparent"
 
+        // ---- Elevation shadow: soft gradient bleeding below the glass bar ----
         Rectangle {
-            anchors.fill: parent
-            color: root.colMantle    // chrome = Mantle (palette.md §4)
-            // subtle bottom hairline so the bar reads as a distinct layer
-            Rectangle {
-                anchors.bottom: parent.bottom
-                width: parent.width
-                height: 1
-                color: root.colSurface
+            anchors { top: barSurface.bottom; left: parent.left; right: parent.right }
+            height: Theme.barShadowPad
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: Theme.shadow2 }
+                GradientStop { position: 1.0; color: "transparent" }
             }
+        }
+
+        // ---- The frosted-glass bar surface (glass-panel: Crust 66% + blur-heavy) ----
+        // Real backdrop blur is applied by KWin behind this translucent layer
+        // surface; opaque fallback under reduced-transparency (DESIGN-SYSTEM §6.2).
+        Rectangle {
+            id: barSurface
+            anchors { top: parent.top; left: parent.left; right: parent.right }
+            height: Theme.barHeight
+            color: Theme.reducedTransparency ? Theme.surface_1 : Theme.glassPanelBg
+
+            // specular top arris (1px highlight) + hairline bottom edge (glass, §2.4)
+            Rectangle { anchors { top: parent.top; left: parent.left; right: parent.right }
+                        height: 1; color: Theme.glassEdgeTop }
+            Rectangle { anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+                        height: 1; color: Theme.hairline }
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
-                spacing: 14
+                anchors.leftMargin: Theme.space4
+                anchors.rightMargin: Theme.space4
+                spacing: Theme.space3
 
-                // ----- wordmark -----
-                Text {
-                    text: "VibeOS"
-                    color: root.colAccent
-                    font.bold: true
-                    font.pixelSize: 13
-                }
+                // ===== LEFT: brand + global state =====
 
-                // ----- daemon status pill (graceful-degradation anchor) -----
-                Rectangle {
-                    implicitWidth: daemonRow.implicitWidth + 16
-                    implicitHeight: 20
-                    radius: 10
-                    color: root.colSurface
-                    Row {
-                        id: daemonRow
-                        anchors.centerIn: parent
-                        spacing: 6
-                        Rectangle {
-                            width: 8; height: 8; radius: 4
-                            anchors.verticalCenter: parent.verticalCenter
-                            color: root.vibedOnline ? root.colGood : root.colOffline
-                        }
-                        Text {
-                            text: root.vibedOnline ? "vibed" : "vibed hors ligne"
-                            color: root.vibedOnline ? root.colText : root.colMuted
-                            font.pixelSize: 11
+                // ---- Brand mark: signature ring (Mauve->Blue annulus) ----
+                Item {
+                    id: brand
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: 14; implicitHeight: 14
+                    Shape {
+                        anchors.fill: parent
+                        preferredRendererType: Shape.CurveRenderer
+                        antialiasing: true
+                        ShapePath {
+                            fillRule: ShapePath.OddEvenFill
+                            strokeWidth: -1
+                            fillGradient: LinearGradient {
+                                x1: 0; y1: 0; x2: brand.width; y2: brand.height
+                                GradientStop { position: 0.0; color: Theme.mauve }
+                                GradientStop { position: 1.0; color: Theme.blue }
+                            }
+                            PathAngleArc { centerX: brand.width / 2; centerY: brand.height / 2
+                                radiusX: brand.width / 2; radiusY: brand.height / 2
+                                startAngle: 0; sweepAngle: 360; moveToStart: true }
+                            PathAngleArc { centerX: brand.width / 2; centerY: brand.height / 2
+                                radiusX: brand.width / 2 - 2.5; radiusY: brand.height / 2 - 2.5
+                                startAngle: 0; sweepAngle: 360; moveToStart: true }
                         }
                     }
                 }
 
-                // ----- agents + policy tiers -----
+                // ---- Wordmark ----
+                Text {
+                    Layout.alignment: Qt.AlignVCenter
+                    text: "VibeOS"
+                    color: Theme.mauve
+                    font.family: Theme.fontSans
+                    font.pixelSize: Theme.fsBody + 1
+                    font.weight: Theme.weightSemibold
+                    font.letterSpacing: -0.2
+                }
+
+                // ---- Global state pill (offline / ready / active / awaiting) ----
+                Rectangle {
+                    id: statePill
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: stateRow.implicitWidth + Theme.space3
+                    implicitHeight: Theme.rowControl
+                    radius: Theme.radiusFull
+                    color: Theme.surface_3
+                    border.width: 1
+                    border.color: Theme.hairline
+
+                    // state colour: gray -> mauve (active) -> peach (awaiting)
+                    readonly property color stateColor: !root.vibedOnline ? Theme.tierOffline
+                                                      : root.anyAwaiting ? Theme.peach
+                                                      : root.activeAgents > 0 ? Theme.mauve
+                                                      : Theme.overlay2
+
+                    // Slow attention pulse only when an approval is waiting (§8.3).
+                    property real pulse: 1.0
+                    SequentialAnimation on pulse {
+                        running: root.anyAwaiting && !Theme.reducedMotion
+                        loops: Animation.Infinite
+                        NumberAnimation { from: 1.0; to: 0.5; duration: Theme.durPulse / 2
+                            easing.type: Easing.Bezier; easing.bezierCurve: Theme.easeStandard }
+                        NumberAnimation { from: 0.5; to: 1.0; duration: Theme.durPulse / 2
+                            easing.type: Easing.Bezier; easing.bezierCurve: Theme.easeStandard }
+                    }
+
+                    Row {
+                        id: stateRow
+                        anchors.centerIn: parent
+                        spacing: Theme.space2
+
+                        // status dot + soft bloom when active/awaiting
+                        Item {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 8; height: 8
+                            Rectangle {  // bloom
+                                anchors.centerIn: parent
+                                width: 14; height: 14; radius: 7
+                                color: statePill.stateColor
+                                visible: root.vibedOnline && (root.anyAwaiting || root.activeAgents > 0)
+                                opacity: Theme.reducedMotion ? 0.3 : (statePill.pulse - 0.5) * 0.6
+                            }
+                            Rectangle {  // dot
+                                anchors.centerIn: parent
+                                width: 8; height: 8; radius: 4
+                                color: statePill.stateColor
+                            }
+                        }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: !root.vibedOnline ? "vibed hors ligne"
+                                : root.anyAwaiting ? "approbation requise"
+                                : root.activeAgents > 0 ? (root.activeAgents + " agents actifs")
+                                : "prêt"
+                            color: !root.vibedOnline ? Theme.textMuted : Theme.textSecondary
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.fsMonoSm
+                        }
+                    }
+                }
+
+                // ---- hairline divider ----
+                Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 16; color: Theme.hairline }
+
+                // ===== CENTRE: agents (fills the bar) =====
                 AgentStatus {
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
@@ -168,53 +255,63 @@ ShellRoot {
                     online: root.vibedOnline
                 }
 
-                // ----- ollama / GPU gauge -----
+                // ---- hairline divider ----
+                Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 16; color: Theme.hairline }
+
+                // ===== RIGHT: resources (ollama + memory + load) =====
                 OllamaGauge {
                     Layout.alignment: Qt.AlignVCenter
                     ollama: root.ollama
                 }
 
-                // ----- memory pill (memory.query, T0) -----
-                Rectangle {
-                    implicitWidth: memRow.implicitWidth + 16
-                    implicitHeight: 20
-                    radius: 10
-                    color: root.colSurface
-                    Row {
-                        id: memRow
-                        anchors.centerIn: parent
-                        spacing: 6
-                        Text {
-                            text: "mem"
-                            color: root.colMuted
-                            font.pixelSize: 11
-                        }
-                        Text {
-                            // memory.query result: { initialized, scanned_files }
-                            // Offline => "—" (never pretend to know).
-                            text: !root.vibedOnline ? "—"
-                                : (root.memoryStatus && root.memoryStatus.initialized
-                                    ? root.memoryStatus.scanned_files + " fichiers"
-                                    : "non initialisée")
-                            color: root.colText
-                            font.pixelSize: 11
-                        }
+                Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 16; color: Theme.hairline }
+
+                // memory (memory.query, T0) — "—" offline, never a fake count
+                Column {
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 1
+                    Text {
+                        text: "MÉMOIRE"
+                        color: Theme.textMuted
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fsCaption - 1
+                        font.weight: Theme.weightMedium
+                        font.letterSpacing: 0.6
+                    }
+                    Text {
+                        text: !root.vibedOnline ? "—"
+                            : (root.memoryStatus && root.memoryStatus.initialized
+                                ? (root.memoryStatus.scanned_files + " fichiers")
+                                : "non initialisée")
+                        color: root.vibedOnline ? Theme.textSecondary : Theme.textMuted
+                        font.family: Theme.fontMono
+                        font.pixelSize: Theme.fsMonoSm
                     }
                 }
 
-                // ----- system load (os.status, T0) -----
-                Text {
-                    // os.status result: { loadavg_1_5_15: ["0.42", ...], ... }
-                    text: {
-                        if (!root.vibedOnline)
-                            return "load —"
-                        const s = root.osStatus
-                        return (s && s.loadavg_1_5_15 && s.loadavg_1_5_15.length > 0)
-                            ? "load " + s.loadavg_1_5_15[0]
-                            : "load —"
+                // system load (os.status, T0) — "—" offline
+                Column {
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 1
+                    Text {
+                        text: "CHARGE"
+                        color: Theme.textMuted
+                        font.family: Theme.fontSans
+                        font.pixelSize: Theme.fsCaption - 1
+                        font.weight: Theme.weightMedium
+                        font.letterSpacing: 0.6
                     }
-                    color: root.colMuted
-                    font.pixelSize: 11
+                    Text {
+                        text: {
+                            if (!root.vibedOnline) return "—"
+                            const s = root.osStatus
+                            return (s && s.loadavg_1_5_15 && s.loadavg_1_5_15.length > 0)
+                                ? s.loadavg_1_5_15[0] : "—"
+                        }
+                        color: root.vibedOnline ? Theme.textSecondary : Theme.textMuted
+                        font.family: Theme.fontMono
+                        font.pixelSize: Theme.fsMonoSm
+                    }
                 }
             }
         }

@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  VibeOSDark.svg — Kvantum SVG atlas for the VibeOS Dark widget theme
+  ==================================================================
+  Install target (image build, read-only /usr):
+    /usr/share/Kvantum/VibeOSDark/VibeOSDark.svg   (pairs with VibeOSDark.kvconfig)
+
+  WHAT THIS FILE IS
+  Kvantum renders every widget by 9-slicing named rectangles out of this atlas.
+  For a frame group NAME in status STATUS, Kvantum looks up these element ids:
+    NAME-STATUS-topleft   NAME-STATUS-top     NAME-STATUS-topright
+    NAME-STATUS-left      NAME-STATUS         NAME-STATUS-right      (center = NAME-STATUS)
+    NAME-STATUS-bottomleft NAME-STATUS-bottom NAME-STATUS-bottomright
+  STATUS ∈ { normal, focused, pressed, toggled, disabled }. The kvconfig maps
+  widgets → groups (frame.element / interior.element), e.g. button, lineedit,
+  frame, menu, tooltip, progress, scrollbarslider, slidercursor, focus.
+
+  STATUS / PHASE — DOCUMENTED PLACEHOLDER.
+  This atlas is a SKELETON: it defines the design tokens (below), a legend, and
+  ONE complete element group ("button", normal + focused) as a worked example so
+  the naming/geometry is unambiguous. The full atlas (every group × every status
+  × 9 slices, pixel-tuned) is a Phase 5 branding deliverable. The kvconfig
+  (VibeOSDark.kvconfig) is the source of truth for geometry/opacity/palette;
+  this file supplies the vector corners. Until the full atlas ships, unmapped
+  widgets fall back to Kvantum's built-in default rendering against this palette.
+
+  RADIUS-TOKEN to ELEMENT MAP (design system §4.1)
+    radius-sm  6px  → tooltip, chip, compact button
+    radius-md 10px  → button, lineedit, combobox, spinbox, standard control
+    radius-lg 14px  → frame/card, menu, popover, selectable list row
+  PALETTE (design system §2.1, Catppuccin Mocha verbatim; accent = Mauve #cba6f7)
+    Crust #11111b · Mantle #181825 · Base #1e1e2e · Surface0 #313244
+    Surface1 #45475a · Surface2 #585b70 · Text #cdd6f4 · Mauve #cba6f7 (accent)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320" viewBox="0 0 480 320">
+  <title>VibeOS Dark — Kvantum atlas (placeholder skeleton)</title>
+  <desc>Design-token legend plus the "button" element group (normal + focused) as
+  a worked example. Full 9-slice art for all widgets is a Phase 5 deliverable.</desc>
+
+  <defs>
+    <!-- grad-signature (§7): Mauve → Blue. Accent fills / active states. -->
+    <linearGradient id="grad-signature" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#89b4fa"/>
+    </linearGradient>
+    <!-- Soft edge for the focus ring (glow-focus, §5). -->
+    <linearGradient id="mauve-soft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#cba6f7" stop-opacity="0.60"/>
+      <stop offset="1" stop-color="#cba6f7" stop-opacity="0.16"/>
+    </linearGradient>
+  </defs>
+
+  <!-- ===================== LEGEND (documentation only) ===================== -->
+  <g id="legend" font-family="JetBrains Mono, monospace" font-size="11">
+    <rect x="0" y="0" width="480" height="320" fill="#11111b"/>
+    <text x="16" y="24" fill="#cba6f7" font-size="13" font-weight="600">VibeOS Dark · Kvantum atlas (placeholder)</text>
+
+    <!-- radius-sm 6px : tooltip / chip -->
+    <rect x="16"  y="44" width="120" height="40" rx="6"  fill="#181825" stroke="#cdd6f4" stroke-opacity="0.12"/>
+    <text x="20"  y="100" fill="#a6adc8">radius-sm 6 · tooltip</text>
+
+    <!-- radius-md 10px : control -->
+    <rect x="152" y="44" width="120" height="40" rx="10" fill="#313244" stroke="#cdd6f4" stroke-opacity="0.12"/>
+    <text x="156" y="100" fill="#a6adc8">radius-md 10 · control</text>
+
+    <!-- radius-lg 14px : card / menu -->
+    <rect x="288" y="44" width="176" height="40" rx="14" fill="#1e1e2e" stroke="#cdd6f4" stroke-opacity="0.12"/>
+    <text x="292" y="100" fill="#a6adc8">radius-lg 14 · frame / menu</text>
+  </g>
+
+  <!-- ============= WORKED EXAMPLE: element group "button" ================= -->
+  <!-- The 8 edge/corner slices + center define a radius-md (10px) rounded
+       control. Kvantum tiles edges and pins corners; the center ("button-normal")
+       fills the interior. Coordinates are illustrative — Phase 5 pixel-tunes. -->
+  <g id="button-group" transform="translate(16,132)">
+    <text x="0" y="-8" fill="#a6adc8" font-family="JetBrains Mono, monospace" font-size="11">group "button" · status normal</text>
+
+    <!-- interior / center -->
+    <rect id="button-normal"            x="10" y="10" width="120" height="20" fill="#313244"/>
+    <!-- edges -->
+    <rect id="button-normal-top"        x="10" y="0"  width="120" height="10" fill="#313244"/>
+    <rect id="button-normal-bottom"     x="10" y="30" width="120" height="10" fill="#2a2b3c"/>
+    <rect id="button-normal-left"       x="0"  y="10" width="10"  height="20" fill="#313244"/>
+    <rect id="button-normal-right"      x="130" y="10" width="10" height="20" fill="#313244"/>
+    <!-- corners (rounded, radius-md 10px) -->
+    <path id="button-normal-topleft"     d="M0,10 A10,10 0 0 1 10,0 L10,10 Z"        fill="#313244"/>
+    <path id="button-normal-topright"    d="M130,0 A10,10 0 0 1 140,10 L130,10 Z"     fill="#313244"/>
+    <path id="button-normal-bottomleft"  d="M0,30 L10,30 L10,40 A10,10 0 0 1 0,30 Z"  fill="#2a2b3c"/>
+    <path id="button-normal-bottomright" d="M130,30 L140,30 A10,10 0 0 1 130,40 Z"    fill="#2a2b3c"/>
+  </g>
+
+  <!-- Focused status: same 10px control with a 2px Mauve ring (state-focus-ring,
+       §2.5) and a soft outer glow (glow-focus, §5). Shown as a single rounded
+       rect here; Phase 5 slices it into the -focused-* element set. -->
+  <g id="button-focused-group" transform="translate(176,132)">
+    <text x="0" y="-8" fill="#a6adc8" font-family="JetBrains Mono, monospace" font-size="11">group "button" · status focused</text>
+    <rect id="button-focused"      x="4" y="4" width="132" height="32" rx="10" fill="#313244"/>
+    <rect id="button-focused-ring" x="4" y="4" width="132" height="32" rx="10"
+          fill="none" stroke="#cba6f7" stroke-width="2"/>
+  </g>
+
+  <!-- Accent reference swatch: grad-signature (§7) used by the HUD/SDDM, shown
+       here so the atlas carries the brand gradient token. -->
+  <g id="accent-ref" transform="translate(336,132)">
+    <text x="0" y="-8" fill="#a6adc8" font-family="JetBrains Mono, monospace" font-size="11">grad-signature</text>
+    <rect x="0" y="0" width="128" height="40" rx="10" fill="url(#grad-signature)"/>
+  </g>
+
+  <!-- Footer note -->
+  <text x="16" y="300" fill="#7f849c" font-family="JetBrains Mono, monospace" font-size="10">
+    Placeholder atlas — full 9-slice art = Phase 5. Geometry/opacity/palette: VibeOSDark.kvconfig.
+  </text>
+</svg>

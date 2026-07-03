@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  vibeos-void.svg  —  VibeOS wallpaper "Void" (original work)
+
+  Wallpaper for the Focus activity and the amnesic memory mode (DESKTOP.md §3,
+  MEMORY.md). A near-crust field with almost nothing in it: one central lift,
+  one lone open ring in mauve at a whisper of opacity. The clean slate — quiet,
+  dark, distraction-free. Where Genesis invites, Void withdraws.
+
+  Design tokens (docs/DESIGN-SYSTEM.md):
+    - grad-void (§7): radial #16161f -> #11111b, 100% 80% @50% 40%
+    - accent Mauve #cba6f7 (§1.4) — a single, restrained accent, nothing more
+    - ring motif (§9) — one open circle, the shared signature shape
+
+  Standalone SVG: no external references, no fonts, no scripts. 16:9.
+  Build target (image, read-only): /usr/share/wallpapers/VibeOSDark/contents/images/
+  License: Apache-2.0 (VibeOS repository) — original VibeOS artwork.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3840 2160" width="3840" height="2160"
+     preserveAspectRatio="xMidYMid slice" role="img">
+  <title>VibeOS Dark — Void</title>
+  <desc>A near-black wallpaper: a subtle central lift over crust, with a single faint open mauve ring — the calm, amnesic clean slate.</desc>
+
+  <defs>
+    <!-- Void fall: a gentle central lift (#16161f) settling into Crust (#11111b) -->
+    <radialGradient id="void" gradientUnits="userSpaceOnUse"
+                    cx="1920" cy="864" r="2200"
+                    gradientTransform="translate(1920,864) scale(1.15,0.92) translate(-1920,-864)">
+      <stop offset="0"    stop-color="#16161f"/>
+      <stop offset="0.70" stop-color="#11111b"/>
+      <stop offset="1"    stop-color="#0e0e17"/>
+    </radialGradient>
+
+    <!-- The lone accent: a barely-there mauve breath at the center -->
+    <radialGradient id="breath" gradientUnits="userSpaceOnUse"
+                    cx="1920" cy="1010" r="1200"
+                    gradientTransform="translate(1920,1010) scale(1.2,0.8) translate(-1920,-1010)">
+      <stop offset="0"   stop-color="#cba6f7" stop-opacity="0.05"/>
+      <stop offset="0.7" stop-color="#11111b" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Signature gradient for the single ring -->
+    <linearGradient id="grad-signature" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0"   stop-color="#cba6f7"/>
+      <stop offset="1"   stop-color="#89b4fa"/>
+    </linearGradient>
+
+    <!-- Corner deepening, so the void reads as truly bottomless at the edges -->
+    <radialGradient id="vignette" gradientUnits="userSpaceOnUse"
+                    cx="1920" cy="1080" r="2500"
+                    gradientTransform="translate(1920,1080) scale(1,0.95) translate(-1920,-1080)">
+      <stop offset="0"    stop-color="#0a0a11" stop-opacity="0"/>
+      <stop offset="0.55" stop-color="#0a0a11" stop-opacity="0"/>
+      <stop offset="1"    stop-color="#0a0a11" stop-opacity="0.5"/>
+    </radialGradient>
+
+    <filter id="grain" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix"
+                     values="0 0 0 0 0.80  0 0 0 0 0.84  0 0 0 0 0.96  0 0 0 0.5 0"/>
+    </filter>
+  </defs>
+
+  <!-- 1. Void fall -->
+  <rect width="3840" height="2160" fill="url(#void)"/>
+
+  <!-- 2. Single mauve breath -->
+  <rect width="3840" height="2160" fill="url(#breath)"/>
+
+  <!-- 3. The lone signature ring — open at the top, centered, near-invisible -->
+  <path d="M 1490 990 A 430 430 0 1 1 2350 990"
+        fill="none" stroke="url(#grad-signature)" stroke-width="3"
+        stroke-linecap="round" stroke-opacity="0.16"/>
+
+  <!-- 4. Vignette -->
+  <rect width="3840" height="2160" fill="url(#vignette)"/>
+
+  <!-- 5. Grain (dither) -->
+  <rect width="3840" height="2160" filter="url(#grain)" opacity="0.035"/>
+</svg>

@@ -1,0 +1,240 @@
+# VibeOSDark.kvconfig — Kvantum theme for VibeOS (Qt widget style)
+# ================================================================
+# Themes QtWidgets applications (Dolphin, Kate, System Settings, Gwenview…) to
+# match the VibeOS Design System (docs/DESIGN-SYSTEM.md). Kvantum is chosen for
+# three things Breeze cannot do together: rounded controls at our radius family
+# (§4.1), REAL blur on the floating chrome (menus/tooltips = glass-elevated,
+# §6.1), and precise palette control (§2).
+#
+# Derived in spirit from Catppuccin Mocha (MIT); accent forced to Mauve #cba6f7.
+#
+# Install target (image build, read-only /usr):
+#   /usr/share/Kvantum/VibeOSDark/VibeOSDark.kvconfig
+#   /usr/share/Kvantum/VibeOSDark/VibeOSDark.svg
+# Activation (per-user default, /etc/skel, Phase 2):
+#   ~/.config/Kvantum/kvantum.kvconfig  →  [General]\n theme=VibeOSDark
+# And the Global Theme sets widgetStyle=kvantum (see ../look-and-feel/.../defaults).
+#
+# HONESTY / PHASE — Kvantum + this theme are a Phase 2 deliverable (the `kvantum`
+# package must be added to os/Containerfile, a separate track). Without Kvantum
+# the desktop falls back to Breeze + the VibeOSDark color scheme and still looks
+# correct. The paired VibeOSDark.svg is a DOCUMENTED PLACEHOLDER atlas (full
+# 9-slice art = Phase 5 branding); this .kvconfig is the source of truth for
+# geometry, opacity and palette.
+#
+# CORE DESIGN RULE ENCODED HERE (§2/§6): glass lives ONLY on floating chrome.
+#   → app CONTENT windows stay OPAQUE   (translucent_windows=false)
+#   → menus & tooltips get blur+opacity  (popup_blurring / reduce_menu_opacity)
+
+[%General]
+author=VibeOS contributors
+comment=VibeOS Dark — opaque content, glass menus/tooltips, Mauve accent (Catppuccin Mocha fork, MIT)
+# --- Interaction / behaviour ---
+x11drag=menubar_and_primary_toolbar
+alt_mnemonic=true
+left_tabs=true
+attach_active_tab=false
+mirror_doc_tabs=true
+group_toolbar_buttons=false
+spread_progressbar=true
+menubar_mouse_tracking=true
+toolbutton_style=1
+double_click=false
+# --- Compositing / glass (§6) ---
+# composite MUST be on for any translucency/blur.
+composite=true
+# Content windows are OPAQUE — no glass on content (§2 "le verre jamais sur le
+# contenu"): terminal, editors, file views must stay perfectly legible.
+translucent_windows=false
+reduce_window_opacity=0
+# Popups (menus, combo lists, tooltips) ARE floating chrome → glass-elevated.
+# blurring enables Kvantum's own blur; popup_blurring blurs behind popups.
+blurring=true
+popup_blurring=true
+# reduce_menu_opacity is a % reduction. 22 → menus at ~78% opacity =
+# glass-elevated bg (Base 78%, §6.1). Needs the KWin Blur effect (enabled by the
+# Global Theme defaults) to read as real glass, not flat transparency.
+reduce_menu_opacity=22
+# Blur radius on popups. 24 = blur-thin (§6.2 — menus/OSD tier). >40 wastes GPU.
+menu_blur_radius=24
+tooltip_blur_radius=24
+# Soft, deep shadows (elevation-3/4, §5) around floating chrome — tinted dark,
+# never a hard gray line.
+menu_shadow_depth=12
+tooltip_shadow_depth=8
+# --- Geometry (4pt scale, §4.2/§4.3) ---
+splitter_width=2
+scroll_width=12
+scroll_arrows=false
+scroll_min_extent=48
+slider_width=6
+slider_handle_width=18
+slider_handle_length=18
+check_size=18
+textless_progressbar=false
+progressbar_thickness=6
+# Rounded corners are defined by the SVG atlas geometry (VibeOSDark.svg), not by
+# a numeric key here — see that file's header for the radius-token → element map
+# (controls = radius-md 10px, frames/menus = radius-lg 14px, chips/tooltips =
+# radius-sm 6px, §4.1).
+
+# --- Global palette (§2.1). Hex is read verbatim from the VibeOS palette. ------
+[GeneralColors]
+window.color=#181825
+base.color=#1e1e2e
+alt.base.color=#181825
+button.color=#313244
+light.color=#45475a
+mid.light.color=#313244
+dark.color=#11111b
+mid.color=#45475a
+highlight.color=#cba6f7
+inactive.highlight.color=#45475a
+text.color=#cdd6f4
+window.text.color=#cdd6f4
+button.text.color=#cdd6f4
+disabled.text.color=#7f849c
+tooltip.text.color=#cdd6f4
+highlight.text.color=#11111b
+link.color=#89b4fa
+link.visited.color=#b4befe
+progress.indicator.text.color=#11111b
+
+# --- Hacks (safe, palette-consistent) ------------------------------------------
+[Hacks]
+# Keep Dolphin's view OPAQUE — content is never glass (§2).
+transparent_dolphin_view=false
+# Blur translucent surfaces (menus) via the compositor.
+blur_translucent=true
+# Honour the dark color scheme in apps that would otherwise force light.
+respect_darkness=true
+# Tinted, readable dialog/group titles.
+transparent_ktitle_label=true
+transparent_menutitle=true
+kcapacitybar_as_progressbar=true
+force_size_grip=false
+
+# ===========================================================================
+# Widget sections — geometry/state mapping onto the SVG atlas (VibeOSDark.svg).
+# Frame insets are the 9-slice border thickness; they pair with the SVG corner
+# radii. Kept lean and representative (button, field, frame, menu, tooltip,
+# progress, slider, focus); other widgets inherit Kvantum's built-in defaults
+# against this theme's SVG. Full per-widget art is a Phase 5 pass.
+# ===========================================================================
+
+# Buttons / tool buttons — radius-md (10px) controls, §4.1
+[PanelButtonCommand]
+frame=true
+frame.element=button
+frame.top=6
+frame.bottom=6
+frame.left=6
+frame.right=6
+interior=true
+interior.element=button
+indicator.size=10
+text.shift=0
+text.bold=false
+# Focus = Mauve ring (§2.5 state-focus-ring). The ring color is the palette
+# highlight; the SVG "-focused" state carries the 2px stroke.
+[PanelButtonTool]
+inherits=PanelButtonCommand
+frame.top=5
+frame.bottom=5
+frame.left=5
+frame.right=5
+
+# Text fields — radius-md (10px), §4.1
+[LineEdit]
+frame=true
+frame.element=lineedit
+frame.top=6
+frame.bottom=6
+frame.left=6
+frame.right=6
+interior=true
+interior.element=lineedit
+
+# Generic frames / cards — radius-lg (14px), §4.1
+[GenericFrame]
+frame=true
+frame.element=frame
+frame.top=8
+frame.bottom=8
+frame.left=8
+frame.right=8
+interior=true
+interior.element=frame
+
+# Menus (floating chrome, glass-elevated) — radius-lg (14px)
+[Menu]
+frame=true
+frame.element=menu
+frame.top=8
+frame.bottom=8
+frame.left=8
+frame.right=8
+interior=true
+interior.element=menu
+
+[MenuItem]
+frame=false
+interior=true
+interior.element=menuitem
+text.margin.top=4
+text.margin.bottom=4
+text.margin.left=10
+text.margin.right=10
+
+# Tooltips — radius-sm (6px), Crust-tinted (glass-osd tier), §6.1
+[ToolTip]
+frame=true
+frame.element=tooltip
+frame.top=4
+frame.bottom=4
+frame.left=4
+frame.right=4
+interior=true
+interior.element=tooltip
+
+# Progress bars — accent fill (grad-signature-soft in the HUD; solid Mauve here)
+[Progressbar]
+frame=true
+frame.element=progress
+frame.top=3
+frame.bottom=3
+frame.left=3
+frame.right=3
+interior=true
+interior.element=progress
+text.bold=false
+
+# Sliders — thin groove + round handle (radius-full), §4.3
+[Slider]
+frame=false
+interior=false
+[SliderCursor]
+frame=false
+interior=true
+interior.element=slidercursor
+
+# Scrollbar handle — slim, Surface2 (palette §2.1)
+[ScrollbarSlider]
+frame=true
+frame.element=scrollbarslider
+frame.top=4
+frame.bottom=4
+frame.left=4
+frame.right=4
+interior=true
+interior.element=scrollbarslider
+
+# Keyboard focus ring — Mauve (§2.5). The "-focused" SVG states draw the 2px
+# ring; halo (glow-focus) is approximated by the focus element's soft edge.
+[Focus]
+frame=true
+frame.element=focus
+frame.top=3
+frame.bottom=3
+frame.left=3
+frame.right=3

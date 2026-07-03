@@ -1,0 +1,19 @@
+# VibeOS — Plymouth boot splash (theme descriptor)
+# =============================================================================
+# Target (image build): /usr/share/plymouth/themes/vibeos/vibeos.plymouth
+# Source: desktop/plymouth/vibeos/vibeos.plymouth (COPY-ed into the image).
+# Status: 🛣️ Phase 5 (branding). v0.1 boots with the distro default; this
+# theme becomes default only when Phase 5 sets it AND regenerates the initramfs
+# at image build (see desktop/plymouth/README.md — an immutable-OS specific step).
+#
+# Uses the "script" module: the whole splash is driven by vibeos.script, so no
+# separate C plugin is needed and the animation stays fully readable/auditable.
+# =============================================================================
+[Plymouth Theme]
+Name=VibeOS
+Description=Dark Crust backdrop, a breathing monochrome mark and a slow mauve→blue signature ring.
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/vibeos
+ScriptFile=/usr/share/plymouth/themes/vibeos/vibeos.script

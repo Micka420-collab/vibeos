@@ -1,0 +1,19 @@
+{
+    "KPlugin": {
+        "Id": "VibeOSDark",
+        "Name": "VibeOS Dark",
+        "Name[fr]": "VibeOS Dark",
+        "Description": "Original VibeOS wallpapers — Genesis (mauve→blue aurora mesh) and Void (near-crust clean slate). Catppuccin Mocha-derived palette, single mauve accent.",
+        "Description[fr]": "Fonds d'écran VibeOS originaux — Genesis (mesh aurora mauve→bleu) et Void (ardoise vierge quasi-crust). Palette dérivée de Catppuccin Mocha, accent mauve unique.",
+        "License": "Apache-2.0",
+        "Version": "0.1",
+        "Website": "https://github.com/vibeos",
+        "Authors": [
+            {
+                "Name": "VibeOS Project",
+                "Email": "micka.delcato.rp@gmail.com"
+            }
+        ]
+    },
+    "X-KDE-PluginInfo-Name": "VibeOSDark"
+}

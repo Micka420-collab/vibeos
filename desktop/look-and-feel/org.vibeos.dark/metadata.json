@@ -1,0 +1,29 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "team@vibeos.dev",
+                "Name": "VibeOS contributors"
+            }
+        ],
+        "Category": "",
+        "Description": "Dark, glass-accented Global Theme for VibeOS — Mauve #cba6f7 accent, layered depth, VibeOS Design System tokens. Forked from Catppuccin Mocha (MIT).",
+        "Id": "org.vibeos.dark",
+        "License": "MIT",
+        "Name": "VibeOS Dark",
+        "Version": "0.1.0",
+        "Website": "https://github.com/vibeos"
+    },
+    "X-VibeOS-Phase": "Phase 2 — Global Theme is authored now, wired into the image in Phase 2 (DESKTOP.md §2.6). Only the color scheme ships in the v0.1 image.",
+    "X-VibeOS-Note": "KDE reads the authoritative component wiring from contents/defaults, NOT from this file. The map below is documentation only, mirroring contents/defaults so the package is self-describing.",
+    "X-VibeOS-Components": {
+        "colorScheme": "VibeOSDark — desktop/theme/vibeos-dark.colors → /usr/share/color-schemes/VibeOSDark.colors (accent Mauve #cba6f7)",
+        "widgetStyle": "kvantum — Kvantum theme VibeOSDark (desktop/kvantum/VibeOSDark → /usr/share/Kvantum/VibeOSDark). Falls back to Breeze if Kvantum is absent.",
+        "plasmaTheme": "default — Breeze SVG follows the color scheme; the glass panel/dock (glass-chrome) is layered via the Panel Colorizer preset in Phase 2.",
+        "windowDecoration": "org.kde.breeze — VibeOS keeps native window corners/borders (DESKTOP.md §2.5); the radius family applies to surfaces we draw, not KWin frames.",
+        "iconTheme": "breeze-dark — v0.1 default (design system §9); the VibeOS icon set is Phase 5.",
+        "cursorTheme": "breeze_cursors — v0.1 default; the VibeOS cursor set is Phase 5.",
+        "layout": "contents/layouts/org.kde.plasma.desktop-layout.js — slim floating glass top panel + centered auto-hide dock."
+    }
+}

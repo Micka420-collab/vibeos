@@ -321,14 +321,26 @@ COPY security/policy.d/*.toml /etc/vibeos/policy.d/
 # cryptsetup/mkfs/mount); LUKS + amnesic tmpfs are Phase 3 (docs/MEMORY.md).
 COPY --chmod=0755 memory/genesis.sh /usr/libexec/vibeos/genesis.sh
 
-# --- Desktop identity: VibeOS Dark color scheme ------------------------------
-# The Plasma 6 color scheme (fork of Catppuccin Mocha, see desktop/theme/) is
-# installed system-wide so it is selectable in System Settings. It is NOT
-# forced as the default in v0.1 — the full look-and-feel package + the
-# Quickshell agent HUD are wired in Phase 2 (docs/DESKTOP.md), where the HUD
-# binds to vibed. Shipping the scheme now gives the identity without any
-# non-functional autostarted component.
+# --- Desktop identity: VibeOS Dark theme assets ------------------------------
+# The design system lives in docs/DESIGN-SYSTEM.md. These assets are installed
+# system-wide so they are SELECTABLE in System Settings, but NONE is forced as
+# the default in v0.1 — the full look-and-feel activation, the Quickshell agent
+# HUD autostart (it binds to vibed) and the SDDM/Plymouth switch are wired in
+# Phase 2 / Phase 5 (docs/DESKTOP.md). Shipping the files now gives the identity
+# without any non-functional autostarted component.
+#   * color scheme   -> selectable now
+#   * look-and-feel  -> selectable (lookandfeeltool); not default (Phase 2)
+#   * wallpapers     -> available in the picker
+#   * SDDM/Plymouth  -> present; switched on at branding (Phase 5)
+#   * Kvantum        -> present; widget style switch is Phase 2
+#   * Quickshell QML -> present for the Phase 2 HUD; not autostarted
 COPY desktop/theme/vibeos-dark.colors /usr/share/color-schemes/VibeOSDark.colors
+COPY desktop/look-and-feel/org.vibeos.dark /usr/share/plasma/look-and-feel/org.vibeos.dark
+COPY desktop/wallpapers /usr/share/wallpapers/VibeOSDark
+COPY desktop/sddm/vibeos /usr/share/sddm/themes/vibeos
+COPY desktop/plymouth/vibeos /usr/share/plymouth/themes/vibeos
+COPY desktop/kvantum/VibeOSDark /usr/share/Kvantum/VibeOSDark
+COPY desktop/quickshell /usr/share/vibeos/quickshell
 
 # --- PHASE 2 (NOT ACTIVE YET): install vibed from the builder stage ----------
 # COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed

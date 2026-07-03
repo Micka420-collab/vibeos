@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  vibeos-dark.svg  —  VibeOS wallpaper "Genesis" (original work)
+
+  Default wallpaper for the Vibe / Review activities (DESKTOP.md §3, §5.4).
+  A restrained gradient-mesh aurora: base -> mantle -> crust vertical fall,
+  a mauve->lavender->blue halo anchored top-right, and a set of concentric
+  "focus rings" (the VibeOS signature ring motif) sweeping softly across the
+  field. It says "depth & focus" without shouting — very low saturation,
+  no screensaver energy.
+
+  Design tokens (docs/DESIGN-SYSTEM.md):
+    - grad-mesh-genesis (§7): mauve->blue halo @78% 8% over Base->Crust
+    - accent Mauve #cba6f7 (§1.4) — the single brand accent, held with discipline
+    - ring motif (§9) — open/gradient circles, the shared "agent/focus" shape
+    - fine grain overlay dithers the gradients (premium, banding-free)
+
+  Standalone SVG: no external references, no fonts, no scripts. 16:9.
+  Build target (image, read-only): /usr/share/wallpapers/VibeOSDark/contents/images/
+  License: Apache-2.0 (VibeOS repository) — original VibeOS artwork.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3840 2160" width="3840" height="2160"
+     preserveAspectRatio="xMidYMid slice" role="img">
+  <title>VibeOS Dark — Genesis</title>
+  <desc>A calm dark gradient-mesh wallpaper: a mauve-to-blue aurora glow in the upper right over a Base-to-Crust fall, crossed by soft concentric focus rings.</desc>
+
+  <defs>
+    <!-- Base fall: Base (#1e1e2e) -> Crust (#11111b), the surface ladder top to void -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"    stop-color="#1e1e2e"/>
+      <stop offset="0.52" stop-color="#191926"/>
+      <stop offset="1"    stop-color="#11111b"/>
+    </linearGradient>
+
+    <!-- Primary aurora: mauve -> lavender -> blue, anchored top-right (the mesh's warm node) -->
+    <radialGradient id="halo-mauve" gradientUnits="userSpaceOnUse"
+                    cx="2995" cy="210" r="2200"
+                    gradientTransform="translate(2995,210) scale(1.32,0.74) translate(-2995,-210)">
+      <stop offset="0"    stop-color="#cba6f7" stop-opacity="0.20"/>
+      <stop offset="0.30" stop-color="#b4befe" stop-opacity="0.115"/>
+      <stop offset="0.52" stop-color="#89b4fa" stop-opacity="0.06"/>
+      <stop offset="0.74" stop-color="#11111b" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Cool counter-node: a faint blue pool, lower-left, to give the mesh balance & depth -->
+    <radialGradient id="pool-blue" gradientUnits="userSpaceOnUse"
+                    cx="560" cy="1980" r="1700"
+                    gradientTransform="translate(560,1980) scale(1.28,0.72) translate(-560,-1980)">
+      <stop offset="0"    stop-color="#89b4fa" stop-opacity="0.055"/>
+      <stop offset="0.55" stop-color="#11111b" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Third node: a whisper of lavender near center-right, ties the mesh together -->
+    <radialGradient id="lift-lav" gradientUnits="userSpaceOnUse"
+                    cx="2180" cy="1160" r="1500"
+                    gradientTransform="translate(2180,1160) scale(1.1,0.86) translate(-2180,-1160)">
+      <stop offset="0"   stop-color="#b4befe" stop-opacity="0.04"/>
+      <stop offset="0.6" stop-color="#11111b" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Signature gradient (135deg mauve -> blue), used as ring/arc stroke (per-shape bbox) -->
+    <linearGradient id="grad-signature" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0"   stop-color="#cba6f7"/>
+      <stop offset="0.5" stop-color="#b4befe"/>
+      <stop offset="1"   stop-color="#89b4fa"/>
+    </linearGradient>
+
+    <!-- Vignette: transparent center -> gentle deepening at the edges (seats the frame) -->
+    <radialGradient id="vignette" gradientUnits="userSpaceOnUse"
+                    cx="1920" cy="1010" r="2500"
+                    gradientTransform="translate(1920,1010) scale(1,0.95) translate(-1920,-1010)">
+      <stop offset="0"    stop-color="#0c0c14" stop-opacity="0"/>
+      <stop offset="0.62" stop-color="#0c0c14" stop-opacity="0"/>
+      <stop offset="1"    stop-color="#0c0c14" stop-opacity="0.45"/>
+    </radialGradient>
+
+    <!-- Fine monochrome grain: dithers the gradients so real displays show no banding -->
+    <filter id="grain" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix"
+                     values="0 0 0 0 0.83  0 0 0 0 0.86  0 0 0 0 0.96  0 0 0 0.5 0"/>
+    </filter>
+  </defs>
+
+  <!-- 1. Base fall -->
+  <rect width="3840" height="2160" fill="url(#bg)"/>
+
+  <!-- 2-4. Gradient mesh (cool pool, lavender lift, then the warm mauve aurora on top) -->
+  <rect width="3840" height="2160" fill="url(#pool-blue)"/>
+  <rect width="3840" height="2160" fill="url(#lift-lav)"/>
+  <rect width="3840" height="2160" fill="url(#halo-mauve)"/>
+
+  <!-- 5. Concentric focus rings (signature motif), emanating from the aurora's node -->
+  <g fill="none" stroke="url(#grad-signature)" stroke-linecap="round">
+    <circle cx="2995" cy="210" r="640"  stroke-width="2.5" stroke-opacity="0.10"/>
+    <circle cx="2995" cy="210" r="1080" stroke-width="2.5" stroke-opacity="0.085"/>
+    <circle cx="2995" cy="210" r="1560" stroke-width="2.5" stroke-opacity="0.065"/>
+    <circle cx="2995" cy="210" r="2080" stroke-width="2.5" stroke-opacity="0.05"/>
+    <circle cx="2995" cy="210" r="2680" stroke-width="2.5" stroke-opacity="0.037"/>
+    <circle cx="2995" cy="210" r="3320" stroke-width="2.5" stroke-opacity="0.026"/>
+  </g>
+
+  <!-- 6. Two open "signature arcs" — the brightest geometry, the agent/progress ring echo -->
+  <g fill="none" stroke="url(#grad-signature)" stroke-linecap="round">
+    <path d="M 3422.5 1384.6 A 1250 1250 0 0 1 1749.8 318.95" stroke-width="5" stroke-opacity="0.34"/>
+    <path d="M 2836.4 2023.1 A 1820 1820 0 0 1 1181.9 51.4"   stroke-width="3" stroke-opacity="0.17"/>
+  </g>
+
+  <!-- 7. Vignette -->
+  <rect width="3840" height="2160" fill="url(#vignette)"/>
+
+  <!-- 8. Grain (dither) -->
+  <rect width="3840" height="2160" filter="url(#grain)" opacity="0.04"/>
+</svg>

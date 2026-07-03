@@ -195,19 +195,24 @@ function mockMemoryQuery() {
 // HONESTY NOTE: vibed v0.1 exposes NO agents.list tool — an agent roster is
 // not derivable from the daemon yet. This mock exists purely so the HUD
 // design can be seen with data in it. TODO(Phase 2): specify agents.list
-// (or an audit-derived stream) with the vibed track, then replace this.
+// (or an audit-derived stream keyed by SO_PEERCRED pid) with the vibed track,
+// then replace this. The extra `project`/`elapsed` fields feed the AgentStatus
+// hover tooltip; they mirror what an audit-derived roster would expose.
 function mockAgents() {
     var approvalPending = Math.random() < 0.3; // demo: occasional T2 lock
     return [
         { name: "claude-code", tier: 1, awaitingApproval: false,
-          activity: "editing ~/projects/app (fs.write, T1)" },
+          activity: "fs.write ~/projects/app/src/main.rs (T1)",
+          project: "~/projects/app", elapsed: "4m12s" },
         { name: "opencode", tier: 0, awaitingApproval: false,
-          activity: "reading logs (fs.read, T0)" },
+          activity: "fs.read journalctl output (T0)",
+          project: "~/projects/api", elapsed: "1m03s" },
         { name: "aider", tier: approvalPending ? 2 : 0,
           awaitingApproval: approvalPending,
           activity: approvalPending
-              ? "pkg.install ripgrep — WAITING FOR HUMAN APPROVAL (T2)"
-              : "idle" }
+              ? "pkg.install ripgrep — EN ATTENTE D'APPROBATION HUMAINE (T2)"
+              : "idle",
+          project: "~/projects/tools", elapsed: "0m48s" }
     ];
 }
 

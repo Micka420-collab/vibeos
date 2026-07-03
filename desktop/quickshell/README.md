@@ -6,6 +6,14 @@
 > chantier bureau n'a pas fait une passe de test sur Plasma 6/Wayland. Toutes les
 > données affichées en v0.1 sont **mockées** (voir §4). Règle D20 : rien ici ne
 > prétend être branché sur `vibed` — ce branchement est la Phase 2.
+>
+> **Langage visuel.** Le HUD applique à la lettre le système de design
+> [`docs/DESIGN-SYSTEM.md`](../../docs/DESIGN-SYSTEM.md) : verre frosté (glass-panel,
+> Crust 66 % + flou), pastilles/anneaux de tiers en dégradé, accent Mauve tenu,
+> typographie mono pour la donnée, mouvement mesuré. **Aucune valeur en dur** :
+> tous les composants référencent le singleton de tokens `Theme.qml` (couleurs,
+> rayons, espacements, durées, courbes, dégradés). C'est la clé de la cohérence
+> boot → login → bureau → HUD → terminal.
 
 ---
 
@@ -113,8 +121,15 @@ est absent (c'est le cas nominal de la Phase 1) :
 
 | Fichier | Rôle |
 |---|---|
-| `shell.qml` | racine Quickshell : `PanelWindow` (barre haute) qui compose les widgets, détient l'état et le point de branchement Phase 2 |
-| `AgentStatus.qml` | chips des agents actifs + tier courant |
-| `PolicyTierIndicator.qml` | badge T0–T3 (couleurs VibeOS) + cadenas d'approbation |
-| `OllamaGauge.qml` | activité modèle local + barre VRAM |
-| `vibed_client.js` | formats JSON-RPC du socket MCP + données mock v0.1 |
+| `Theme.qml` | **singleton de tokens** (source de vérité unique du design) : palette Mocha invariante, échelle de surfaces/élévation, rôles de texte, verre, rayons, espacements 4pt, dégradés signature/tiers, durées & courbes de mouvement, glows, drapeaux d'accessibilité. Tous les autres fichiers lisent `Theme.*` |
+| `shell.qml` | racine Quickshell : `PanelWindow` frosté (barre haute verre, ombre d'élévation, marque + état global + triptyque) qui compose les widgets, détient l'état et le point de branchement Phase 2 |
+| `AgentStatus.qml` | chips d'agents élevés : anneau-avatar signature (Mauve→Blue), nom, pastille de tier, élévation au survol, tooltip verre (activité/projet/durée) |
+| `PolicyTierIndicator.qml` | pastille de tier en dégradé + anneau conique T0–T3, glyphe cadenas dessiné et pulsation douce quand T2+ attend une approbation |
+| `OllamaGauge.qml` | anneau VRAM circulaire à dégradé (arc Canvas, cap arrondi) + modèle chargé + Gio, seuils Sky→Peach→Red, « — » honnête hors ligne |
+| `vibed_client.js` | formats JSON-RPC du socket MCP (alignés sur `vibed/src/mcp.rs`) + données mock v0.1 (`available:false` par défaut) |
+
+> **Cohérence par les tokens.** `Theme.qml` transcrit `DESIGN-SYSTEM.md §12.2` et
+> l'étend (élévation, glows, dégradés, aides de tiers, drapeaux a11y). Cible image :
+> `/usr/share/vibeos/quickshell/Theme.qml`. Quickshell enregistre automatiquement les
+> singletons du répertoire de configuration ; les composants voisins y accèdent
+> directement via le type `Theme`.
