@@ -17,8 +17,15 @@
 #
 # BUILT-IN HARD DENYLIST: independently of this file, the engine denies in
 # code, for reads AND writes: /var/lib/vibeos/audit/**, /etc/shadow*,
-# **/.ssh/**, **/.gnupg/**, /proc/*/environ, /run/credentials/**, /boot/** ;
-# and for WRITES only: /etc/vibeos/policy.d/** and /var/lib/vibeos/memory/**.
+# /etc/gshadow*, **/.ssh/**, **/.gnupg/**, /etc/ssh/* (+ /etc/ssh/ssh_host_*),
+# **/.aws/credentials, **/.aws/config, **/.config/gcloud/**,
+# /etc/NetworkManager/system-connections/**, **/.docker/config.json,
+# **/.kube/config, **/.netrc, /root/**, /proc/*/environ, /proc/**/environ,
+# /proc/**/cmdline, /run/credentials/**, /boot/** ; and for WRITES only:
+# /etc/vibeos/policy.d/** and /var/lib/vibeos/memory/**.
+# fs.write is ADDITIONALLY confined to the calling user's own home directory
+# (resolved from /etc/passwd via SO_PEERCRED) and is symlink-safe (the parent
+# is canonicalized and the final component opened with O_NOFOLLOW).
 # The `denied` lists below mirror it as defense in depth; editing them does
 # NOT re-enable access.
 #
@@ -62,9 +69,22 @@ reason = "Read-only file access outside the audit trail, secret stores and key m
 denied = [
   "/var/lib/vibeos/audit/**",  # audit trail: agents must never read or probe it
   "/etc/shadow*",              # /etc/shadow and /etc/shadow- (password hashes)
+  "/etc/gshadow*",             # group password hashes
   "**/.ssh/**",                # SSH key material, wherever it lives
   "**/.gnupg/**",              # GnuPG key material, wherever it lives
+  "/etc/ssh/*",                # sshd config AND host keys
+  "/etc/ssh/ssh_host_*",       # host private keys (explicit)
+  "**/.aws/credentials",       # AWS access keys
+  "**/.aws/config",            # AWS profiles / SSO config
+  "**/.config/gcloud/**",      # Google Cloud credentials store
+  "/etc/NetworkManager/system-connections/**", # Wi-Fi/VPN PSKs and certs
+  "**/.docker/config.json",    # container registry auth tokens
+  "**/.kube/config",           # kubernetes cluster credentials
+  "**/.netrc",                 # machine login credentials
+  "/root/**",                  # root's home directory
   "/proc/*/environ",           # process environments may leak secrets
+  "/proc/**/environ",          # ...including /proc/<pid>/task/<tid>/environ
+  "/proc/**/cmdline",          # command lines may carry secrets/tokens
   "/run/credentials/**",       # decrypted systemd-creds exposed to services
   "/boot/**",                  # boot chain is none of the agent's business
 ]

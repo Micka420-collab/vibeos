@@ -7,6 +7,12 @@
 //! caller identity (uid/gid/pid) captured from the unix socket peer
 //! credentials (`SO_PEERCRED`).
 //!
+//! Alongside the digest, each record carries a `target`: a human-readable,
+//! NON-secret subject of the action (the path for fs.read/fs.write, the unit
+//! for svc.restart, the package for pkg.install), so forensics can tell WHICH
+//! object an action touched — the digest alone is not reversible. File content
+//! and secret arguments are never written here.
+//!
 //! The file is opened in append mode for every record: simple, crash-safe
 //! (no buffered state to lose), and adequate for the v0.1 call rate.
 //!
@@ -61,6 +67,7 @@ impl AuditLog {
         &self,
         tool: &str,
         args: &Value,
+        target: Option<&str>,
         decision: &str,
         outcome: &str,
         caller: Caller,
@@ -72,6 +79,7 @@ impl AuditLog {
         let entry = json!({
             "ts_unix_ms": ts_unix_ms,
             "tool": tool,
+            "target": target,
             "args_fnv1a64": fnv1a_64_hex(args.to_string().as_bytes()),
             "decision": decision,
             "outcome": outcome,
@@ -128,11 +136,12 @@ mod tests {
             gid: Some(1001),
             pid: Some(4242),
         };
-        log.record("os.status", &json!({}), "allow", "ok", caller)
+        log.record("os.status", &json!({}), None, "allow", "ok", caller)
             .expect("first record");
         log.record(
             "pkg.install",
             &json!({"name": "htop"}),
+            Some("htop"),
             "require_approval",
             "pending_approval",
             Caller::default(),
@@ -152,10 +161,12 @@ mod tests {
         assert_eq!(first["caller_pid"], 4242);
         assert!(first["ts_unix_ms"].as_u64().unwrap_or(0) > 0);
         assert_eq!(first["args_fnv1a64"].as_str().map(str::len), Some(16));
+        assert!(first["target"].is_null(), "os.status has no target subject");
 
         let second: Value = serde_json::from_str(lines[1]).expect("line 2 is JSON");
         assert_eq!(second["tool"], "pkg.install");
         assert_eq!(second["outcome"], "pending_approval");
+        assert_eq!(second["target"], "htop", "the package name is the audit target");
         assert!(second["caller_uid"].is_null(), "unknown caller is recorded as null");
 
         let _ = fs::remove_dir_all(&dir);

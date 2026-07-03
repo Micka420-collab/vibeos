@@ -117,6 +117,19 @@ mod tests {
     }
 
     #[test]
+    fn double_star_matches_variable_depth_for_proc_bypass() {
+        // `/proc/**/environ` must catch the sibling-thread bypass
+        // `/proc/<pid>/task/<tid>/environ` (variable depth), where the
+        // single-segment `/proc/*/environ` does not.
+        assert!(glob_match("/proc/**/environ", "/proc/1234/environ"));
+        assert!(glob_match("/proc/**/environ", "/proc/1234/task/5678/environ"));
+        assert!(glob_match("/proc/**/cmdline", "/proc/1234/cmdline"));
+        assert!(glob_match("/proc/**/cmdline", "/proc/1234/task/5678/cmdline"));
+        // `**` also matches zero intermediate segments.
+        assert!(glob_match("/proc/**/environ", "/proc/environ"));
+    }
+
+    #[test]
     fn normalize_resolves_dots_and_rejects_escapes() {
         assert_eq!(normalize_path("/home/dev/../dev2/x").as_deref(), Some("/home/dev2/x"));
         assert_eq!(normalize_path("/home//dev/./x").as_deref(), Some("/home/dev/x"));
