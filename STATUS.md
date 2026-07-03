@@ -10,8 +10,9 @@
 | **Phase actuelle** | Phase 0 « Fondation » ✅ → Phase 1 « Première ISO » (en cours) |
 | **Version** | 0.1.0-dev (pré-alpha) |
 | **Dépôt GitHub** | [`Micka420-collab/vibeos`](https://github.com/Micka420-collab/vibeos) (privé) ✅ en ligne |
-| **Image OS** | `ghcr.io/micka420-collab/vibeos` (amd64 + arm64) — **build local + CI amd64 verts** ✅ (`bootc lint` : 13 checks OK) |
-| **ISO** | **`install.iso` amd64 générée** ✅ 5,6 Go, bootable (ISO 9660 / Fedora installer) — copiée dans `F:\VibeOS-ISO\` |
+| **Image OS** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — **manifest multi-arch amd64+arm64 PUBLIÉ + SIGNÉ cosign** ✅ (Rekor #2062451740) |
+| **ISO** | **amd64 + arm64 générées** ✅ — artefacts CI `vibeos-iso-amd64` (7,0 Go) / `vibeos-iso-arm64` (6,3 Go) ; ISO amd64 aussi en local `F:\VibeOS-ISO\` |
+| **Release** | **v0.1.0-dev — CI entièrement verte** (runners natifs) : build amd64+arm64 → manifest → cosign → 2 ISO |
 | **Machine de référence** | Ryzen 7 3700X · RTX 3070 Ti · 16 Go — voir [docs/HARDWARE.md](docs/HARDWARE.md) |
 
 ## ✅ Fait
@@ -36,18 +37,14 @@
 - **2026-07-03** — **Couche terminal vibecoding livrée dans l'image** : fish, neovim, zoxide, bat, eza, btop, atuin (dépôts Fedora) + starship, zellij, lazygit, ghostty, yazi (COPR) + mise (repo officiel) + polices JetBrains Mono/Fira Code. Les 22 binaires vérifiés présents, tous les dotfiles `/etc/skel` en place.
 - **2026-07-03** — **Système de design « VibeOS » + assets livrés** : [docs/DESIGN-SYSTEM.md](docs/DESIGN-SYSTEM.md) (708 lignes : tokens couleur/surfaces/verre/typo/motion, tiers T0–T3, tendances 2026). Assets embarqués dans l'image (sélectionnables ; activation par défaut = Phase 2) : Global Theme Plasma `org.vibeos.dark`, thème Kvantum, wallpapers originaux (Genesis/Void SVG), thème SDDM, splash Plymouth, HUD Quickshell (singleton `Theme.qml` + composants). Maquette visuelle HTML créée (glassmorphism, HUD agents, gouvernance T0→T3).
 
-## 🔄 En cours (aujourd'hui)
-
-- **Release v0.1.0-dev** : pose du tag `v0.1.0-dev` pour déclencher la CI complète (build multi-arch amd64+arm64 + signature cosign + ISO par architecture en artefacts).
-- **Test de l'ISO en VM Hyper-V** (à faire côté Windows ; ISO copiée dans `F:\VibeOS-ISO\` sur le poste de dev) : boot jusqu'à SDDM + session Plasma 6.
+- **2026-07-03** — **Release v0.1.0-dev publiée** : CI redécoupée en **runners natifs** (fini l'émulation arm64 : ~15 min/arch au lieu de ~2 h). Image multi-arch publiée sur ghcr.io, **signée cosign keyless** (Rekor #2062451740), et **2 ISO** (amd64 7,0 Go + arm64 6,3 Go) en artefacts CI. Trois correctifs de release au passage (`push-to-registry` registry, digest via `--digestfile`, espace disque agressif pour l'ISO amd64).
 
 ## 📋 Reste à faire (court terme)
 
-1. **Câbler le HUD Quickshell et `vibed`** dans `os/Containerfile` — le HUD et le binaire `vibed` restent des livrables **Phase 2** (voir [docs/DESKTOP.md](docs/DESKTOP.md) et [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md)).
-2. **Tester l'ISO amd64 en VM Hyper-V** (Gén. 2) : boot jusqu'à SDDM + session Plasma 6.
-3. **Release `v0.1.0-dev` en CI** : première validation du build multi-arch (manifest arm64) + cosign + **ISO par architecture** en artefacts.
-4. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
-5. Mettre à jour ce fichier + README à chaque jalon.
+1. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 ; valider NVIDIA sur le PC de référence.
+2. **Câbler le HUD Quickshell et `vibed`** dans l'image — restent des livrables **Phase 2** (le binaire `vibed` + l'activation du HUD/Global Theme).
+3. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
+4. Mettre à jour ce fichier + README à chaque jalon.
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
