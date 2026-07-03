@@ -1,25 +1,25 @@
 # build-os.yml — Build, sign and publish the VibeOS bootc image, and produce
-# the install ISOs.
+# the install ISOs. Multi-arch via NATIVE runners (no slow qemu emulation).
 #
-# Cost-aware design (a full multi-arch build with arm64 emulation is slow):
-#   * push on main / pull_request touching os/**, memory/**, security/** or
-#     this file
-#       -> BUILD CHECK ONLY: linux/amd64, `bootc container lint`, NO push, NO
-#          signing. Fast gate that proves the Containerfile still builds.
-#   * push tag v*  OR  workflow_dispatch (manual)
-#       -> RELEASE: build linux/amd64 + linux/arm64 manifest, push to ghcr.io
-#          (tags: latest, git SHA, and the version on a tag), cosign keyless
-#          signing of the pushed digest, PLUS the `iso` jobs (one per arch).
-#          NOTE: GitHub does not evaluate `paths` filters on tag pushes, so a
-#          v* tag always builds regardless of which files changed.
+# Design:
+#   * A `setup` job decides, from the trigger, whether this is a RELEASE and
+#     which architectures to build:
+#       - push on main / pull_request  -> BUILD CHECK, amd64 only, no push.
+#       - push tag v* / workflow_dispatch -> RELEASE, amd64 + arm64.
+#   * `build` runs as a matrix, each arch on its OWN native runner
+#     (amd64 -> ubuntu-latest, arm64 -> ubuntu-24.04-arm). Each builds the image
+#     for its platform natively and, on a release, pushes an arch-tagged image
+#     (`<sha>-<arch>`). `bootc container lint` runs as the last build step.
+#   * `manifest` (release only) assembles the per-arch images into one
+#     multi-arch manifest (tags: latest, <sha>, and the version on a tag),
+#     then signs the manifest with cosign keyless.
+#   * `iso` (release only) builds one installer ISO per arch, each on its native
+#     runner, and uploads it as an artifact.
 #
-# Publishing/signing only happen on tags and manual dispatch — normal commits
-# to main are validated but not published. Cut a `v*` tag to release.
-#
-# Auth: the built-in GITHUB_TOKEN (permissions: packages: write) — no extra
-# secrets required. Signing is cosign KEYLESS (OIDC via id-token: write) — no
-# key material stored anywhere. The resulting ghcr package is private on first
-# push; make it public in the package settings if desired.
+# Auth: the built-in GITHUB_TOKEN (packages: write) — no extra secrets.
+# Signing is cosign KEYLESS (OIDC via id-token: write). Publishing/signing only
+# happen on tags and manual dispatch; normal commits to main are validated but
+# not published. Cut a `v*` tag to release.
 
 name: build-os
 
@@ -46,136 +46,142 @@ env:
 permissions:
   contents: read
   packages: write
-  # Required by cosign keyless signing (OIDC identity token).
   id-token: write
 
 jobs:
-  build:
-    name: Build bootc image
+  setup:
+    name: Decide release scope
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.meta.outputs.image }}
-      digest: ${{ steps.push.outputs.digest }}
-      publish: ${{ steps.meta.outputs.publish }}
+      image: ${{ steps.cfg.outputs.image }}
+      publish: ${{ steps.cfg.outputs.publish }}
+      version: ${{ steps.cfg.outputs.version }}
+      matrix: ${{ steps.cfg.outputs.matrix }}
+    steps:
+      - name: Compute config
+        id: cfg
+        run: |
+          echo "image=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"},{"arch":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.arch }} (native)
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Two full OS trees (amd64 + arm64) + the NVIDIA kmod build need room.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
           df -h /
 
-      - name: Compute image name, tags, platforms and publish flag
-        id: meta
-        run: |
-          echo "image=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
-          # RELEASE on version tags and manual dispatch; BUILD CHECK otherwise.
-          if [[ "${GITHUB_REF}" == refs/tags/v* || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "platforms=linux/amd64, linux/arm64" >> "$GITHUB_OUTPUT"
-            tags="latest ${GITHUB_SHA}"
-            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-              tags="${tags} ${GITHUB_REF_NAME#v}"
-            fi
-            echo "tags=${tags}" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
-            echo "tags=check-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # arm64 layers are built under emulation — only needed for a release.
-      - name: Install qemu-user-static (arm64 emulation)
-        if: steps.meta.outputs.publish == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-
       - name: Log in to ghcr.io
-        if: steps.meta.outputs.publish == 'true'
+        if: needs.setup.outputs.publish == 'true'
         uses: redhat-actions/podman-login@v1
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Context is the REPOSITORY ROOT: os/Containerfile copies os/rootfs/,
-      # security/policy.d/ and memory/genesis.sh. `bootc container lint` runs
-      # as the final build step and fails the job on OSTree layout violations.
-      # `platforms` is amd64 for a build check, amd64+arm64 (manifest) for a
-      # release; the Containerfile receives TARGETARCH and skips NVIDIA on arm64.
-      - name: Build image (buildah)
+      # Native single-platform build (no qemu). `bootc container lint` is the
+      # final step of os/Containerfile and fails the job on layout violations.
+      - name: Build image (buildah, ${{ matrix.platform }})
         id: build
         uses: redhat-actions/buildah-build@v2
         with:
-          image: ${{ steps.meta.outputs.image }}
-          tags: ${{ steps.meta.outputs.tags }}
-          platforms: ${{ steps.meta.outputs.platforms }}
+          image: ${{ needs.setup.outputs.image }}
+          tags: ${{ github.sha }}-${{ matrix.arch }}
+          platforms: ${{ matrix.platform }}
           containerfiles: os/Containerfile
           context: .
 
-      - name: Push manifest to ghcr.io
-        if: steps.meta.outputs.publish == 'true'
-        id: push
+      - name: Push arch image to ghcr.io
+        if: needs.setup.outputs.publish == 'true'
         uses: redhat-actions/push-to-registry@v2
         with:
-          image: ${{ steps.build.outputs.image }}
-          tags: ${{ steps.build.outputs.tags }}
+          image: ${{ needs.setup.outputs.image }}
+          tags: ${{ github.sha }}-${{ matrix.arch }}
+
+  manifest:
+    name: Assemble + sign multi-arch manifest
+    if: needs.setup.outputs.publish == 'true'
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to ghcr.io
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build a manifest list from the per-arch images pushed by the build jobs,
+      # tag it latest + <sha> (+ version on a tag), and push it.
+      - name: Create and push manifest
+        id: manifest
+        run: |
+          IMAGE="${{ needs.setup.outputs.image }}"
+          podman manifest create vibeos
+          podman manifest add vibeos "docker://${IMAGE}:${GITHUB_SHA}-amd64"
+          podman manifest add vibeos "docker://${IMAGE}:${GITHUB_SHA}-arm64"
+          # Push the primary tag first and capture the manifest-list digest for
+          # cosign; then push the remaining tags (same digest).
+          podman manifest push --all --digestfile=digest.txt vibeos "docker://${IMAGE}:${GITHUB_SHA}"
+          DIGEST="$(cat digest.txt)"
+          podman manifest push --all vibeos "docker://${IMAGE}:latest"
+          if [[ -n "${{ needs.setup.outputs.version }}" ]]; then
+            podman manifest push --all vibeos "docker://${IMAGE}:${{ needs.setup.outputs.version }}"
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        if: steps.meta.outputs.publish == 'true'
         uses: sigstore/cosign-installer@v3
 
-      # Keyless signing: the signature is bound to this workflow's OIDC
-      # identity and logged in the Rekor transparency log. Verification
-      # instructions live in docs/BUILD.md.
-      - name: Sign pushed image (cosign keyless)
-        if: steps.meta.outputs.publish == 'true'
+      # Keyless signing bound to this workflow's OIDC identity, logged in Rekor.
+      - name: Sign manifest (cosign keyless)
         run: |
-          cosign sign --yes "${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "${{ needs.setup.outputs.image }}@${{ steps.manifest.outputs.digest }}"
 
   iso:
     name: Build install ISO (${{ matrix.arch }})
-    # ISOs are produced on version tags and on manual dispatch only.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-latest
+    if: needs.setup.outputs.publish == 'true'
+    needs: [setup, build, manifest]
     strategy:
       fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # The ISO embeds the whole OS image; the default runner is tight on disk.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
           df -h /
 
-      - name: Install qemu-user-static (arm64 emulation)
-        if: matrix.arch != 'amd64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-
-      # bootc-image-builder reads root podman's container storage: log in and
-      # pull the freshly pushed per-arch image as root.
       - name: Log in to ghcr.io (root podman)
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
 
       - name: Pull ${{ matrix.arch }} image into root container storage
         run: |
-          sudo podman pull --arch "${{ matrix.arch }}" "${{ needs.build.outputs.image }}:${{ github.sha }}"
+          sudo podman pull "${{ needs.setup.outputs.image }}:${GITHUB_SHA}-${{ matrix.arch }}"
 
-      # Installer config. On a RELEASE (tag v*), ship NO baked credentials —
-      # Anaconda prompts for account creation at install time, so a published
-      # ISO never contains a plaintext password. Only manual test builds
-      # (workflow_dispatch) bake the throwaway "vibe" account for quick VM boots.
+      # RELEASE ISO ships NO baked credentials: Anaconda prompts for the account
+      # at install time. Only manual test builds bake a throwaway "vibe" account.
       - name: Write installer config
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -186,13 +192,12 @@ jobs:
           groups = ["wheel"]
           EOF
           else
-            # Release ISO: empty config -> Anaconda asks for the user account.
             printf '' > config.toml
           fi
 
-      # The root filesystem type is declared inside the image
-      # (os/rootfs/usr/lib/bootc/install/00-vibeos.toml), so no --rootfs needed.
-      - name: Run bootc-image-builder (--type iso, ${{ matrix.arch }})
+      # Native runner: no --target-arch needed, the image is this arch. The root
+      # filesystem type is declared in the image (00-vibeos.toml), so no --rootfs.
+      - name: Run bootc-image-builder (--type iso)
         run: |
           mkdir -p output
           sudo podman run --rm --privileged \
@@ -202,9 +207,8 @@ jobs:
             -v ./output:/output \
             quay.io/centos-bootc/bootc-image-builder:latest \
             --type iso \
-            --target-arch "${{ matrix.arch }}" \
             --config /config.toml \
-            "${{ needs.build.outputs.image }}:${{ github.sha }}"
+            "${{ needs.setup.outputs.image }}:${GITHUB_SHA}-${{ matrix.arch }}"
 
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4

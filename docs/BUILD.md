@@ -29,32 +29,35 @@ racine.
 
 Le pipeline officiel est [`.github/workflows/build-os.yml`](../.github/workflows/build-os.yml) :
 
-- **Déclencheurs** (conçus pour ne pas gaspiller de minutes : un build
-  multi-arch avec émulation arm64 est lent) :
+- **Déclencheurs** :
   - *push* sur `main` ou *pull request* touchant `os/**`, `memory/**`,
     `security/**` ou le workflow → **build de vérification amd64 seul**
-    (`bootc container lint`), **sans push ni signature**. Simple garde-fou
-    prouvant que le `Containerfile` build toujours.
+    (`bootc container lint`), **sans push ni signature**. Garde-fou rapide.
   - *tag* `v*` **ou** `workflow_dispatch` (manuel) → **release** : build
-    multi-arch (`amd64 + arm64`), push sur `ghcr.io` (tags `latest`, SHA, et la
-    version sur un tag), signature cosign, **plus** les jobs ISO (matrice
-    `amd64`/`arm64`).
+    `amd64 + arm64`, push sur `ghcr.io`, assemblage du manifest multi-arch,
+    signature cosign, **plus** les jobs ISO (une par architecture).
 
   Autrement dit : les commits ordinaires sur `main` sont *validés* mais **non
   publiés** ; pour publier/signer une image, on **pose un tag `v*`**.
-- **Job `build`** : `buildah` construit `os/Containerfile` (contexte = racine).
-  En vérification, une seule plateforme (`linux/amd64`) ; en release,
-  `qemu-user-static` est installé pour émuler arm64 et un **manifest OCI**
-  `linux/amd64, linux/arm64` est produit, tagué `latest` + SHA (+ version sur
-  tag) et poussé avec le `GITHUB_TOKEN` intégré — **aucun secret à configurer**.
-  Le `Containerfile` reçoit `TARGETARCH` : la couche NVIDIA n'est appliquée que
-  sur amd64.
-- **Signature** : après le push, l'image est signée par **cosign keyless**
-  (OIDC GitHub Actions, permission `id-token: write`, journalisée dans Rekor).
-  Aucune clé stockée. Vérification : section 6.
-- **Jobs `iso`** (tags `v*` et `workflow_dispatch`) : `bootc-image-builder`
-  produit une ISO **par architecture** (`--target-arch`), publiées comme
-  artefacts `vibeos-iso-amd64` / `vibeos-iso-arm64`.
+- **Runners natifs (pas d'émulation)** : le build est une matrice où chaque
+  architecture tourne sur **son propre runner natif** — amd64 sur
+  `ubuntu-latest`, arm64 sur `ubuntu-24.04-arm`. Chacun construit
+  `os/Containerfile` (contexte = racine, `bootc container lint` en dernière
+  étape) pour sa plateforme, sans `qemu` : l'arm64 se construit en ~15 min au
+  lieu de plus d'une heure en émulation. En release, chaque job pousse une image
+  taguée par arch (`<sha>-amd64`, `<sha>-arm64`). Le `Containerfile` reçoit
+  `TARGETARCH` : la couche NVIDIA n'est appliquée que sur amd64.
+- **Job `manifest`** (release) : assemble les deux images par arch en un
+  **manifest OCI** unique (tags `latest`, SHA, et la version sur un tag), poussé
+  avec le `GITHUB_TOKEN` intégré — **aucun secret à configurer**.
+- **Signature** : le **manifest** est signé par **cosign keyless** (OIDC GitHub
+  Actions, permission `id-token: write`, journalisée dans Rekor). Aucune clé
+  stockée. Vérification : section 6.
+- **Jobs `iso`** (release) : `bootc-image-builder` produit une ISO **par
+  architecture** sur son runner natif (pas de `--target-arch`), publiées comme
+  artefacts `vibeos-iso-amd64` / `vibeos-iso-arm64`. Sur une release, l'ISO ne
+  contient **aucun mot de passe en clair** (Anaconda demande le compte à
+  l'installation) ; seul un `workflow_dispatch` manuel bake un compte de test.
 
 Le workflow séparé [`ci.yml`](../.github/workflows/ci.yml) valide le code à
 chaque push/PR : build + tests + clippy de `vibed/` (dont le test
