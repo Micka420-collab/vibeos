@@ -40,13 +40,18 @@ zoxide
 bat
 eza
 btop
+atuin
 
 ## [dnf COPR] 1e. Vibecoding terminal stack (COPR) — see docs/ECOSYSTEM.md
 dnf5-plugins
 starship        # copr: atim/starship
 zellij          # copr: varlad/zellij
 lazygit         # copr: atim/lazygit
-# ghostty, yazi, atuin, mise: COPR/vendor repo — layer 1f (à suivre)
+ghostty         # copr: scottames/ghostty
+yazi            # copr: lihaohong/yazi
+
+## [dnf vendor repo] 1f. Toolchain manager
+mise            # repo: https://mise.jdx.dev/rpm/mise.repo
 
 ## [dnf — VSCodium community rpm repo] 2. Editor
 # VS Code binaries are proprietary/non-redistributable; VSCodium is the MIT

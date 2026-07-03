@@ -118,8 +118,9 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 #   bat      cat with syntax highlighting (also fzf/yazi previewer)
 #   eza      modern ls with per-file git status
 #   btop     TUI system monitor with GPU support (ollama inference)
-# NOTE: starship, zellij, ghostty, yazi, lazygit, atuin, mise are NOT in the
-# Fedora repos; they are layered from COPR/binaries below (layer 1e).
+#   atuin    shell history with rich search (audit trail of agent commands)
+# NOTE: starship, zellij, ghostty, yazi, lazygit are NOT in the Fedora repos;
+# they are layered from COPR below (layer 1e); mise from its vendor repo (1f).
 RUN dnf -y install --setopt=install_weak_deps=False \
         fish \
         neovim \
@@ -127,22 +128,36 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         bat \
         eza \
         btop \
+        atuin \
     && dnf clean all
 
 # --- 1e. Vibecoding terminal stack (COPR) ------------------------------------
 # Tools not packaged in Fedora, from well-maintained COPRs (probed working on
-# Kinoite 42): starship (atim), zellij (varlad), lazygit (atim). dnf5-plugins
-# provides the `dnf copr` subcommand. The COPR repos stay enabled so these
-# tools receive updates on image rebuilds (same model as the VSCodium repo).
-# /etc/skel configures fish -> starship, and the Zellij "vibe" layout.
+# Kinoite 42): starship (atim), zellij (varlad), lazygit (atim), ghostty
+# (scottames), yazi (lihaohong). dnf5-plugins provides the `dnf copr`
+# subcommand. The COPR repos stay enabled so these tools receive updates on
+# image rebuilds (same model as the VSCodium repo). /etc/skel configures
+# fish -> starship, Ghostty, the Zellij "vibe" layout and yazi.
 RUN dnf -y install dnf5-plugins \
     && dnf -y copr enable atim/starship \
     && dnf -y copr enable varlad/zellij \
     && dnf -y copr enable atim/lazygit \
+    && dnf -y copr enable scottames/ghostty \
+    && dnf -y copr enable lihaohong/yazi \
     && dnf -y install --setopt=install_weak_deps=False \
         starship \
         zellij \
         lazygit \
+        ghostty \
+        yazi \
+    && dnf clean all
+
+# --- 1f. mise (vendor rpm repo) ----------------------------------------------
+# Runtime/toolchain manager (Node, Python, Go...) installed per-user into $HOME
+# — nothing written to /usr at runtime, ideal for an immutable OS. Installed
+# from the official jdx.dev rpm repo, pinned via GPG-checked metadata.
+RUN dnf -y config-manager addrepo --from-repofile=https://mise.jdx.dev/rpm/mise.repo \
+    && dnf -y install --setopt=install_weak_deps=False mise \
     && dnf clean all
 
 # =============================================================================
