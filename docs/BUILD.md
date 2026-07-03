@@ -29,20 +29,26 @@ racine.
 
 Le pipeline officiel est [`.github/workflows/build-os.yml`](../.github/workflows/build-os.yml) :
 
-- **Déclencheurs** :
-  - *push* sur `main` touchant `os/**`, `memory/**`, `security/**` ou le
-    workflow → build multi-arch + push + signature cosign ;
-  - *tag* `v*` → idem, image taguée en plus avec la version (sans le `v`),
-    **plus** les jobs ISO (matrice `amd64`/`arm64`) ;
-  - *pull request* sur les mêmes chemins → **build seul** (aucun push, aucune
-    signature) ;
-  - `workflow_dispatch` (manuel) → build + push + signature + ISO.
-- **Job `build`** : `qemu-user-static` est installé pour émuler arm64, puis
-  `buildah` construit les deux plateformes (`linux/amd64, linux/arm64`) depuis
-  `os/Containerfile` (contexte = racine) en un **manifest OCI** unique, tagué
-  `latest` + SHA du commit (+ version sur tag), poussé sur `ghcr.io` avec le
-  `GITHUB_TOKEN` intégré — **aucun secret à configurer**. Le `Containerfile`
-  reçoit `TARGETARCH` : la couche NVIDIA n'est appliquée que sur amd64.
+- **Déclencheurs** (conçus pour ne pas gaspiller de minutes : un build
+  multi-arch avec émulation arm64 est lent) :
+  - *push* sur `main` ou *pull request* touchant `os/**`, `memory/**`,
+    `security/**` ou le workflow → **build de vérification amd64 seul**
+    (`bootc container lint`), **sans push ni signature**. Simple garde-fou
+    prouvant que le `Containerfile` build toujours.
+  - *tag* `v*` **ou** `workflow_dispatch` (manuel) → **release** : build
+    multi-arch (`amd64 + arm64`), push sur `ghcr.io` (tags `latest`, SHA, et la
+    version sur un tag), signature cosign, **plus** les jobs ISO (matrice
+    `amd64`/`arm64`).
+
+  Autrement dit : les commits ordinaires sur `main` sont *validés* mais **non
+  publiés** ; pour publier/signer une image, on **pose un tag `v*`**.
+- **Job `build`** : `buildah` construit `os/Containerfile` (contexte = racine).
+  En vérification, une seule plateforme (`linux/amd64`) ; en release,
+  `qemu-user-static` est installé pour émuler arm64 et un **manifest OCI**
+  `linux/amd64, linux/arm64` est produit, tagué `latest` + SHA (+ version sur
+  tag) et poussé avec le `GITHUB_TOKEN` intégré — **aucun secret à configurer**.
+  Le `Containerfile` reçoit `TARGETARCH` : la couche NVIDIA n'est appliquée que
+  sur amd64.
 - **Signature** : après le push, l'image est signée par **cosign keyless**
   (OIDC GitHub Actions, permission `id-token: write`, journalisée dans Rekor).
   Aucune clé stockée. Vérification : section 6.

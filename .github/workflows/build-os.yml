@@ -1,19 +1,20 @@
-# build-os.yml — Build, sign and publish the VibeOS bootc image (multi-arch),
-# and produce the install ISOs.
+# build-os.yml — Build, sign and publish the VibeOS bootc image, and produce
+# the install ISOs.
 #
-# Triggers:
-#   * push on main touching os/**, memory/**, security/** or this file
-#       -> build linux/amd64 + linux/arm64, push the manifest to ghcr.io,
-#          cosign keyless signing of the pushed digest
-#   * push tag v*
-#       -> same, image additionally tagged with the version (tag without the
-#          leading "v"), PLUS the `iso` jobs (one per architecture).
+# Cost-aware design (a full multi-arch build with arm64 emulation is slow):
+#   * push on main / pull_request touching os/**, memory/**, security/** or
+#     this file
+#       -> BUILD CHECK ONLY: linux/amd64, `bootc container lint`, NO push, NO
+#          signing. Fast gate that proves the Containerfile still builds.
+#   * push tag v*  OR  workflow_dispatch (manual)
+#       -> RELEASE: build linux/amd64 + linux/arm64 manifest, push to ghcr.io
+#          (tags: latest, git SHA, and the version on a tag), cosign keyless
+#          signing of the pushed digest, PLUS the `iso` jobs (one per arch).
 #          NOTE: GitHub does not evaluate `paths` filters on tag pushes, so a
 #          v* tag always builds regardless of which files changed.
-#   * pull_request touching the same paths
-#       -> build only (NO push, NO signing)
-#   * workflow_dispatch (manual)
-#       -> full build + push + sign + ISO jobs
+#
+# Publishing/signing only happen on tags and manual dispatch — normal commits
+# to main are validated but not published. Cut a `v*` tag to release.
 #
 # Auth: the built-in GITHUB_TOKEN (permissions: packages: write) — no extra
 # secrets required. Signing is cosign KEYLESS (OIDC via id-token: write) — no
@@ -50,11 +51,12 @@ permissions:
 
 jobs:
   build:
-    name: Build multi-arch bootc image (amd64 + arm64)
+    name: Build bootc image
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.meta.outputs.image }}
       digest: ${{ steps.push.outputs.digest }}
+      publish: ${{ steps.meta.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,24 +67,34 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      # arm64 layers are built under emulation on the amd64 runner.
+      - name: Compute image name, tags, platforms and publish flag
+        id: meta
+        run: |
+          echo "image=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
+          # RELEASE on version tags and manual dispatch; BUILD CHECK otherwise.
+          if [[ "${GITHUB_REF}" == refs/tags/v* || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "platforms=linux/amd64, linux/arm64" >> "$GITHUB_OUTPUT"
+            tags="latest ${GITHUB_SHA}"
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              tags="${tags} ${GITHUB_REF_NAME#v}"
+            fi
+            echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+            echo "tags=check-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # arm64 layers are built under emulation — only needed for a release.
       - name: Install qemu-user-static (arm64 emulation)
+        if: steps.meta.outputs.publish == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
 
-      - name: Compute image name and tags (ghcr requires lowercase)
-        id: meta
-        run: |
-          echo "image=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
-          tags="latest ${GITHUB_SHA}"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            tags="${tags} ${GITHUB_REF_NAME#v}"
-          fi
-          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
-
       - name: Log in to ghcr.io
-        if: github.event_name != 'pull_request'
+        if: steps.meta.outputs.publish == 'true'
         uses: redhat-actions/podman-login@v1
         with:
           registry: ${{ env.REGISTRY }}
@@ -92,20 +104,20 @@ jobs:
       # Context is the REPOSITORY ROOT: os/Containerfile copies os/rootfs/,
       # security/policy.d/ and memory/genesis.sh. `bootc container lint` runs
       # as the final build step and fails the job on OSTree layout violations.
-      # `platforms` makes buildah produce a multi-arch manifest list; the
-      # Containerfile receives TARGETARCH and skips the NVIDIA layer on arm64.
-      - name: Build image (buildah, linux/amd64 + linux/arm64)
+      # `platforms` is amd64 for a build check, amd64+arm64 (manifest) for a
+      # release; the Containerfile receives TARGETARCH and skips NVIDIA on arm64.
+      - name: Build image (buildah)
         id: build
         uses: redhat-actions/buildah-build@v2
         with:
           image: ${{ steps.meta.outputs.image }}
           tags: ${{ steps.meta.outputs.tags }}
-          platforms: linux/amd64, linux/arm64
+          platforms: ${{ steps.meta.outputs.platforms }}
           containerfiles: os/Containerfile
           context: .
 
       - name: Push manifest to ghcr.io
-        if: github.event_name != 'pull_request'
+        if: steps.meta.outputs.publish == 'true'
         id: push
         uses: redhat-actions/push-to-registry@v2
         with:
@@ -113,14 +125,14 @@ jobs:
           tags: ${{ steps.build.outputs.tags }}
 
       - name: Install cosign
-        if: github.event_name != 'pull_request'
+        if: steps.meta.outputs.publish == 'true'
         uses: sigstore/cosign-installer@v3
 
       # Keyless signing: the signature is bound to this workflow's OIDC
       # identity and logged in the Rekor transparency log. Verification
       # instructions live in docs/BUILD.md.
       - name: Sign pushed image (cosign keyless)
-        if: github.event_name != 'pull_request'
+        if: steps.meta.outputs.publish == 'true'
         run: |
           cosign sign --yes "${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}"
 
@@ -171,6 +183,8 @@ jobs:
           groups = ["wheel"]
           EOF
 
+      # The root filesystem type is declared inside the image
+      # (os/rootfs/usr/lib/bootc/install/00-vibeos.toml), so no --rootfs needed.
       - name: Run bootc-image-builder (--type iso, ${{ matrix.arch }})
         run: |
           mkdir -p output
