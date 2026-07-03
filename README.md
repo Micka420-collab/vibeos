@@ -25,7 +25,7 @@ VibeOS est une distribution Linux **AI-native, immuable et sécurisée par conce
 L'image OS ne contient **aucune mémoire d'usine**. Au premier démarrage, `vibeos-genesis.service` (gardé par `ConditionPathExists=!/var/lib/vibeos/memory/.initialized`) exécute `/usr/libexec/vibeos/genesis.sh` et construit la mémoire de la machine à partir de zéro dans `/var/lib/vibeos/memory` — **en clair en v0.1** ; le chiffrement LUKS/TPM2 du volume est un livrable de la **Phase 3**. Le **mode amnésique** (inspiré de Tails), qui recréera cette mémoire en tmpfs **à chaque démarrage** — rien ne survivra à l'extinction — est lui aussi un livrable **Phase 3** (generator systemd). La spécification complète est dans [docs/MEMORY.md](docs/MEMORY.md).
 
 ### 🤖 L'IA, citoyenne de l'OS — vibed + MCP + politiques
-> **Statut v0.1 :** le binaire `vibed` n'est **pas encore embarqué dans l'image** — c'est un livrable **Phase 2** (l'unité `vibed.service` est livrée mais gardée par `ConditionPathExists=/usr/bin/vibed`, donc sautée tant que le binaire est absent). Le serveur MCP, le **chargement des politiques** et le **journal d'audit** décrits ci-dessous sont donc la **cible Phase 2** ; en v0.1, seuls les **fichiers** de politique sont posés dans l'image. Le crate `vibed` existe et est testé (33 tests verts).
+> **Statut v0.1 :** le binaire `vibed` est désormais **embarqué dans l'image** (compilé en multi-stage dans `os/Containerfile`, installé en `/usr/bin/vibed`). Au boot, `vibed.service` (activé par preset) démarre, **charge et applique la politique installée** (`/etc/vibeos/policy.d/`, fail-closed), **sert le serveur MCP** sur `/run/vibed/mcp.sock` et **audite** chaque appel sous `/var/lib/vibeos`. Restent à venir : le **bac à sable par outil** (systemd-run, seccomp, landlock — **Phase 3**) et le durcissement (SELinux dédiée `vibed_t`, `User=vibed`, audit chaîné par hachage — **Phase 4**). Le crate `vibed` est testé (33 tests verts).
 
 Le démon système `vibed` (Rust, tokio, unité `vibed.service`) expose le contrôle de l'OS via un **serveur MCP** (JSON-RPC 2.0) sur la socket unix `/run/vibed/mcp.sock`. Chaque action d'un agent passe par un **moteur de politiques** (`/etc/vibeos/policy.d/*.toml`, la première règle qui matche gagne, refus par défaut) organisé en niveaux de capacités :
 
@@ -62,8 +62,10 @@ Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance*
 | CLIs IA préinstallées et épinglées (claude, agent SDK, gemini, codex, opencode, ollama) | ✅ Livré v0.1 |
 | Signature cosign (keyless) des images en CI | ✅ Livré v0.1 |
 | Fichiers de politique posés dans `/etc/vibeos/policy.d/` | ✅ Livré v0.1 |
-| Chargement / application des politiques par `vibed` (fail-closed) | 🛣️ Phase 2 (avec `vibed`) |
-| Journal d'audit JSONL (`/var/lib/vibeos/audit/vibed.jsonl`) avec identité de l'appelant | 🛣️ Phase 2 (avec `vibed`) |
+| Binaire `vibed` embarqué dans l'image (démarre au boot) | ✅ Livré v0.1 |
+| Serveur MCP `vibed` sur `/run/vibed/mcp.sock` | ✅ Livré v0.1 |
+| Chargement / application des politiques par `vibed` (fail-closed) | ✅ Livré v0.1 |
+| Journal d'audit JSONL (`/var/lib/vibeos/audit/vibed.jsonl`) avec identité de l'appelant | ✅ Livré v0.1 |
 | Genesis au premier boot (mémoire créée **en clair**, unité + `genesis.sh`) | ✅ Livré v0.1 |
 | Chiffrement LUKS/TPM2 de la mémoire | 🛣️ Phase 3 |
 | Mode amnésique (tmpfs recréé à chaque boot, generator systemd) | 🛣️ Phase 3 |

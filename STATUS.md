@@ -39,17 +39,19 @@
 
 - **2026-07-03** — **Release v0.1.0-dev publiée** : CI redécoupée en **runners natifs** (fini l'émulation arm64 : ~15 min/arch au lieu de ~2 h). Image multi-arch publiée sur ghcr.io, **signée cosign keyless** (Rekor #2062451740), et **2 ISO** (amd64 7,0 Go + arm64 6,3 Go) en artefacts CI. Trois correctifs de release au passage (`push-to-registry` registry, digest via `--digestfile`, espace disque agressif pour l'ISO amd64).
 
+- **2026-07-03** — **`vibed` branché dans l'image (Phase 2)** : le binaire est **embarqué** (compilé en multi-stage dans `os/Containerfile` → `/usr/bin/vibed`), **`vibed.service` démarre au boot**, **charge et applique la politique** installée (`/etc/vibeos/policy.d/`, 7 règles, fail-closed), **sert le serveur MCP** sur `/run/vibed/mcp.sock` (identité de l'appelant via `SO_PEERCRED`), **audite** sous `/var/lib/vibeos/audit/vibed.jsonl`, et expose l'outil MCP **`memory.query`**. Restent Phase 2 : HUD/quickshell (paquet + autostart), `memory.append` + `scope`/`limit`, outils T1 réels, config MCP côté client. `vibed` tourne encore en **root** (`User=vibed` : Phase 4).
+
 ## 📋 Reste à faire (court terme)
 
 1. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 ; valider NVIDIA sur le PC de référence.
-2. **Câbler le HUD Quickshell et `vibed`** dans l'image — restent des livrables **Phase 2** (le binaire `vibed` + l'activation du HUD/Global Theme).
+2. **Câbler le HUD Quickshell** (installer le paquet `quickshell` + poser l'autostart) et activer le **Global Theme** — restent des livrables **Phase 2**. (`vibed` est désormais branché et démarre au boot — voir « Fait ».)
 3. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
 4. Mettre à jour ce fichier + README à chaque jalon.
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
 - **Phase 1 (v0.1)** : CI verte sur GitHub Actions, ISO amd64+arm64 bootables en VM, validation NVIDIA sur le PC de référence.
-- **Phase 2 (v0.2)** : `vibed` livré dans l'image (étage cargo multi-stage), premiers outils T0/T1 utilisables depuis Claude Code via MCP.
+- **Phase 2 (v0.2)** : `vibed` **embarqué dans l'image** (étage cargo multi-stage) ✅ — restent les premiers **outils T1 réels**, l'outil `memory.append`, la **config MCP côté client** (Claude Code) et le **HUD Quickshell** (paquet + autostart).
 - **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée, **sandbox par outil (systemd-run, seccomp, landlock)**.
 - **Phase 4 (v0.4)** : durcissement (UKI / boot mesuré, SELinux dédiée `vibed_t`, hash-chaining audit, `User=vibed`).
 - **Phase 5 (v0.5)** : installateur brandé + identité visuelle complète.

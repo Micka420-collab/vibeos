@@ -20,7 +20,7 @@
 |---|---|---|---|---|
 | 0 | — | Fondation | ✅ Fait (2026-07-03) | 2–3 semaines (effectué) |
 | 1 | v0.1 | Première ISO | 🔜 Prochaine | 6–10 semaines |
-| 2 | v0.2 | vibed + MCP | Planifiée | 3–4 mois |
+| 2 | v0.2 | vibed + MCP | 🔄 En cours (vibed branché) | 3–4 mois |
 | 3 | v0.3 | Genesis & mémoire | Planifiée | 2–3 mois |
 | 4 | v0.4 | Durcissement | Planifiée | 4–6 mois |
 | 5 | v0.5 | Installateur & identité | Planifiée | 2–3 mois |
@@ -119,6 +119,8 @@ gantt
 ## 4. Phase 2 — v0.2 « vibed + MCP »
 
 **Objectif** : le système devient pilotable par des agents IA, au niveau OS, de façon gouvernée. Premier daemon fonctionnel, premiers outils T0/T1, moteur de politiques actif, audit complet.
+
+> **Statut (2026-07-03) — en grande partie fait** : le **branchement de `vibed`** est réalisé dès l'image v0.1. Le **binaire** est embarqué (compilé en multi-stage dans `os/Containerfile`, `/usr/bin/vibed`), **`vibed.service` démarre au boot**, le **moteur de politiques** est chargé et appliqué (fail-closed), le **serveur MCP** écoute sur `/run/vibed/mcp.sock`, le **journal d'audit** JSONL est écrit avec l'identité de l'appelant (`SO_PEERCRED`), et l'outil **`memory.query`** est servi. **Reste en Phase 2** : le **HUD Quickshell** (installation du paquet `quickshell` + autostart), l'outil **`memory.append`** (non implémenté dans `mcp.rs`) et les `scope`/`limit` de `memory.query`, les **premiers outils T1 réels**, et la **configuration MCP côté client** (Claude Code).
 
 ### Livrables
 

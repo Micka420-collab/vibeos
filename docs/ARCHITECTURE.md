@@ -101,7 +101,7 @@ Limite honnête de la v0.1 : l'initrd généré localement et la cmdline ne sont
 
 ### 4.1 vibed — le démon système IA
 
-- Binaire : `/usr/bin/vibed` — Rust, runtime tokio (voir ADR-003). L'unité `vibed.service` est livrée et activée par preset dès la v0.1, mais **sautée** (`ConditionPathExists=/usr/bin/vibed`) tant que le binaire n'est pas dans l'image (Phase 2). Aucun placeholder de binaire.
+- Binaire : `/usr/bin/vibed` — Rust, runtime tokio (voir ADR-003). Le binaire est **désormais embarqué dans l'image** (compilé en multi-stage dans `os/Containerfile`) ; l'unité `vibed.service`, activée par preset, **démarre donc au boot** (la garde `ConditionPathExists=/usr/bin/vibed` est satisfaite). Aucun placeholder de binaire.
 - Privilèges : en v0.1, `vibed` s'exécute en **root**, avec un durcissement systemd en deny-list (documenté honnêtement dans [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) §3.1). Cible Phase 4 : `User=vibed` + `CapabilityBoundingSet=` en allow-list vide.
 - Interface : **serveur MCP** (Model Context Protocol, JSON-RPC 2.0) sur socket Unix `/run/vibed/mcp.sock`. Le socket est `root:vibeos-agents` en mode `0660` : le groupe `vibeos-agents` et l'utilisateur système `vibed` sont créés par `usr/lib/sysusers.d/vibeos.conf` (livré dans l'image), et `vibed` applique ce groupe au socket à l'ouverture (avertissement + poursuite si le groupe manque). L'identité de l'appelant (uid/gid/pid) est capturée via les *peer credentials* (`SO_PEERCRED`) et inscrite dans chaque enregistrement d'audit.
 
@@ -223,7 +223,7 @@ sequenceDiagram
     GS->>M: identity.toml (hostname, machine-id,<br/>birth, mode)
     GS->>M: premier événement de journal (type: genesis)
     GS->>M: touch .initialized (EN DERNIER — crash-safe)
-    SD->>V: Démarre vibed (After=vibeos-genesis.service,<br/>sauté si /usr/bin/vibed absent — Phase 2)
+    SD->>V: Démarre vibed (After=vibeos-genesis.service ;<br/>binaire embarqué — démarre au boot)
     V->>V: Ouvre /run/vibed/mcp.sock<br/>charge /etc/vibeos/policy.d/*.toml (fail-closed)
     Note over M: Phase 3 : le répertoire devient un volume LUKS2<br/>(crypttab + TPM2, monté AVANT Genesis) ;<br/>mode amnésique : generator tmpfs +<br/>VIBEOS_MEMORY_MODE=amnesic, Genesis rejoué à chaque boot
 ```
@@ -255,7 +255,7 @@ flowchart LR
 |---|---|---|---|
 | Image OS bootc | Racine immuable, mises à jour atomiques | OCI registry (manifeste amd64+arm64), `bootc upgrade/rollback` | `ghcr.io/micka420-collab/vibeos`, racine OSTree lecture seule |
 | Boot vérifié | Secure Boot + composefs/fs-verity (v0.1) ; UKI + mesures TPM2 : **Phase 4** | UEFI Secure Boot ; TPM2 (PCR) en Phase 4 | ESP (`/boot/efi`) |
-| `vibed` | Démon système IA (Rust/tokio) — binaire dans l'image en Phase 2 | MCP JSON-RPC 2.0 sur socket Unix (`root:vibeos-agents` 0660) | `/usr/bin/vibed`, `vibed.service`, `/run/vibed/mcp.sock`, `usr/lib/sysusers.d/vibeos.conf` |
+| `vibed` | Démon système IA (Rust/tokio) — binaire embarqué dans l'image, démarre au boot | MCP JSON-RPC 2.0 sur socket Unix (`root:vibeos-agents` 0660) | `/usr/bin/vibed`, `vibed.service`, `/run/vibed/mcp.sock`, `usr/lib/sysusers.d/vibeos.conf` |
 | Moteur de politiques | Décision allow/deny/ask par tier T0–T3 — première règle qui matche, default-deny, fail-closed | Fichiers TOML, évalué in-process par vibed | `/etc/vibeos/policy.d/*.toml` |
 | Journal d'audit | Trace de chaque appel d'outil | JSONL append-only (chaînage de hachés + réplication journald : **Phase 4**) | `/var/lib/vibeos/audit/vibed.jsonl` |
 | Sandbox d'exécution (**Phase 3**) | Isolation des outils approuvés — v0.1 : exécution in-process | Unités systemd transitoires (seccomp, landlock) — Phase 3 | Profils par tier (Phase 3) |

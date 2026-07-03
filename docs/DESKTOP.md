@@ -15,7 +15,7 @@ Un bureau classique organise l'écran autour des **applications**. Un bureau de 
    Combien d'agents tournent, dans quel projet, depuis combien de temps, lequel attend une réponse. C'est le rôle du **HUD Quickshell** (§6) et des layouts Zellij « agent + lazygit + logs ».
 
 2. **Contexte** — *sur quoi la machine et moi sommes-nous en train de travailler ?*
-   Le projet courant, la mémoire de la machine (`/var/lib/vibeos/memory`, interrogée via MCP en Phase 2), l'historique des commandes (Atuin), les diffs en attente (lazygit). C'est le rôle des **activités KDE** (§3) : un contexte = une activité.
+   Le projet courant, la mémoire de la machine (`/var/lib/vibeos/memory`, interrogée via l'outil MCP `memory.query`, livré v0.1), l'historique des commandes (Atuin), les diffs en attente (lazygit). C'est le rôle des **activités KDE** (§3) : un contexte = une activité.
 
 3. **Confiance** — *qu'est-ce que j'autorise, et qu'est-ce qui a été fait en mon nom ?*
    Les tiers de policy T0–T3, les demandes d'approbation T2/T3, le journal d'audit. C'est le rôle du **code couleur des tiers** (voir [desktop/theme/palette.md](../desktop/theme/palette.md) §2), des futurs dialogues d'approbation Plasma (Phase 2) et du panneau « policy » du HUD.
@@ -26,7 +26,7 @@ Trois principes d'exécution en découlent :
 
 - **Le terminal est la scène principale.** Le cœur du vibecoding est Ghostty + fish + Starship + Zellij ([ECOSYSTEM.md](ECOSYSTEM.md)). Le bureau ne s'interpose pas : il encadre, il informe, il s'efface (`Meta+Return` est le raccourci le plus important de l'OS).
 - **Plasma 6 n'est pas remplacé, il est habillé.** Global Theme, schéma de couleurs, Panel Colorizer, HUD Quickshell **en couche additionnelle** (même stack Qt6/QML que Plasma). Zéro fork du shell Plasma, zéro composant non supporté.
-- **Dégradation gracieuse partout.** En v0.1, `/usr/bin/vibed` n'existe pas encore (Phase 2) : tout élément du bureau qui dépendra de `vibed` (livré en Phase 2) devra afficher un état « daemon hors ligne » propre et utile — jamais une erreur, jamais un crash.
+- **Dégradation gracieuse partout.** `vibed` est désormais **embarqué et démarre au boot** (le socket `/run/vibed/mcp.sock` est présent) ; en revanche le **HUD Quickshell n'est ni installé ni auto-démarré en v0.1** (Phase 2). Quand il arrivera, il pourra se connecter à `vibed` — mais devra toujours gérer proprement l'absence du socket (état « daemon hors ligne ») quand le démon est arrêté ou indisponible, jamais une erreur ni un crash.
 
 ---
 
@@ -75,7 +75,7 @@ Panneau Plasma standard (Icons-Only Task Manager), **masquage automatique** — 
 
 Le HUD est une **barre fine** (Quickshell `PanelWindow`) ancrée au bord **supérieur**, pleine largeur, posée **en couche additionnelle au-dessus de Plasma 6** : le panneau Plasma garde son propre bord, le HUD réserve son propre strut. Ce n'est **jamais** un remplacement du shell Plasma — si Quickshell est absent ou plante, le bureau Plasma reste 100 % fonctionnel. C'est **la** surface du triptyque : agents, tiers, jauges.
 
-**Statut : 🛣️ Phase 2.** En v0.1, le HUD n'est **pas embarqué dans l'image** (ni QML copié sous `/usr/share/vibeos/quickshell/`, ni autostart posé dans `/etc/skel`) : sa spécification et son code vivent dans [`desktop/quickshell/`](../desktop/README.md), et il sera câblé en **Phase 2**, en même temps que `vibed`. Le **repli en pastille discrète** et le dépli/repli par `Meta+V` (barre réduite à un indicateur global) font partie du même livrable Phase 2.
+**Statut : 🛣️ Phase 2.** En v0.1, le **code QML du HUD est bien présent dans l'image** (`os/Containerfile` copie `desktop/quickshell` vers `/usr/share/vibeos/quickshell/`), mais **le HUD n'est ni lancé ni auto-démarré** : le paquet `quickshell` n'est pas installé et **aucun autostart n'est posé dans `/etc/skel`**. `vibed` est, lui, déjà embarqué et actif au boot ; il reste donc, en **Phase 2**, à installer `quickshell` et à poser l'autostart pour rendre le HUD vivant. Le **repli en pastille discrète** et le dépli/repli par `Meta+V` (barre réduite à un indicateur global) font partie du même livrable Phase 2.
 
 ### 2.5 Comportement des fenêtres (KWin)
 
@@ -95,10 +95,10 @@ Tout est posé **au build** (jamais à l'exécution). La colonne « Statut » di
 | Global Theme (Look-and-Feel) « VibeOS Dark » | `/usr/share/plasma/look-and-feel/org.vibeos.dark/` (contient `defaults` + `layout.js` du panneau/dock) | 🛣️ Phase 2 |
 | Preset Panel Colorizer | appliqué via la config par défaut | 🛣️ Phase 2 |
 | Défauts utilisateur **bureau** (raccourcis, activités) | `/etc/skel/.config/…` | 🛣️ Phase 2 |
-| HUD Quickshell | QML sous `/usr/share/vibeos/quickshell/` + autostart utilisateur | 🛣️ Phase 2 |
+| HUD Quickshell | QML présent sous `/usr/share/vibeos/quickshell/` ; paquet `quickshell` + autostart utilisateur à venir | 🛣️ Phase 2 (QML copié, non lancé) |
 | Wallpapers | `/usr/share/wallpapers/VibeOSDark/` | 🛣️ Phase 5 (branding) |
 
-En v0.1, seuls **Ghostty** et les polices **`jetbrains-mono-fonts` / `fira-code-fonts`** sont déclarés dans `os/Containerfile` (avec la couche terminal et le schéma de couleurs). **Quickshell** et **Panel Colorizer** n'y sont **pas encore** : leur intégration est un livrable **Phase 2**. Ce document ne fait que **référencer** les noms de paquets — le Containerfile est un chantier distinct.
+En v0.1, **Ghostty**, les polices **`jetbrains-mono-fonts` / `fira-code-fonts`** et le schéma de couleurs sont déclarés dans `os/Containerfile` (avec la couche terminal), et le **code QML du HUD y est copié** (`desktop/quickshell` → `/usr/share/vibeos/quickshell/`). En revanche, le **paquet `quickshell`** (runtime) n'est **pas encore installé**, le HUD n'est **pas auto-démarré**, et **Panel Colorizer** n'est pas intégré : ces trois points sont des livrables **Phase 2**. Ce document ne fait que **référencer** les noms de paquets restants — le Containerfile est un chantier distinct.
 
 ---
 
@@ -124,8 +124,8 @@ Les activités Plasma (mécanisme natif, stable) incarnent le pilier **Contexte*
 2. En v0.1, la session applique le **schéma de couleurs VibeOSDark** (livré) sur un Plasma 6 par ailleurs standard. Le Global Theme **VibeOS Dark** complet (layout panneau + dock, wallpaper de l'activité Vibe) est un livrable **Phase 2**.
 3. **Phase 2** : l'**autostart utilisateur** (fichier `.desktop` dans `/etc/skel/.config/autostart/`, donc dans `$HOME` — pas de service système) lancera le HUD Quickshell. *(En v0.1, aucun autostart HUD n'est posé dans l'image.)*
 4. **Phase 2** : le HUD tentera `connect()` sur `/run/vibed/mcp.sock` :
-   - tant que `vibed` n'est pas embarqué, le socket n'existe pas → le HUD affiche l'état **« vibed hors ligne »** (pastille grise Overlay1, un texte court, un lien vers la doc). Il reste utile : jauges locales (CPU/RAM via les API systèmes standard) et raccourcis de lancement fonctionnent.
-   - une fois `vibed` livré : handshake MCP, abonnement aux événements, données vives (§6).
+   - `vibed` étant désormais embarqué et démarré au boot, le socket existe → handshake MCP, abonnement aux événements, données vives (§6) ;
+   - si le démon est arrêté ou indisponible, le socket est absent → le HUD affiche l'état **« vibed hors ligne »** (pastille grise Overlay1, un texte court, un lien vers la doc). Il reste utile : jauges locales (CPU/RAM via les API systèmes standard) et raccourcis de lancement fonctionnent.
 5. Aucun agent ne démarre tout seul. VibeOS n'exécute **jamais** un agent sans action explicite de l'humain — le bureau propose (raccourcis, dock, HUD), l'humain dispose.
 
 En v0.1, la session par défaut est un Plasma 6 au schéma VibeOSDark, terminal prêt (Ghostty + fish + Starship + Zellij), **sans HUD ni activités pré-configurées** (Phase 2). Le premier geste attendu reste l'ouverture d'un terminal Ghostty (le raccourci `Meta+Return` sera posé en Phase 2 avec les défauts bureau).
