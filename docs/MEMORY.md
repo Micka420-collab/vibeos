@@ -258,7 +258,8 @@ laisse une trace d'audit — y compris les écritures refusées.
 
 ### 4.3 Consultation par les agents
 
-En début de session, un agent (Claude Code, aider, modèle local ollama) appelle
+En début de session (à partir de la **Phase 2**, quand `vibed` sert l'outil), un
+agent (Claude Code, aider, modèle local ollama) appelle
 `memory.query` (T0, lecture seule, auto-approuvé par défaut) pour charger son
 contexte : identité et matériel de la machine, préférences de l'humain, index des
 projets, faits pertinents. C'est ce qui fait qu'une machine VibeOS « reconnaît »
@@ -371,13 +372,16 @@ La mémoire est portable — elle appartient à l'humain, pas au matériel.
 ## 9. Interface MCP — les outils `memory.*` de `vibed`
 
 Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
-`vibed`). **Un seul outil livré en v0.1** : `memory.query`, avec un argument
-unique `query`. L'outil `memory.append` et les arguments `scope`/`limit` sont
-des **cibles Phase 2/3**.
+`vibed`). **Aucun outil `memory.*` n'est exposé en v0.1** : ils sont servis par
+`vibed`, dont le binaire n'est pas encore embarqué dans l'image (**Phase 2**).
+`memory.query` (argument unique `query`) est **implémenté et testé dans le crate
+`vibed`** mais reste inaccessible tant que le démon n'est pas livré — c'est un
+livrable **Phase 2 (servi par `vibed`)**. `memory.append` et les arguments
+`scope`/`limit` viennent ensuite (**Phase 2/3**).
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
-| `memory.query` | **T0** (observe) | automatique | lecture seule (argument unique `query` en v0.1) | **livré v0.1** |
+| `memory.query` | **T0** (observe) | automatique | lecture seule (argument unique `query`) | 🛣️ **Phase 2** (servi par `vibed` ; implémenté et testé dans le crate, non exposé) |
 | `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture additive sur `user`, `projects`, `journal`, `knowledge` | **cible Phase 2/3** |
 
 Points durs :
@@ -392,7 +396,7 @@ Points durs :
 - Chaque appel — accepté ou refusé — est audité et produira, à terme, un événement
   `tool_call` dans le journal.
 
-### `memory.query` (T0 — livré v0.1)
+### `memory.query` (T0 — 🛣️ Phase 2, servi par `vibed`)
 
 ```json
 {
@@ -408,9 +412,9 @@ Points durs :
 }
 ```
 
-En v0.1, `query` est l'**unique argument** : filtrage lexical (sous-chaîne / clés)
-sur la mémoire. Réponse : contenu MCP standard (`result.content`) portant les
-entrées trouvées en JSON.
+Dans sa première version (Phase 2), `query` est l'**unique argument** : filtrage
+lexical (sous-chaîne / clés) sur la mémoire. Réponse : contenu MCP standard
+(`result.content`) portant les entrées trouvées en JSON.
 
 **Cible Phase 2/3** : arguments supplémentaires `scope` ∈ `identity` | `hardware` |
 `user` | `projects` | `journal` | `knowledge` et `limit` (plafond de résultats) ;

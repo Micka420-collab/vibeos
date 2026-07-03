@@ -24,7 +24,7 @@ Un citoyen a des droits, des devoirs et des lois. Une app installée n'a que des
 
 - **Une interface unique et déclarative** : les agents parlent au système via le démon `vibed` et son serveur MCP — jamais par accès brut. Chaque capacité du système est un outil nommé, typé, documenté.
 - **Des lois** : le moteur de politiques (`/etc/vibeos/policy.d/`) classe chaque action en niveaux T0 (observer) → T3 (destructif). Modifier le système (T2) ou toucher au disque, aux identifiants, à l'identité réseau (T3) exige l'approbation humaine par défaut.
-- **Une mémoire des actes** : chaque appel d'outil est audité (journal JSONL append-only, avec l'identité de l'appelant, dès la v0.1). On peut toujours répondre à « qui a fait quoi, quand, et avec quelle autorisation ».
+- **Une mémoire des actes** : chaque appel d'outil est audité (journal JSONL append-only, avec l'identité de l'appelant) — un mécanisme servi par `vibed`, donc effectif **à partir de la Phase 2**. On pourra alors toujours répondre à « qui a fait quoi, quand, et avec quelle autorisation ».
 - **Des frontières physiques** : le confinement de l'exécution par outil — systemd-run, seccomp, landlock — est un livrable de la **Phase 3**. À terme, même autorisé, un outil ne sortira pas de son enclos ; en v0.1, la frontière est le contrat MCP + politiques + audit.
 
 L'autonomie des agents n'est pas une faveur qu'on leur accorde : c'est une conséquence directe de la confiance que ce contrat rend possible.
@@ -36,7 +36,7 @@ La sécurité n'est pas une couche, c'est la fondation — et elle doit être **
 - **Immuable** — livré en v0.1 : racine en lecture seule, mises à jour atomiques, retour d'usine garanti (bootc/OSTree). L'état sain n'est pas restauré, il n'est jamais perdu.
 - **Vérifié** : les images OS sont signées avec sigstore/cosign en CI dès la v0.1, et l'image de base comme les outils IA sont épinglés (digest, versions exactes, lockfiles). La chaîne de démarrage mesurée UEFI Secure Boot → UKI → dm-verity/composefs est la cible de la **Phase 4** : à terme, ce qui démarre sera exactement ce qui a été signé, du firmware au système de fichiers.
 - **Chiffré** : la mémoire vivra sur LUKS (**Phase 3**). Un disque volé sera un disque muet.
-- **Audité et confiné** : journal d'audit JSONL des actions des agents et SELinux enforcing (politique targeted Fedora) dès la v0.1 ; sandboxing systématique des outils en **Phase 3**, politique SELinux dédiée à `vibed` en **Phase 4**.
+- **Audité et confiné** : **SELinux enforcing** (politique targeted Fedora) dès la v0.1 ; le **journal d'audit JSONL des actions des agents** arrive avec `vibed` à partir de la **Phase 2** ; sandboxing systématique des outils en **Phase 3**, politique SELinux dédiée à `vibed` en **Phase 4**.
 
 Un OS qui donne de vrais pouvoirs à des agents autonomes n'a pas le droit d'être moins sûr que les autres. Il doit l'être davantage — et il n'a pas non plus le droit de décrire au présent une protection qui n'existe pas encore.
 

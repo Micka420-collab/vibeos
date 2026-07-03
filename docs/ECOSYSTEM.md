@@ -22,8 +22,8 @@ On démarre sur un **Plasma 6 brandé** — fork Catppuccin « VibeOS Dark », p
 | codecompanion.nvim | olimorris/codecompanion.nvim | Apache-2.0 | lazy.nvim | IA dans nvim : ollama natif + **ACP** (pilote Claude Code/Gemini CLI) |
 | Ghostty | ghostty-org/ghostty | MIT | COPR/Terra | LE terminal (GPU, kitty graphics) ; kitty = plan B documenté |
 | fish | fish-shell/fish-shell | GPL-2.0 | rpm Fedora | Shell interactif zéro-config (bash reste `/bin/sh`) |
-| Starship | starship/starship | ISC | rpm Fedora | Prompt unique fish/bash/zsh, contexte git visible |
-| Zellij | zellij-org/zellij | MIT | rpm Fedora | Multiplexeur « humain », layouts KDL agent+lazygit+logs, résurrection post-update |
+| Starship | starship/starship | ISC | COPR (atim/starship) | Prompt unique fish/bash/zsh, contexte git visible |
+| Zellij | zellij-org/zellij | MIT | COPR (varlad/zellij) | Multiplexeur « humain », layouts KDL agent+lazygit+logs, résurrection post-update |
 | Yazi | sxyazi/yazi | MIT | COPR/binaire | File manager TUI, aperçus des fichiers créés par les agents |
 | lazygit | jesseduffield/lazygit | MIT | COPR/binaire | Reviewer/committer les diffs des agents |
 | Atuin | atuinsh/atuin | MIT | rpm/binaire | Historique = piste d'audit des commandes agents (sync opt-in chiffrée) |
@@ -32,17 +32,24 @@ On démarre sur un **Plasma 6 brandé** — fork Catppuccin « VibeOS Dark », p
 | eza | eza-community/eza | EUPL-1.2 | rpm Fedora | ls moderne avec statut git (licence OSI, à documenter) |
 | btop | aristocratos/btop | Apache-2.0 | rpm Fedora | Monitoring **GPU** pendant l'inférence ollama |
 | mise | jdx/mise | MIT | rpm officiel/binaire | Toolchains dans `$HOME`, parfait bootc ; gestionnaire unique |
-| MCP Reference Servers | modelcontextprotocol/servers | MIT | npm/uvx | Socle MCP offline : filesystem, git, fetch, memory, time |
-| Playwright MCP | microsoft/playwright-mcp | Apache-2.0 | npx | L'agent teste l'app web qu'il vient d'écrire (snapshots a11y) |
-| Serena | oraios/serena | MIT | uvx | Navigation/édition **symbolique LSP** (40+ langages) — multiplicateur pour agents |
-| sqlite-vec | asg017/sqlite-vec | MIT/Apache | .so dans l'image | Mémoire vectorielle embarquée, zéro démon (pré-v1 documenté) |
-| age | FiloSottile/age | BSD-3 | rpm Fedora | Chiffrement minimaliste des secrets |
-| SOPS | getsops/sops | MPL-2.0 | rpm releases | Secrets chiffrés versionnables (backend age), CNCF |
 | systemd-creds | (base Fedora) | LGPL-2.1+ | déjà présent | Scellement TPM2, un secret par service agent |
-| Quickshell | quickshell-mirror/quickshell | LGPL-3.0 | COPR | **HUD agents signature** (Qt6/QML comme Plasma) : statut agents, tiers, jauges |
-| Plasma Panel Colorizer | luisbocanegra/plasma-panel-colorizer | GPL-3.0 | kpackagetool6 | Identité visuelle des panels sans quitter Plasma supporté |
-| Catppuccin KDE | catppuccin/kde | MIT | fichiers dans l'image | Base MIT à forker en thème **« VibeOS Dark »** |
+| Catppuccin KDE | catppuccin/kde | MIT | fichiers dans l'image (schéma `VibeOSDark.colors` livré) | Base MIT forkée en thème **« VibeOS Dark »** |
 | uBlue/Bazzite (blueprint) | ublue-os/image-template | Apache-2.0 | modèle GitHub | Le manuel éprouvé du branding Fedora bootc (plymouth, SDDM, Anaconda, ISO CI) |
+
+## 🟡 Niveau 1-bis — Sélectionné, pas encore dans l'image (Phase 2 / à intégrer)
+
+> Retenus pour le défaut mais **absents d'`os/Containerfile` en v0.1** — listés ici pour ne pas les présenter comme livrés.
+
+| Projet | Licence | Cible | Rôle |
+|---|---|---|---|
+| MCP Reference Servers | MIT | 🛣️ Phase 2 (registre MCP servi par `vibed`) | Socle MCP offline : filesystem, git, fetch, memory, time |
+| Playwright MCP | Apache-2.0 | 🛣️ Phase 2 | L'agent teste l'app web qu'il vient d'écrire (snapshots a11y) |
+| Serena | MIT | 🛣️ Phase 2 | Navigation/édition **symbolique LSP** (40+ langages) — multiplicateur pour agents |
+| Quickshell | LGPL-3.0 | 🛣️ Phase 2 (chantier bureau) | **HUD agents signature** (Qt6/QML comme Plasma) : statut agents, tiers, jauges |
+| Plasma Panel Colorizer | GPL-3.0 | 🛣️ Phase 2 (chantier bureau) | Identité visuelle des panels sans quitter Plasma supporté |
+| age | BSD-3 | À intégrer (pas encore dans le Containerfile) | Chiffrement minimaliste des secrets |
+| SOPS | MPL-2.0 | À intégrer | Secrets chiffrés versionnables (backend age), CNCF |
+| sqlite-vec | MIT/Apache | À intégrer | Mémoire vectorielle embarquée, zéro démon (pré-v1 documenté) |
 
 ## 🔵 Niveau 2 — En un clic (`offer_optional`)
 

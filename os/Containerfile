@@ -119,6 +119,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 #   eza      modern ls with per-file git status
 #   btop     TUI system monitor with GPU support (ollama inference)
 #   atuin    shell history with rich search (audit trail of agent commands)
+#   *-fonts  JetBrains Mono + Fira Code — the terminal/editor default fonts
+#            referenced by /etc/skel/.config/ghostty/config
 # NOTE: starship, zellij, ghostty, yazi, lazygit are NOT in the Fedora repos;
 # they are layered from COPR below (layer 1e); mise from its vendor repo (1f).
 RUN dnf -y install --setopt=install_weak_deps=False \
@@ -129,6 +131,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         eza \
         btop \
         atuin \
+        jetbrains-mono-fonts \
+        fira-code-fonts \
     && dnf clean all
 
 # --- 1e. Vibecoding terminal stack (COPR) ------------------------------------

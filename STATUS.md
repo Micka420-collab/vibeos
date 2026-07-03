@@ -38,23 +38,22 @@
 ## 🔄 En cours (aujourd'hui)
 
 - **Release v0.1.0-dev** : pose du tag `v0.1.0-dev` pour déclencher la CI complète (build multi-arch amd64+arm64 + signature cosign + ISO par architecture en artefacts).
-- **Test de l'ISO en VM Hyper-V** (à faire côté Windows, [F:\VibeOS-ISO\](file:///F:/VibeOS-ISO/)) : boot jusqu'à SDDM + session Plasma 6.
+- **Test de l'ISO en VM Hyper-V** (à faire côté Windows ; ISO copiée dans `F:\VibeOS-ISO\` sur le poste de dev) : boot jusqu'à SDDM + session Plasma 6.
 
 ## 📋 Reste à faire (court terme)
 
-1. Intégrer les correctifs bureau + commit/push (bureau, installateur, dotfiles).
-2. Générer la première **ISO** amd64 (bootc-image-builder) depuis l'image locale + test de boot en VM Hyper-V (Gén. 2).
-3. Câbler le paquet **Quickshell** et le thème dans `os/Containerfile` (livrer le HUD et VibeOS Dark dans l'image) + ajouter la couche « terminal vibecoding » (Ghostty, fish, Starship, Zellij, yazi, lazygit, atuin, zoxide, bat, eza, btop, mise, opencode, nvim) — voir [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md).
-4. Relancer la **CI sur un tag `v0.1.0-dev`** une fois le build validé (build multi-arch + cosign + ISO en artefacts).
-5. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
-6. Mettre à jour ce fichier + README à chaque jalon.
+1. **Câbler le HUD Quickshell et `vibed`** dans `os/Containerfile` — le HUD et le binaire `vibed` restent des livrables **Phase 2** (voir [docs/DESKTOP.md](docs/DESKTOP.md) et [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md)).
+2. **Tester l'ISO amd64 en VM Hyper-V** (Gén. 2) : boot jusqu'à SDDM + session Plasma 6.
+3. **Release `v0.1.0-dev` en CI** : première validation du build multi-arch (manifest arm64) + cosign + **ISO par architecture** en artefacts.
+4. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
+5. Mettre à jour ce fichier + README à chaque jalon.
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
 - **Phase 1 (v0.1)** : CI verte sur GitHub Actions, ISO amd64+arm64 bootables en VM, validation NVIDIA sur le PC de référence.
 - **Phase 2 (v0.2)** : `vibed` livré dans l'image (étage cargo multi-stage), premiers outils T0/T1 utilisables depuis Claude Code via MCP.
-- **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée.
-- **Phase 4 (v0.4)** : durcissement (UKI, SELinux dédiée, sandbox par outil, hash-chaining audit, User=vibed).
+- **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée, **sandbox par outil (systemd-run, seccomp, landlock)**.
+- **Phase 4 (v0.4)** : durcissement (UKI / boot mesuré, SELinux dédiée `vibed_t`, hash-chaining audit, `User=vibed`).
 - **Phase 5 (v0.5)** : installateur brandé + identité visuelle complète.
 - **Phase 6 (v1.0)** : release publique.
 

@@ -172,16 +172,23 @@ jobs:
         run: |
           sudo podman pull --arch "${{ matrix.arch }}" "${{ needs.build.outputs.image }}:${{ github.sha }}"
 
-      # Test-only credentials baked into the CI ISO — replace with an SSH key
-      # (customizations.user.key) for anything beyond throwaway VMs.
+      # Installer config. On a RELEASE (tag v*), ship NO baked credentials —
+      # Anaconda prompts for account creation at install time, so a published
+      # ISO never contains a plaintext password. Only manual test builds
+      # (workflow_dispatch) bake the throwaway "vibe" account for quick VM boots.
       - name: Write installer config
         run: |
-          cat > config.toml <<'EOF'
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            cat > config.toml <<'EOF'
           [[customizations.user]]
           name = "vibe"
           password = "changeme"
           groups = ["wheel"]
           EOF
+          else
+            # Release ISO: empty config -> Anaconda asks for the user account.
+            printf '' > config.toml
+          fi
 
       # The root filesystem type is declared inside the image
       # (os/rootfs/usr/lib/bootc/install/00-vibeos.toml), so no --rootfs needed.

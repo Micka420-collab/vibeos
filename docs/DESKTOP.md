@@ -3,7 +3,7 @@
 > Version : v0.1 (fondation) — Date : 2026-07-03
 > Statut : document de référence du chantier bureau. Sources amont : [ECOSYSTEM.md](ECOSYSTEM.md) (stack curée), [ARCHITECTURE.md](ARCHITECTURE.md) (vibed, tiers T0–T3), [MEMORY.md](MEMORY.md) (mémoire, mode amnésique). Fichiers du chantier : [`desktop/`](../desktop/README.md).
 >
-> **Convention de lecture (règle d'honnêteté du projet)** : tout ce qui n'est pas livré en v0.1 est marqué **Phase N** (numérotation de [ROADMAP.md](../ROADMAP.md)). En particulier : le HUD est livré en v0.1 avec un **état « daemon hors ligne »** — sa liaison de données vivante avec `vibed` est un livrable **Phase 2**. Aucun mécanisme non implémenté n'est décrit au présent.
+> **Convention de lecture (règle d'honnêteté du projet)** : tout ce qui n'est pas livré en v0.1 est marqué **Phase N** (numérotation de [ROADMAP.md](../ROADMAP.md)). En v0.1, la couche bureau réellement embarquée dans l'image se limite au **schéma de couleurs `VibeOSDark.colors`**, aux **dotfiles terminal `/etc/skel`** (fish/Starship/Ghostty/Zellij/nvim) et aux **polices** (JetBrains Mono / Fira Code). Le **HUD Quickshell** (rendu comme liaison à `vibed`), le **Global Theme / layout**, le **preset Panel Colorizer**, les **activités** et les **raccourcis** sont des livrables **Phase 2** ; les **wallpapers** et le branding relèvent de la **Phase 5**. Aucun mécanisme non implémenté n'est décrit au présent.
 
 ---
 
@@ -26,7 +26,7 @@ Trois principes d'exécution en découlent :
 
 - **Le terminal est la scène principale.** Le cœur du vibecoding est Ghostty + fish + Starship + Zellij ([ECOSYSTEM.md](ECOSYSTEM.md)). Le bureau ne s'interpose pas : il encadre, il informe, il s'efface (`Meta+Return` est le raccourci le plus important de l'OS).
 - **Plasma 6 n'est pas remplacé, il est habillé.** Global Theme, schéma de couleurs, Panel Colorizer, HUD Quickshell **en couche additionnelle** (même stack Qt6/QML que Plasma). Zéro fork du shell Plasma, zéro composant non supporté.
-- **Dégradation gracieuse partout.** En v0.1, `/usr/bin/vibed` n'existe pas encore (Phase 2) : tout élément du bureau qui dépend de `vibed` affiche un état « daemon hors ligne » propre et utile — jamais une erreur, jamais un crash.
+- **Dégradation gracieuse partout.** En v0.1, `/usr/bin/vibed` n'existe pas encore (Phase 2) : tout élément du bureau qui dépendra de `vibed` (livré en Phase 2) devra afficher un état « daemon hors ligne » propre et utile — jamais une erreur, jamais un crash.
 
 ---
 
@@ -37,14 +37,14 @@ Trois principes d'exécution en découlent :
 ```mermaid
 flowchart TB
     subgraph SCREEN["Écran — session Plasma 6 Wayland"]
-        subgraph TOP["Panneau supérieur — 30 px, fond Mantle #181825 (preset Panel Colorizer)"]
+        subgraph TOP["Panneau supérieur — 30 px, fond Mantle #181825 (preset Panel Colorizer — Phase 2)"]
             direction LR
             K["Lanceur<br/>(Kickoff, icône VibeOS)"] --- ACT["Pager d'activités<br/>Vibe · Focus · Review"] --- SPACER1[" "] --- CLOCK["Horloge"] --- SPACER2[" "] --- TRAY["Zone système<br/>+ indicateur mode mémoire (Phase 3)"]
         end
         subgraph CENTER["Zone de travail — fond Base #1e1e2e"]
             direction LR
             WORK["Fenêtres<br/>(Ghostty/Zellij en scène principale,<br/>VSCodium, Firefox…)"]
-            HUD["HUD Quickshell<br/>(barre fine, couche additionnelle au panel Plasma)<br/>Agents · Tiers T0–T3 · Jauges ollama<br/>v0.1 : état «daemon hors ligne»<br/>Phase 2 : données vives via MCP"]
+            HUD["HUD Quickshell — 🛣️ Phase 2<br/>(barre fine, couche additionnelle au panel Plasma)<br/>Agents · Tiers T0–T3 · Jauges ollama<br/>d'abord état «daemon hors ligne», puis données vives via MCP"]
         end
         subgraph DOCK["Dock bas — masquage auto, icônes seules"]
             direction LR
@@ -65,7 +65,7 @@ flowchart TB
 | Gauche | Activity Pager | Les trois activités nommées **Vibe / Focus / Review** (§3) |
 | Centre | Horloge numérique | Format 24 h |
 | Droite | Zone système (System Tray) | Réseau, son, notifications ; **indicateur de mode mémoire** (persistant/amnésique) exigé par [MEMORY.md](MEMORY.md) §5 — livrable **Phase 3** avec le mode amnésique |
-| Toute la barre | Preset **Panel Colorizer** « vibeos-dark » | Fond Mantle opaque, texte Text, accent Mauve — GPL-3.0, installé via `kpackagetool6` au build de l'image |
+| Toute la barre | Preset **Panel Colorizer** « vibeos-dark » | Fond Mantle opaque, texte Text, accent Mauve — GPL-3.0 ; **livrable Phase 2** (installation `kpackagetool6`, pas encore dans l'image) |
 
 ### 2.3 Dock bas
 
@@ -73,9 +73,9 @@ Panneau Plasma standard (Icons-Only Task Manager), **masquage automatique** — 
 
 ### 2.4 Le HUD Quickshell — couche additionnelle
 
-En v0.1, le HUD est une **barre fine** (Quickshell `PanelWindow`) ancrée au bord **supérieur**, pleine largeur, posée **en couche additionnelle au-dessus de Plasma 6** : le panneau Plasma garde son propre bord, le HUD réserve son propre strut. Ce n'est **jamais** un remplacement du shell Plasma — si Quickshell est absent ou plante, le bureau Plasma reste 100 % fonctionnel. Spécification et code : [`desktop/quickshell/`](../desktop/README.md). C'est **la** surface du triptyque : agents, tiers, jauges.
+Le HUD est une **barre fine** (Quickshell `PanelWindow`) ancrée au bord **supérieur**, pleine largeur, posée **en couche additionnelle au-dessus de Plasma 6** : le panneau Plasma garde son propre bord, le HUD réserve son propre strut. Ce n'est **jamais** un remplacement du shell Plasma — si Quickshell est absent ou plante, le bureau Plasma reste 100 % fonctionnel. C'est **la** surface du triptyque : agents, tiers, jauges.
 
-Le **repli en pastille discrète** et le dépli/repli par `Meta+V` (barre réduite à un indicateur global) sont une **cible Phase 2** : en v0.1, la barre est livrée **toujours visible**, sans mécanique de repli.
+**Statut : 🛣️ Phase 2.** En v0.1, le HUD n'est **pas embarqué dans l'image** (ni QML copié sous `/usr/share/vibeos/quickshell/`, ni autostart posé dans `/etc/skel`) : sa spécification et son code vivent dans [`desktop/quickshell/`](../desktop/README.md), et il sera câblé en **Phase 2**, en même temps que `vibed`. Le **repli en pastille discrète** et le dépli/repli par `Meta+V` (barre réduite à un indicateur global) font partie du même livrable Phase 2.
 
 ### 2.5 Comportement des fenêtres (KWin)
 
@@ -85,22 +85,26 @@ Le **repli en pastille discrète** et le dépli/repli par `Meta+V` (barre rédui
 
 ### 2.6 Mécanique de livraison (OS immuable)
 
-| Élément | Chemin dans l'image (posé au build, jamais à l'exécution) |
-|---|---|
-| Global Theme (Look-and-Feel) « VibeOS Dark » | `/usr/share/plasma/look-and-feel/org.vibeos.dark/` (contient `defaults` + `layout.js` du panneau/dock) |
-| Schéma de couleurs | `/usr/share/color-schemes/VibeOSDark.colors` — source : [`desktop/theme/vibeos-dark.colors`](../desktop/theme/vibeos-dark.colors) |
-| Preset Panel Colorizer | livré dans l'image, appliqué via la config par défaut |
-| Défauts utilisateur (raccourcis, config Ghostty/Zellij/fish, activités) | `/etc/skel/.config/…` — copiés dans chaque nouveau `$HOME` à la création de l'utilisateur |
-| HUD Quickshell | QML sous `/usr/share/vibeos/quickshell/` + lancement en session (autostart utilisateur) |
-| Wallpapers | `/usr/share/wallpapers/VibeOSDark/` |
+Tout est posé **au build** (jamais à l'exécution). La colonne « Statut » distingue ce qui est réellement dans l'image v0.1 de ce qui reste à câbler.
 
-Les paquets nécessaires (Quickshell, Panel Colorizer, Ghostty, polices) sont déclarés dans `os/Containerfile` — chantier distinct, ce document ne fait que **référencer** les noms de paquets.
+| Élément | Chemin dans l'image | Statut |
+|---|---|---|
+| Schéma de couleurs | `/usr/share/color-schemes/VibeOSDark.colors` — source : [`desktop/theme/vibeos-dark.colors`](../desktop/theme/vibeos-dark.colors) | ✅ livré v0.1 |
+| Défauts utilisateur **terminal** (config Ghostty/Zellij/fish/Starship/nvim) | `/etc/skel/.config/…` — copiés dans chaque nouveau `$HOME` | ✅ livré v0.1 |
+| Polices JetBrains Mono / Fira Code | `jetbrains-mono-fonts`, `fira-code-fonts` (paquets Fedora) | ✅ livré v0.1 |
+| Global Theme (Look-and-Feel) « VibeOS Dark » | `/usr/share/plasma/look-and-feel/org.vibeos.dark/` (contient `defaults` + `layout.js` du panneau/dock) | 🛣️ Phase 2 |
+| Preset Panel Colorizer | appliqué via la config par défaut | 🛣️ Phase 2 |
+| Défauts utilisateur **bureau** (raccourcis, activités) | `/etc/skel/.config/…` | 🛣️ Phase 2 |
+| HUD Quickshell | QML sous `/usr/share/vibeos/quickshell/` + autostart utilisateur | 🛣️ Phase 2 |
+| Wallpapers | `/usr/share/wallpapers/VibeOSDark/` | 🛣️ Phase 5 (branding) |
+
+En v0.1, seuls **Ghostty** et les polices **`jetbrains-mono-fonts` / `fira-code-fonts`** sont déclarés dans `os/Containerfile` (avec la couche terminal et le schéma de couleurs). **Quickshell** et **Panel Colorizer** n'y sont **pas encore** : leur intégration est un livrable **Phase 2**. Ce document ne fait que **référencer** les noms de paquets — le Containerfile est un chantier distinct.
 
 ---
 
 ## 3. Les activités KDE — trois contextes nommés
 
-Les activités Plasma (mécanisme natif, stable) incarnent le pilier **Contexte**. Trois activités sont créées par défaut (config livrée dans `/etc/skel`) :
+Les activités Plasma (mécanisme natif, stable) incarnent le pilier **Contexte**. Trois activités seront pré-configurées par défaut (config `/etc/skel`) — **livrable 🛣️ Phase 2**, pas encore dans l'image v0.1 :
 
 | Activité | Usage | Différences concrètes |
 |---|---|---|
@@ -110,21 +114,21 @@ Les activités Plasma (mécanisme natif, stable) incarnent le pilier **Contexte*
 
 - `Meta+Tab` cycle entre les trois (comportement Plasma standard).
 - Les fenêtres peuvent être assignées à une activité (clic droit sur la barre de titre) — les agents longue durée restent dans **Vibe** pendant qu'on relit dans **Review**.
-- **Honnêteté** : en v0.1, les activités sont une *convention pré-configurée* (noms, wallpapers, réglages de notifications). Aucune automatisation ne déplace les fenêtres à votre place ; le couplage activité ↔ état des agents (ex. basculer en Review quand un agent termine) est une piste **Phase 2+**, non spécifiée ici.
+- **Honnêteté** : une fois livrées (Phase 2), les activités seront une *convention pré-configurée* (noms, wallpapers, réglages de notifications). Aucune automatisation ne déplace les fenêtres à votre place ; le couplage activité ↔ état des agents (ex. basculer en Review quand un agent termine) est une piste **Phase 2+**, non spécifiée ici.
 
 ---
 
 ## 4. La session par défaut
 
 1. **SDDM** (thème Breeze en v0.1 ; thème VibeOS en **Phase 5**, base SDDM Astronaut — voir ECOSYSTEM niveau 3) ouvre une **session Plasma 6 Wayland** (X11 non installé, héritage Kinoite).
-2. La session charge le Global Theme **VibeOS Dark** : schéma de couleurs, layout panneau + dock, wallpaper de l'activité Vibe.
-3. L'**autostart utilisateur** (fichier `.desktop` dans `/etc/skel/.config/autostart/`, donc dans `$HOME` — pas de service système) lance le HUD Quickshell.
-4. Le HUD tente `connect()` sur `/run/vibed/mcp.sock` :
-   - **v0.1 (Phase 1)** : le socket n'existe pas (`vibed` livré en Phase 2) → le HUD affiche l'état **« vibed hors ligne »** (pastille grise Overlay1, un texte court, un lien vers la doc). Il reste utile : jauges locales (CPU/RAM via les API systèmes standard) et raccourcis de lancement fonctionnent.
-   - **Phase 2** : handshake MCP, abonnement aux événements, données vives (§6).
+2. En v0.1, la session applique le **schéma de couleurs VibeOSDark** (livré) sur un Plasma 6 par ailleurs standard. Le Global Theme **VibeOS Dark** complet (layout panneau + dock, wallpaper de l'activité Vibe) est un livrable **Phase 2**.
+3. **Phase 2** : l'**autostart utilisateur** (fichier `.desktop` dans `/etc/skel/.config/autostart/`, donc dans `$HOME` — pas de service système) lancera le HUD Quickshell. *(En v0.1, aucun autostart HUD n'est posé dans l'image.)*
+4. **Phase 2** : le HUD tentera `connect()` sur `/run/vibed/mcp.sock` :
+   - tant que `vibed` n'est pas embarqué, le socket n'existe pas → le HUD affiche l'état **« vibed hors ligne »** (pastille grise Overlay1, un texte court, un lien vers la doc). Il reste utile : jauges locales (CPU/RAM via les API systèmes standard) et raccourcis de lancement fonctionnent.
+   - une fois `vibed` livré : handshake MCP, abonnement aux événements, données vives (§6).
 5. Aucun agent ne démarre tout seul. VibeOS n'exécute **jamais** un agent sans action explicite de l'humain — le bureau propose (raccourcis, dock, HUD), l'humain dispose.
 
-Session par défaut = activité **Vibe**, aucune fenêtre ouverte, barre HUD en état « vibed hors ligne ». Le premier geste attendu est `Meta+Return` (terminal) ou `Meta+A` (nouvel agent).
+En v0.1, la session par défaut est un Plasma 6 au schéma VibeOSDark, terminal prêt (Ghostty + fish + Starship + Zellij), **sans HUD ni activités pré-configurées** (Phase 2). Le premier geste attendu reste l'ouverture d'un terminal Ghostty (le raccourci `Meta+Return` sera posé en Phase 2 avec les défauts bureau).
 
 ---
 
@@ -159,7 +163,7 @@ Session par défaut = activité **Vibe**, aucune fenêtre ouverte, barre HUD en 
 | Monospace (alternative documentée) | Fira Code | OFL-1.1 | Livrée dans l'image, sélectionnable |
 | Interface (Plasma) | Noto Sans | OFL-1.1 | Héritage Fedora — pas de police UI exotique |
 
-Les deux familles mono sont packagées dans Fedora (`jetbrains-mono-fonts`, `fira-code-fonts`) — licences redistribuables, déclaration dans `os/Containerfile` (autre chantier).
+Les deux familles mono sont packagées dans Fedora (`jetbrains-mono-fonts`, `fira-code-fonts`), licences redistribuables — **installées dans l'image v0.1** (déclarées dans `os/Containerfile`).
 
 ### 5.3 Icônes et curseurs
 
@@ -175,57 +179,57 @@ v0.1 : **Breeze** (défaut Plasma, LGPL) — aucun fork d'icônes tant que le br
 
 ## 6. Le HUD agents (renvoi)
 
-Le HUD est spécifié et implémenté dans [`desktop/quickshell/`](../desktop/README.md) ; ce paragraphe fixe seulement son **contrat produit** :
+Le HUD est spécifié et son code vit dans [`desktop/quickshell/`](../desktop/README.md) ; **rappel de statut : le HUD lui-même est un livrable Phase 2** (non embarqué dans l'image v0.1, §2.4). Ce paragraphe fixe son **contrat produit** cible ; les colonnes distinguent le comportement selon que `vibed` est absent (« hors ligne ») ou présent :
 
-| Surface | Contenu | v0.1 | Phase 2 |
+| Surface | Contenu | vibed hors ligne | vibed présent |
 |---|---|---|---|
-| Barre HUD (toujours visible en v0.1 ; repli en pastille : **Phase 2**) | État global : gris = vibed hors ligne, mauve = agents actifs, peach pulsé = approbation attendue | barre fixe, gris uniquement | pastille repliable + tous les états |
+| Barre HUD (toujours visible ; repli en pastille : plus tard) | État global : gris = vibed hors ligne, mauve = agents actifs, peach pulsé = approbation attendue | barre fixe, gris uniquement | pastille repliable + tous les états |
 | Panneau Agents | Liste des sessions agents (nom, projet, durée, dernier outil appelé) | vide + message « vibed hors ligne (Phase 2) » | live via MCP `/run/vibed/mcp.sock` |
 | Panneau Confiance | Tiers T0–T3 avec compteurs d'appels, dernières décisions du moteur de politiques, lien vers l'audit | lecture **statique** de `/etc/vibeos/policy.d/*.toml` si lisible, sinon état vide propre | décisions vives + demandes T2/T3 |
 | Panneau Ressources | Jauges CPU/RAM/GPU, VRAM ollama, modèles chargés | jauges locales (sans ollama si absent) | jauges + états des modèles via ollama API locale |
 | Panneau Mémoire | Mode (persistant/amnésique), date de naissance, derniers événements du journal | état « non accessible » (la mémoire est `root:0700` et `memory.query` arrive avec vibed) | `memory.query` (T0) via MCP |
 
-Règle absolue (contrainte de dégradation gracieuse) : **toute absence de dépendance (vibed, ollama, policy illisible) produit un état affiché, jamais une exception**. Le HUD de la v0.1 est, de fait, la démonstration permanente de la règle d'honnêteté : il montre ce qui n'est pas encore là.
+Règle absolue (contrainte de dégradation gracieuse) : **toute absence de dépendance (vibed, ollama, policy illisible) doit produire un état affiché, jamais une exception**. Le HUD (Phase 2) sera, de fait, la démonstration permanente de la règle d'honnêteté : il montrera ce qui n'est pas encore là.
 
 ---
 
 ## 7. Raccourcis clavier globaux
 
-Livrés via `/etc/skel/.config/kglobalshortcutsrc` (+ entrées `.desktop` dédiées dans l'image pour les actions personnalisées). Les défauts Plasma non listés ici sont conservés tels quels.
+**Statut : 🛣️ Phase 2.** Ces raccourcis seront livrés via `/etc/skel/.config/kglobalshortcutsrc` (+ entrées `.desktop` dédiées pour les actions personnalisées) — **ce fichier n'est pas encore dans l'image en v0.1**, où les défauts Plasma 6 restent inchangés. Le tableau fixe la **cible** ; la colonne « Statut » indique la phase de câblage. « outil v0.1 » signale que le programme lancé est déjà dans l'image, seul le raccourci arrivant en Phase 2.
 
 | Raccourci | Action | Implémentation | Statut |
 |---|---|---|---|
-| `Meta+Return` | Terminal **Ghostty** (nouvelle fenêtre) | lancement `ghostty` | v0.1 |
-| `Meta+Shift+Return` | Session vibecoding : Ghostty + layout Zellij « vibe » (agent + lazygit + logs) | `ghostty -e zellij --layout vibe` | v0.1 |
-| `Meta+A` | **Nouvel agent** : Ghostty + layout Zellij « agent », prompt de choix du CLI (claude / opencode / gemini / codex) | script `vibeos-new-agent` (fish) livré dans l'image | v0.1 (lance le CLI) / **Phase 2** (session déclarée à vibed, visible dans le HUD) |
-| `Meta+M` | **État mémoire** : ouvre le panneau Mémoire du HUD | IPC Quickshell | v0.1 (état « non accessible ») / **Phase 2** (`memory.query`) |
-| `Meta+P` | **Tiers de politique** : ouvre le panneau Confiance du HUD | IPC Quickshell | v0.1 (vue statique policy.d) / **Phase 2** (décisions vives) |
-| `Meta+V` | Déplier/replier le **HUD** (repli en pastille) | IPC Quickshell | **Phase 2** (v0.1 : barre fine toujours visible, sans repli) |
-| `Meta+G` | **lazygit** dans le projet courant | `ghostty -e lazygit` | v0.1 |
-| `Meta+Y` | **yazi** (explorateur TUI) | `ghostty -e yazi` | v0.1 |
-| `Meta+B` | **btop** (monitoring GPU/CPU pendant l'inférence) | `ghostty -e btop` | v0.1 |
-| `Meta+E` | Dolphin (défaut Plasma, conservé) | Plasma | v0.1 |
-| `Meta+W` | Vue d'ensemble / Overview (défaut Plasma 6) | KWin | v0.1 |
-| `Meta+Tab` | Cycle des activités **Vibe → Focus → Review** | Plasma | v0.1 |
-| `Meta+T` | Éditeur de zones de tuilage (défaut KWin) | KWin | v0.1 |
-| `Meta+L` | Verrouiller la session (défaut Plasma) | Plasma | v0.1 |
-| `Meta+1…5` | Applications épinglées du dock (défaut Plasma) | Plasma | v0.1 |
+| `Meta+Return` | Terminal **Ghostty** (nouvelle fenêtre) | lancement `ghostty` | 🛣️ Phase 2 (outil v0.1) |
+| `Meta+Shift+Return` | Session vibecoding : Ghostty + layout Zellij « vibe » (agent + lazygit + logs) | `ghostty -e zellij --layout vibe` | 🛣️ Phase 2 (outil v0.1) |
+| `Meta+A` | **Nouvel agent** : Ghostty + layout Zellij « agent », prompt de choix du CLI (claude / opencode / gemini / codex) | script `vibeos-new-agent` (fish) | 🛣️ Phase 2 (puis session déclarée à vibed, visible dans le HUD) |
+| `Meta+M` | **État mémoire** : ouvre le panneau Mémoire du HUD | IPC Quickshell | 🛣️ Phase 2 |
+| `Meta+P` | **Tiers de politique** : ouvre le panneau Confiance du HUD | IPC Quickshell | 🛣️ Phase 2 |
+| `Meta+V` | Déplier/replier le **HUD** (repli en pastille) | IPC Quickshell | 🛣️ Phase 2 |
+| `Meta+G` | **lazygit** dans le projet courant | `ghostty -e lazygit` | 🛣️ Phase 2 (outil v0.1) |
+| `Meta+Y` | **yazi** (explorateur TUI) | `ghostty -e yazi` | 🛣️ Phase 2 (outil v0.1) |
+| `Meta+B` | **btop** (monitoring GPU/CPU pendant l'inférence) | `ghostty -e btop` | 🛣️ Phase 2 (outil v0.1) |
+| `Meta+E` | Dolphin (défaut Plasma, conservé) | Plasma | ✅ défaut Plasma (v0.1) |
+| `Meta+W` | Vue d'ensemble / Overview (défaut Plasma 6) | KWin | ✅ défaut Plasma (v0.1) |
+| `Meta+Tab` | Cycle des activités **Vibe → Focus → Review** | Plasma | ✅ défaut Plasma (activités nommées : Phase 2) |
+| `Meta+T` | Éditeur de zones de tuilage (défaut KWin) | KWin | ✅ défaut Plasma (v0.1) |
+| `Meta+L` | Verrouiller la session (défaut Plasma) | Plasma | ✅ défaut Plasma (v0.1) |
+| `Meta+1…5` | Applications épinglées du dock (défaut Plasma) | Plasma | ✅ défaut Plasma (v0.1) |
 
 Notes :
 
 - Aucun raccourci ne déclenche d'action T2/T3 : les raccourcis **ouvrent des surfaces d'information ou des outils**, jamais une approbation (une approbation T2/T3 exigera toujours une interaction explicite dans le dialogue dédié — Phase 2).
 - `Meta+A`, `Meta+M`, `Meta+P` sont volontairement adjacents au triptyque : **A**gent, **M**émoire (contexte), **P**olicy (confiance).
-- Tout est remappable par l'utilisateur (Réglages système → Raccourcis) : `/etc/skel` ne fournit que des défauts.
+- Tout sera remappable par l'utilisateur (Réglages système → Raccourcis) : `/etc/skel` ne fournira que des défauts.
 
 ---
 
 ## 8. Parcours utilisateur type — une session de vibecoding
 
-1. **Boot** → SDDM → session Plasma Wayland, activité **Vibe**, barre HUD visible (état « vibed hors ligne »). (Premier boot : Genesis a créé la mémoire — [MEMORY.md](MEMORY.md).)
+1. **Boot** → SDDM → session Plasma Wayland (à partir de la **Phase 2** : activité **Vibe** et barre HUD visible en état « vibed hors ligne »). (Premier boot : Genesis a créé la mémoire — [MEMORY.md](MEMORY.md).)
 2. `Meta+Shift+Return` → Ghostty s'ouvre avec le layout Zellij « vibe » : un volet agent, un volet lazygit, un volet logs. Starship affiche la branche git en Mauve.
 3. `zoxide` (`z monprojet`) pour rejoindre le projet ; Atuin retrouvera chaque commande de la session (piste d'audit locale).
 4. `Meta+A` → nouvel agent : l'utilisateur choisit `claude` (cloud) ou `opencode` sur ollama (offline). Il décrit l'objectif ; l'agent lit, écrit, compile. *(Phase 2 : la session apparaît dans le HUD ; ses appels d'outils passent par `/run/vibed/mcp.sock` et le moteur de politiques.)*
-5. Pendant que l'agent travaille : `Meta+B` (btop) pour surveiller la VRAM si ollama tourne ; `Meta+V` pour jeter un œil au HUD. *(v0.1 : le HUD affiche l'état hors ligne + jauges locales ; Phase 2 : agents et tiers en direct.)*
+5. Pendant que l'agent travaille : `Meta+B` (btop) pour surveiller la VRAM si ollama tourne ; `Meta+V` pour jeter un œil au HUD. *(Phase 2 : le HUD affiche d'abord l'état hors ligne + jauges locales, puis agents et tiers en direct une fois `vibed` livré.)*
 6. *(Phase 2)* L'agent demande une action **T2** (installer un paquet) : notification Plasma bord droit, badge **Peach**, dialogue d'approbation détaillant outil/arguments/tier — approuver, refuser, ou approuver avec durée limitée. Tout est audité dans `/var/lib/vibeos/audit/vibed.jsonl`.
 7. L'agent annonce la fin. `Meta+Tab` → activité **Review** : plein écran Zellij « review », lazygit pour relire les diffs hunk par hunk, `bat` pour lire les nouveaux fichiers, `yazi` (`Meta+Y`) pour survoler l'arborescence créée.
 8. Commit (l'humain signe — jamais l'agent seul), retour à **Vibe**, agent suivant — ou `Meta+Tab` vers **Focus** pour reprendre la main au calme, notifications coupées.
@@ -240,12 +244,14 @@ Le bureau réussit si, à chaque étape, les trois questions du triptyque ont un
 | Élément | v0.1 (Phase 1) | Phase 2 (vibed + MCP) | Phase 3 | Phase 5 (branding) |
 |---|---|---|---|---|
 | Schéma de couleurs `VibeOSDark.colors` | ✅ livré (`desktop/theme/`) | — | — | — |
-| Global Theme (layout panneau + dock) | ✅ livré | — | — | raffinements identité |
-| Preset Panel Colorizer | ✅ livré | — | — | — |
-| Activités Vibe / Focus / Review pré-configurées | ✅ livré (`/etc/skel`) | couplage agents (piste) | — | — |
-| Raccourcis globaux (§7) | ✅ livré (`/etc/skel`) | actions branchées sur vibed | — | — |
-| Wallpapers originaux (Genesis, Void) | ✅ livré | — | — | série complète + logo |
-| HUD Quickshell — rendu, panneaux, état « vibed hors ligne » | ✅ livré | — | — | — |
+| Dotfiles terminal `/etc/skel` (fish/Starship/Ghostty/Zellij/nvim) | ✅ livré | — | — | — |
+| Polices JetBrains Mono / Fira Code | ✅ livré (`os/Containerfile`) | — | — | — |
+| Global Theme (layout panneau + dock) | ❌ | 🛣️ **Phase 2** | — | raffinements identité |
+| Preset Panel Colorizer | ❌ | 🛣️ **Phase 2** | — | — |
+| Activités Vibe / Focus / Review pré-configurées | ❌ | 🛣️ **Phase 2** (`/etc/skel`) + couplage agents (piste) | — | — |
+| Raccourcis globaux (§7) | ❌ | 🛣️ **Phase 2** (`/etc/skel/kglobalshortcutsrc`, actions branchées sur vibed) | — | — |
+| Wallpapers originaux (Genesis, Void) | ❌ | — | — | 🛣️ **Phase 5** (série complète + logo) |
+| HUD Quickshell — rendu, panneaux, état « vibed hors ligne » | ❌ | 🛣️ **Phase 2** | — | — |
 | HUD ↔ vibed : agents, tiers, décisions **en direct** | ❌ | 🛣️ **Phase 2** (socket MCP `/run/vibed/mcp.sock`) | — | — |
 | Panneau Mémoire du HUD (`memory.query`) | ❌ (état « non accessible ») | 🛣️ Phase 2 | enrichi (mémoire v2) | — |
 | Dialogues d'approbation T2/T3 dans Plasma | ❌ (T2/T3 = refus fail-closed, cf. [ARCHITECTURE.md](ARCHITECTURE.md) §4.5) | 🛣️ Phase 2 | — | — |

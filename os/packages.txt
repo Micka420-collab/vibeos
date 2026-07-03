@@ -41,6 +41,8 @@ bat
 eza
 btop
 atuin
+jetbrains-mono-fonts
+fira-code-fonts
 
 ## [dnf COPR] 1e. Vibecoding terminal stack (COPR) — see docs/ECOSYSTEM.md
 dnf5-plugins
