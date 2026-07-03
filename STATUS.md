@@ -30,8 +30,8 @@
 
 ## 🔄 En cours (aujourd'hui)
 
-- **Correctifs bureau** : un agent applique les 10 problèmes de la revue du chantier bureau (couleurs de tiers T0/T1, honnêteté du tableau « livré », kickstart sans mot de passe en clair, cohérence palette).
-- **Commit/push** des nouveautés (build vert, bureau, installateur) une fois les correctifs bureau intégrés.
+- **Génération ISO amd64** : l'ISO s'assemble bien dans WSL2 (le fix rootfs `os/rootfs/usr/lib/bootc/install/00-vibeos.toml` a débloqué le manifeste), mais le 1er essai a été tué en cours d'assemblage — **WSL plafonné à 8 Go de RAM**, osbuild manque de mémoire. Correctif : augmenter la RAM WSL (`.wslconfig` : 12 Go + swap) et relancer ; sinon repli sur la génération **ISO en CI** (tag `v*`, runners mieux dotés) — c'est de toute façon l'environnement de release prévu.
+- **README élevé au niveau pro** (hero, badges live, navigation, expérience vibecoding) ✅.
 
 ## 📋 Reste à faire (court terme)
 

@@ -1,0 +1,9 @@
+# VibeOS default install configuration for bootc / bootc-image-builder.
+#
+# Declares the root filesystem type so `bootc install` and bootc-image-builder
+# know it WITHOUT requiring --rootfs on the command line (both locally and in
+# the CI ISO jobs). xfs is the robust, widely-used default for bootc images.
+#
+# See docs/BUILD.md §4 and .github/workflows/build-os.yml (iso jobs).
+[install]
+root-fs-type = "xfs"
