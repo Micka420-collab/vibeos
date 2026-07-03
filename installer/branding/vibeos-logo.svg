@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  vibeos-logo.svg - VibeOS monogram logo (original work, v0.1)
+
+  Geometric "V" monogram on the VibeOS Dark palette (Catppuccin Mocha fork,
+  MIT): base #1e1e2e, accent mauve #cba6f7, lavender #b4befe. The pulse line
+  under the V nods to the "vibe": a live signal between human and machine.
+
+  Standalone SVG: no external references, no fonts, no scripts.
+  License: Apache-2.0 (VibeOS repository license). PNG renders are generated
+  from this file - see installer/branding/README.md.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>VibeOS</title>
+  <desc>VibeOS logo: a mauve geometric V monogram with a pulse line, on a dark rounded-square badge.</desc>
+
+  <defs>
+    <!-- Mauve to lavender sweep - the VibeOS Dark accent range -->
+    <linearGradient id="vibe-accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cba6f7"/>
+      <stop offset="1" stop-color="#b4befe"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Badge: VibeOS Dark base with a subtle surface border -->
+  <rect x="2" y="2" width="252" height="252" rx="58" fill="#1e1e2e" stroke="#313244" stroke-width="4"/>
+
+  <!-- Monogram: geometric V -->
+  <path d="M60 62 H98 L128 140 L158 62 H196 L147 178 H109 Z" fill="url(#vibe-accent)"/>
+
+  <!-- Pulse: the vibe signal -->
+  <path d="M74 208 H104 L114 196 L128 220 L140 208 H182"
+        fill="none" stroke="#cba6f7" stroke-width="8"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

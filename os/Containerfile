@@ -204,28 +204,35 @@ RUN set -eu; \
 #    npm's default global prefix on Fedora is /usr/local — a symlink into
 #    /var on OSTree, i.e. NOT part of the image. Force --prefix=/usr so the
 #    CLIs land in /usr/lib/node_modules with their launchers in /usr/bin.
-#    Shipped CLIs: Claude Code, Claude Agent SDK, Gemini CLI, Codex
-#    (see docs/ARCHITECTURE.md §4.4 and ADR-006).
+#    HOME/npm_config_cache are forced to /tmp: on OSTree images /root is a
+#    symlink to var/roothome (absent at build time), so npm's default cache
+#    at /root/.npm fails with ENOTDIR. Keeping the cache in /tmp also keeps
+#    it out of the image entirely.
+#    Shipped CLIs: Claude Code, Claude Agent SDK, Gemini CLI, Codex, opencode
+#    (see docs/ARCHITECTURE.md §4.4, ADR-006 and docs/ECOSYSTEM.md).
+#    opencode (sst/opencode, MIT): multi-provider terminal agent, fully local
+#    via ollama — the curated default addition to the shipped CLIs.
 # =============================================================================
-RUN npm install -g --prefix=/usr \
+RUN HOME=/tmp npm_config_cache=/tmp/.npm-cache \
+        npm install -g --prefix=/usr \
         @anthropic-ai/claude-code@2.1.199 \
         @anthropic-ai/claude-agent-sdk@0.3.199 \
         @google/gemini-cli@0.49.0 \
         @openai/codex@0.142.5 \
-    && npm cache clean --force \
-    && rm -rf /root/.npm
+        opencode-ai@1.17.13 \
+    && rm -rf /tmp/.npm-cache
 
 # =============================================================================
-# 6. aider via pip — version PINNED (supply chain)
-#    Same OSTree rationale: `pip install` without --prefix targets /usr/local
-#    (-> /var, dropped from the image), so we install into /usr explicitly.
-#    --break-system-packages is required because Fedora marks its Python as
-#    externally managed (PEP 668); this is acceptable at IMAGE BUILD time —
-#    the result is validated and shipped as one immutable, tested unit, not
-#    mutated on a live system.
+# 6. aider — NOT shipped by default (optional user install)
+#    aider-chat requires Python <3.13, but Fedora Kinoite 42 ships Python 3.13,
+#    so it cannot be layered into the image. The ECOSYSTEM curation already
+#    flagged aider as declining and picked opencode (above) as the default
+#    terminal agent. Users who want aider install it in an isolated Python 3.12
+#    with uv, without touching the immutable OS:
+#        uvx --python 3.12 aider-chat        # ephemeral
+#        uv tool install --python 3.12 aider-chat   # persistent, in ~/.local
+#    See docs/ECOSYSTEM.md.
 # =============================================================================
-RUN python3 -m pip install --no-cache-dir --prefix=/usr --break-system-packages \
-        aider-chat==0.86.2
 
 # =============================================================================
 # 7. VibeOS overlay — systemd units, presets, sysusers, image identity,
@@ -262,9 +269,13 @@ COPY --chmod=0755 memory/genesis.sh /usr/libexec/vibeos/genesis.sh
 # =============================================================================
 # 8. Finalize: scrub machine-local state, then validate the image
 #    /var must ship empty in a bootc image (it is deploy-time machine state);
-#    dnf/npm/pip/akmods leave caches and logs behind. `bootc container lint`
-#    fails the build on layout violations (content in /var, broken
-#    /usr/local, ...). Keep this as the FINAL step.
+#    dnf/npm/pip/akmods leave caches and logs behind. /run and /tmp are
+#    runtime-only tmpfs and must ship empty too (npm's node-gyp cache landed in
+#    /tmp/.cache because we set HOME=/tmp for the CLI install). `bootc container
+#    lint` warns on any content in /run and /tmp. Keep this as the FINAL step.
 # =============================================================================
+# Note: do NOT wipe all of /run — podman bind-mounts /run/systemd/resolve for
+# build-time DNS and it is busy. Only the dnf cruft under /run needs removing.
 RUN rm -rf /var/cache/* /var/log/* /var/lib/dnf /var/tmp/* /root/.cache \
+             /tmp/* /tmp/.[!.]* /run/dnf \
     && bootc container lint

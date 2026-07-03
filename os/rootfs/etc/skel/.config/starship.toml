@@ -1,0 +1,117 @@
+# ~/.config/starship.toml — VibeOS default prompt (shipped via /etc/skel)
+# Theme: "VibeOS Dark" — MIT fork of Catppuccin Mocha (see docs/ECOSYSTEM.md).
+# Language versions shown below come from whatever `mise` puts in PATH:
+# no extra config needed, each project displays its own toolchain.
+
+"$schema" = 'https://starship.rs/config-schema.json'
+
+add_newline = true
+command_timeout = 1000
+palette = "vibeos_dark"
+
+format = """
+$username\
+$hostname\
+$directory\
+$git_branch\
+$git_status\
+$nodejs\
+$python\
+$rust\
+$golang\
+$cmd_duration\
+$line_break\
+$character"""
+
+# ---------------------------------------------------------------------------
+# VibeOS Dark palette (fork of Catppuccin Mocha, MIT)
+# ---------------------------------------------------------------------------
+[palettes.vibeos_dark]
+base = "#1e1e2e"
+mantle = "#181825"
+surface = "#313244"
+overlay = "#6c7086"
+text = "#cdd6f4"
+lavender = "#b4befe"
+blue = "#89b4fa"
+sky = "#89dceb"
+teal = "#94e2d5"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+peach = "#fab387"
+red = "#f38ba8"
+mauve = "#cba6f7"
+pink = "#f5c2e7"
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+[character]
+success_symbol = "[❯](bold mauve)"
+error_symbol = "[❯](bold red)"
+vimcmd_symbol = "[❮](bold green)"
+
+# Only shown over SSH or as root — quiet on the local desktop.
+[username]
+style_user = "bold mauve"
+style_root = "bold red"
+format = "[$user]($style)[@](overlay)"
+
+[hostname]
+ssh_only = true
+style = "bold lavender"
+format = "[$hostname]($style) "
+
+[directory]
+style = "bold blue"
+truncation_length = 3
+truncate_to_repo = true
+read_only = " 󰌾"
+read_only_style = "red"
+format = "[$path]($style)[$read_only]($read_only_style) "
+
+[git_branch]
+symbol = " "
+style = "bold lavender"
+format = "on [$symbol$branch(:$remote_branch)]($style) "
+
+[git_status]
+style = "bold peach"
+format = '([\[$all_status$ahead_behind\]]($style) )'
+conflicted = "="
+ahead = "⇡${count}"
+behind = "⇣${count}"
+diverged = "⇕⇡${ahead_count}⇣${behind_count}"
+untracked = "?${count}"
+stashed = "*"
+modified = "!${count}"
+staged = "+${count}"
+deleted = "✘${count}"
+
+[cmd_duration]
+min_time = 2000
+style = "yellow"
+format = "took [$duration]($style) "
+
+# --- Language versions (resolved through mise toolchains) -------------------
+
+[nodejs]
+symbol = " "
+style = "green"
+format = "via [$symbol($version )]($style)"
+
+[python]
+symbol = " "
+style = "yellow"
+format = 'via [$symbol($version )(\($virtualenv\) )]($style)'
+
+[rust]
+symbol = "󱘗 "
+style = "peach"
+format = "via [$symbol($version )]($style)"
+
+[golang]
+symbol = " "
+style = "sky"
+format = "via [$symbol($version )]($style)"

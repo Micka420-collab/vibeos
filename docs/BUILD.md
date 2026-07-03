@@ -141,7 +141,7 @@ ls -l /usr/lib/systemd/system/vibed.service \
       /usr/libexec/vibeos/genesis.sh
 # La politique par défaut DOIT être livrée dans l'image (fail-closed sinon) :
 test -f /etc/vibeos/policy.d/default.toml && echo "policy OK" || echo "POLICY MANQUANTE"
-command -v code ollama claude gemini codex aider rg fd fzf socat
+command -v code ollama claude gemini codex opencode rg fd fzf socat
 ollama --version            # 0.31.1 (épinglé + sha256 vérifié au build)
 exit
 ```

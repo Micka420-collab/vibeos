@@ -19,7 +19,7 @@ flowchart LR
         WEB[Contenu web / docs ingérés]
         MCP3[Serveurs MCP tiers]
         MODEL[Modèles cloud & locaux]
-        AGENT[Agents IA<br/>Claude Code, aider, ollama]
+        AGENT[Agents IA<br/>Claude Code, opencode, ollama]
     end
     subgraph TCB["Base de confiance (TCB)"]
         VIBED[vibed<br/>serveur MCP + moteur de politiques]
@@ -70,7 +70,7 @@ Tout ce qui traverse la frontière `AGENT → VIBED` est traité comme une entr�
 | M1 | **Attaquant distant** | Exploitation réseau, phishing, services exposés | Ransomware, vol de données, botnet |
 | M2 | **Contenu web malveillant ingéré par l'agent** (injection de prompt indirecte) | Instructions cachées dans pages web, READMEs, issues GitHub, docs, sorties de commandes | Détourner l'agent pour exécuter des actions système au profit de l'attaquant |
 | M3 | **Outil/serveur MCP tiers malveillant** | Résultats d'outils forgés, descriptions d'outils piégées (tool poisoning), exfiltration via arguments | Vol de secrets, escalade via la confiance accordée aux sorties d'outils |
-| M4 | **Supply chain** (CLIs IA : Claude Code, aider, ollama ; image de base Fedora ; crates Rust ; actions CI) | Paquet/binaire/dépendance compromis en amont, typosquatting, compromission du registre | Implantation à grande échelle |
+| M4 | **Supply chain** (CLIs IA : Claude Code, opencode, ollama ; image de base Fedora ; crates Rust ; actions CI) | Paquet/binaire/dépendance compromis en amont, typosquatting, compromission du registre | Implantation à grande échelle |
 | M5 | **Voleur physique** | Vol de la machine éteinte ou verrouillée, boot sur média externe | Accès aux données locales (A1, A2, A4) |
 | M6 | **Modèle local empoisonné** | Poids GGUF altérés contenant des comportements déclenchables (backdoor comportementale) | Exécution différée d'actions hostiles, hors de tout contrôle réseau |
 

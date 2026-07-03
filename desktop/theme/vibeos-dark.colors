@@ -1,0 +1,165 @@
+# VibeOS Dark — KDE Plasma 6 color scheme
+#
+# Derived from Catppuccin Mocha (https://github.com/catppuccin/kde),
+# licensed under the MIT License — Copyright (c) 2021 Catppuccin.
+# VibeOS Dark fork — Copyright (c) 2026 VibeOS contributors, MIT License.
+#
+# Palette (Catppuccin Mocha values, kept verbatim):
+#   Base    #1e1e2e   Mantle  #181825   Crust    #11111b
+#   Surface0 #313244  Surface1 #45475a  Surface2 #585b70
+#   Overlay0 #6c7086  Overlay1 #7f849c  Overlay2 #9399b2
+#   Text    #cdd6f4   Subtext1 #bac2de  Subtext0 #a6adc8
+#   Mauve   #cba6f7 (VibeOS accent)     Blue     #89b4fa
+#   Green   #a6e3a1   Peach   #fab387   Red      #f38ba8
+#   Yellow  #f9e2af   Lavender #b4befe  Pink     #f5c2e7
+#
+# All values below are decimal "r,g,b" as required by KColorScheme.
+# Install target (image build): /usr/share/color-schemes/VibeOSDark.colors
+
+[ColorEffects:Disabled]
+Color=24,24,37
+ColorAmount=0
+ColorEffect=0
+ContrastAmount=0.65
+ContrastEffect=1
+IntensityAmount=0.1
+IntensityEffect=2
+
+[ColorEffects:Inactive]
+ChangeSelectionColor=true
+Color=24,24,37
+ColorAmount=0.025
+ColorEffect=2
+ContrastAmount=0.1
+ContrastEffect=2
+Enable=false
+IntensityAmount=0
+IntensityEffect=0
+
+[Colors:Button]
+BackgroundAlternate=69,71,90
+BackgroundNormal=49,50,68
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=203,166,247
+ForegroundInactive=127,132,156
+ForegroundLink=137,180,250
+ForegroundNegative=243,139,168
+ForegroundNeutral=250,179,135
+ForegroundNormal=205,214,244
+ForegroundPositive=166,227,161
+ForegroundVisited=180,190,254
+
+[Colors:Complementary]
+BackgroundAlternate=24,24,37
+BackgroundNormal=17,17,27
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=203,166,247
+ForegroundInactive=127,132,156
+ForegroundLink=137,180,250
+ForegroundNegative=243,139,168
+ForegroundNeutral=250,179,135
+ForegroundNormal=205,214,244
+ForegroundPositive=166,227,161
+ForegroundVisited=180,190,254
+
+[Colors:Header]
+BackgroundAlternate=17,17,27
+BackgroundNormal=24,24,37
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=203,166,247
+ForegroundInactive=127,132,156
+ForegroundLink=137,180,250
+ForegroundNegative=243,139,168
+ForegroundNeutral=250,179,135
+ForegroundNormal=205,214,244
+ForegroundPositive=166,227,161
+ForegroundVisited=180,190,254
+
+[Colors:Header][Inactive]
+BackgroundAlternate=24,24,37
+BackgroundNormal=17,17,27
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=203,166,247
+ForegroundInactive=127,132,156
+ForegroundLink=137,180,250
+ForegroundNegative=243,139,168
+ForegroundNeutral=250,179,135
+ForegroundNormal=166,173,200
+ForegroundPositive=166,227,161
+ForegroundVisited=180,190,254
+
+[Colors:Selection]
+BackgroundAlternate=203,166,247
+BackgroundNormal=203,166,247
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=17,17,27
+ForegroundInactive=49,50,68
+ForegroundLink=17,17,27
+ForegroundNegative=17,17,27
+ForegroundNeutral=17,17,27
+ForegroundNormal=30,30,46
+ForegroundPositive=17,17,27
+ForegroundVisited=49,50,68
+
+[Colors:Tooltip]
+BackgroundAlternate=17,17,27
+BackgroundNormal=24,24,37
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=203,166,247
+ForegroundInactive=127,132,156
+ForegroundLink=137,180,250
+ForegroundNegative=243,139,168
+ForegroundNeutral=250,179,135
+ForegroundNormal=205,214,244
+ForegroundPositive=166,227,161
+ForegroundVisited=180,190,254
+
+[Colors:View]
+BackgroundAlternate=24,24,37
+BackgroundNormal=30,30,46
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=203,166,247
+ForegroundInactive=127,132,156
+ForegroundLink=137,180,250
+ForegroundNegative=243,139,168
+ForegroundNeutral=250,179,135
+ForegroundNormal=205,214,244
+ForegroundPositive=166,227,161
+ForegroundVisited=180,190,254
+
+[Colors:Window]
+BackgroundAlternate=17,17,27
+BackgroundNormal=24,24,37
+DecorationFocus=203,166,247
+DecorationHover=203,166,247
+ForegroundActive=203,166,247
+ForegroundInactive=127,132,156
+ForegroundLink=137,180,250
+ForegroundNegative=243,139,168
+ForegroundNeutral=250,179,135
+ForegroundNormal=205,214,244
+ForegroundPositive=166,227,161
+ForegroundVisited=180,190,254
+
+[General]
+ColorScheme=VibeOSDark
+Name=VibeOS Dark
+shadeSortColumn=true
+
+[KDE]
+contrast=4
+
+[WM]
+activeBackground=24,24,37
+activeBlend=203,166,247
+activeForeground=205,214,244
+inactiveBackground=17,17,27
+inactiveBlend=69,71,90
+inactiveForeground=127,132,156

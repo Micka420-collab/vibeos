@@ -17,7 +17,7 @@ flowchart TB
         SELINUX --> VIBED[vibed.service<br/>durci systemd]
     end
     subgraph RUNTIME["Exécution des agents"]
-        AGENTS[Claude Code / gemini-cli / codex / aider / ollama] -->|/run/vibed/mcp.sock| VIBED
+        AGENTS[Claude Code / gemini-cli / codex / opencode / ollama] -->|/run/vibed/mcp.sock| VIBED
         VIBED --> POLICY[Moteur de politiques<br/>/etc/vibeos/policy.d/*.toml<br/>première règle qui matche, default-deny]
         POLICY -->|allow T0/T1| SANDBOX[Exécution outil<br/>v0.1 : in-process — sandbox<br/>systemd-run + seccomp + Landlock : Phase 3]
         POLICY -->|T2/T3| APPROVAL{{Approbation humaine}}

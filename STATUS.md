@@ -1,16 +1,16 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-03 ~12h10** (session de travail continue).
+> Dernière mise à jour : **2026-07-03 ~12h40** (session de travail continue).
 
 ## Vue d'ensemble
 
 | | |
 |---|---|
-| **Phase actuelle** | Phase 0 « Fondation » → transition Phase 1 « Première ISO » |
+| **Phase actuelle** | Phase 0 « Fondation » ✅ → Phase 1 « Première ISO » (en cours) |
 | **Version** | 0.1.0-dev (pré-alpha) |
-| **Dépôt GitHub** | `Micka420-collab/vibeos` (privé) — *création en cours* |
-| **Image OS** | `ghcr.io/micka420-collab/vibeos` (amd64 + arm64) — *premier build à venir* |
+| **Dépôt GitHub** | [`Micka420-collab/vibeos`](https://github.com/Micka420-collab/vibeos) (privé) ✅ en ligne |
+| **Image OS** | `ghcr.io/micka420-collab/vibeos` (amd64 + arm64) — **build local amd64 vert** ✅ (`bootc lint` : 13 checks OK) |
 | **Machine de référence** | Ryzen 7 3700X · RTX 3070 Ti · 16 Go — voir [docs/HARDWARE.md](docs/HARDWARE.md) |
 
 ## ✅ Fait
@@ -20,22 +20,26 @@
 - **2026-07-03** — Revue croisée à 3 lentilles (cohérence, réalisme sécurité, complétude) : ~50 problèmes identifiés, dont 9 majeurs (schéma de politique incompatible avec le parseur, politiques non installées dans l'image, `fs.read` sans garde-fous, approbation T2 non modélisée, survente documentaire).
 - **2026-07-03** — 20 décisions canoniques figées pour trancher toutes les contradictions (schéma TOML riche, first-match, default-deny absolu, fail-closed, audit `/var/lib/vibeos/audit/vibed.jsonl`, socket `root:vibeos-agents 0660`…).
 - **2026-07-03** — Environnement de build local opérationnel : WSL2 Ubuntu 24.04 + podman 4.9 + buildah + qemu-user-static (builds arm64) + rust 1.75 + shellcheck + skopeo.
-- **2026-07-03** — Supply chain épinglée : image de base par digest, CLIs IA versionnées (claude-code 2.1.199, agent-sdk 0.3.199, gemini-cli 0.49.0, codex 0.142.5, aider 0.86.2).
+- **2026-07-03** — Supply chain épinglée : image de base par digest, CLIs IA versionnées (claude-code 2.1.199, agent-sdk 0.3.199, gemini-cli 0.49.0, codex 0.142.5, opencode-ai 1.17.13).
 - **2026-07-03** — Profil matériel de référence documenté ([docs/HARDWARE.md](docs/HARDWARE.md)) : multi-arch amd64+arm64, couche NVIDIA/CUDA amd64 uniquement, checklist de validation avant flash.
+- **2026-07-03** — Passe de corrections (5 agents, 50 findings) : moteur de politique Rust réécrit au schéma canonique (**33 tests verts**), CI multi-arch + cosign, honnêteté documentaire « livré v0.1 vs Phase N ».
+- **2026-07-03** — **Dépôt privé GitHub créé et poussé** : [Micka420-collab/vibeos](https://github.com/Micka420-collab/vibeos) (41 fichiers, commit initial, topics). Workflow `ci` déclenché ; build multi-arch lourd annulé (économie de minutes) au profit du build local.
+- **2026-07-03** — Recherche écosystème OSS (113 candidats → curation) : [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md). Stack : Ghostty+fish+Starship+Zellij, preset « VibeVim », opencode, MCP offline, age/SOPS/systemd-creds, HUD Quickshell, thème « VibeOS Dark ».
+- **2026-07-03** — **Build local amd64 vert** : Containerfile confronté au réel dans WSL2/podman, 3 pièges ostree corrigés en boucle (npm `HOME`→/tmp, aider→**opencode** pour Python 3.13, nettoyage `/run`/`/tmp`) ; **VS Code → VSCodium** (licence). `bootc container lint` : 13 checks OK, 0 warning.
+- **2026-07-03** — **Bureau vibecoding + installateur conçus** (24 fichiers) : [docs/DESKTOP.md](docs/DESKTOP.md) (layout Plasma 6, HUD Quickshell, thème VibeOS Dark), dotfiles `/etc/skel` prêts au 1er boot (fish/Starship/Ghostty/Zellij + preset VibeVim), [docs/INSTALLER.md](docs/INSTALLER.md) + kickstart + logo SVG.
 
 ## 🔄 En cours (aujourd'hui)
 
-- **Passe de corrections** : 5 agents appliquent les 50 findings (le moteur de politique Rust est réécrit au schéma canonique et doit passer `cargo test` dans WSL2 ; CI multi-arch + signature cosign ; couche NVIDIA ; honnêteté documentaire « livré v0.1 vs Phase N ») + vérification finale.
-- ✅ **Recherche écosystème OSS terminée** (113 candidats → curation) : voir [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md). Stack vibecoding définie : Ghostty+fish+Starship+Zellij, preset « VibeVim » (LazyVim+codecompanion/ACP), opencode, MCP offline (filesystem/git + Playwright + Serena), age/SOPS/systemd-creds, HUD Quickshell + thème « VibeOS Dark » (fork Catppuccin), blueprint uBlue/Bazzite.
-- ⚠️ **Correction bloquante à appliquer** : remplacer VS Code (binaires propriétaires, non redistribuables dans une ISO) par **VSCodium** dans `os/Containerfile`.
+- **Correctifs bureau** : un agent applique les 10 problèmes de la revue du chantier bureau (couleurs de tiers T0/T1, honnêteté du tableau « livré », kickstart sans mot de passe en clair, cohérence palette).
+- **Commit/push** des nouveautés (build vert, bureau, installateur) une fois les correctifs bureau intégrés.
 
 ## 📋 Reste à faire (court terme)
 
-1. Vérifier la passe de corrections (dont `cargo test` vert) et corriger les résidus.
-2. `git init` + commit initial + création du dépôt **privé** GitHub `Micka420-collab/vibeos` + push.
-3. Premier **build local** de l'image amd64 dans WSL2 (`podman build`) — itérer jusqu'au build vert.
-4. Génération de la première **ISO** (bootc-image-builder) + test en VM Hyper-V.
-5. Intégrer la sélection OSS curée → concevoir le **bureau vibecoding** (KDE Plasma 6 : layout, thème, palette d'agents) et la **belle interface d'installation** (Phase 5 anticipée en spec).
+1. Intégrer les correctifs bureau + commit/push (bureau, installateur, dotfiles).
+2. Générer la première **ISO** amd64 (bootc-image-builder) depuis l'image locale + test de boot en VM Hyper-V (Gén. 2).
+3. Câbler le paquet **Quickshell** et le thème dans `os/Containerfile` (livrer le HUD et VibeOS Dark dans l'image) + ajouter la couche « terminal vibecoding » (Ghostty, fish, Starship, Zellij, yazi, lazygit, atuin, zoxide, bat, eza, btop, mise, opencode, nvim) — voir [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md).
+4. Relancer la **CI sur un tag `v0.1.0-dev`** une fois le build validé (build multi-arch + cosign + ISO en artefacts).
+5. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
 6. Mettre à jour ce fichier + README à chaque jalon.
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))

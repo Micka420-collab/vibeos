@@ -1,0 +1,52 @@
+// ~/.config/zellij/config.kdl — VibeOS default Zellij config (shipped via /etc/skel)
+// Theme: "VibeOS Dark" — MIT fork of Catppuccin Mocha (see docs/ECOSYSTEM.md).
+//
+// Zellij stock keybinds are KEPT (sane defaults): Ctrl+p = pane mode,
+// Ctrl+t = tab mode, Ctrl+s = scroll/search, Alt+arrows = move focus,
+// Alt+n = new pane, Ctrl+o w = session manager, Ctrl+q = quit.
+// The bindings below are additive only (clear-defaults=false).
+
+keybinds clear-defaults=false {
+    shared_except "locked" {
+        bind "Alt f" { ToggleFocusFullscreen; }
+        bind "Alt w" { CloseFocus; }
+    }
+}
+
+// --- Options -------------------------------------------------------------
+
+theme "vibeos-dark"
+default_shell "fish"
+default_layout "default"        // the signature layout is opt-in: `zellij --layout vibe`
+pane_frames true
+mouse_mode true
+copy_on_select true
+copy_command "wl-copy"          // KDE Plasma 6 session runs on Wayland
+scroll_buffer_size 50000
+session_serialization true      // sessions survive OS updates / reboots
+styled_underlines true
+
+ui {
+    pane_frames {
+        rounded_corners true
+        hide_session_name false
+    }
+}
+
+// --- VibeOS Dark theme (fork of Catppuccin Mocha, MIT) --------------------
+
+themes {
+    vibeos-dark {
+        fg "#cdd6f4"
+        bg "#1e1e2e"
+        black "#181825"
+        red "#f38ba8"
+        green "#a6e3a1"
+        yellow "#f9e2af"
+        blue "#89b4fa"
+        magenta "#cba6f7"
+        cyan "#89dceb"
+        white "#cdd6f4"
+        orange "#fab387"
+    }
+}

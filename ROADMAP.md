@@ -86,7 +86,7 @@ gantt
 
 - **Image bootc multi-architecture** dérivée de Fedora Kinoite, publiée comme **manifest `linux/amd64` + `linux/arm64`** sur `ghcr.io/micka420-collab/vibeos:0.1` (et `:latest` sur la branche principale).
 - **Deux ISO installables** générées par bootc-image-builder : une par architecture (amd64 et arm64).
-- **Outils IA préinstallés dans l'image** (versions épinglées) : Claude Code + **Claude Agent SDK**, **gemini-cli** (Google), **codex** (OpenAI), `ollama` (modèles locaux, mode hors-ligne), `aider`.
+- **Outils IA préinstallés dans l'image** (versions épinglées) : Claude Code + **Claude Agent SDK**, **gemini-cli** (Google), **codex** (OpenAI), `ollama` (modèles locaux, mode hors-ligne), **opencode** (`opencode-ai`, agent terminal multi-fournisseur, 100 % local via ollama). `aider` reste en installation optionnelle par l'utilisateur (`uvx --python 3.12 aider-chat`), incompatible avec l'image car il exige Python < 3.13.
 - **Couche pilote NVIDIA (amd64 uniquement)** : akmod-nvidia + CUDA via RPM Fusion (technique akmods de Bazzite/uBlue), **validée sur le PC de référence** — Ryzen 7 3700X + RTX 3070 Ti, voir [docs/HARDWARE.md](docs/HARDWARE.md). Signature MOK des modules pour Secure Boot : Phase 4.
 - **CI verte sur GitHub Actions** : build multi-arch de l'image sur chaque push, signature cosign keyless après push, push vers ghcr.io sur tag, génération des ISO en artefacts de release.
 - **Build local reproductible** sous WSL2 Ubuntu + podman, suivant `docs/BUILD.md`.
@@ -100,7 +100,7 @@ gantt
 - [ ] ISO générée par bootc-image-builder **pour chaque architecture** : boot amd64 testé en VM (QEMU/KVM ou Hyper-V, UEFI) jusqu'à SDDM puis session Plasma 6 fonctionnelle ; boot arm64 testé en VM (QEMU aarch64).
 - [ ] Validation NVIDIA sur le PC de référence ([docs/HARDWARE.md](docs/HARDWARE.md)) : `nvidia-smi` fonctionnel, session Plasma Wayland stable avec le pilote propriétaire.
 - [ ] Racine en lecture seule vérifiée (`touch /usr/test` échoue) ; `bootc upgrade` depuis un tag antérieur applique une mise à jour atomique, `bootc rollback` restaure l'état précédent.
-- [ ] Dans une session utilisateur de l'image : `claude --version`, `gemini --version`, `codex --version`, `ollama --version`, `aider --version` répondent ; `ollama run` d'un petit modèle fonctionne hors-ligne.
+- [ ] Dans une session utilisateur de l'image : `claude --version`, `gemini --version`, `codex --version`, `ollama --version`, `opencode --version` répondent ; `ollama run` d'un petit modèle fonctionne hors-ligne.
 - [ ] Temps de build CI < 45 min par architecture (garde-fou contre la dérive).
 
 ### Risques principaux

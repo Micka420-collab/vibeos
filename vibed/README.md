@@ -29,7 +29,7 @@ Le groupe `vibeos-agents` et l'utilisateur `vibed` (cible Phase 4) sont créés 
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent (Claude Code, aider, ...)
+    participant A as Agent (Claude Code, opencode, ...)
     participant S as /run/vibed/mcp.sock (root:vibeos-agents 0660)
     participant M as mcp.rs
     participant P as policy.rs
@@ -221,7 +221,7 @@ Comportements attendus :
 
 ## Intégration dans l'image OS
 
-Le binaire est compilé et copié dans l'image bootc (`ghcr.io/micka420-collab/vibeos`) pendant le build CI ; l'unité `vibed.service`, le fichier `sysusers.d` (groupe `vibeos-agents`) et la politique par défaut (`/etc/vibeos/policy.d/default.toml`) sont livrés par l'image (racine en lecture seule, mise à jour atomique). La connexion côté agents (Claude Code, agent SDK, gemini-cli, codex, aider, ollama) est documentée dans `agent/README.md`.
+Le binaire est compilé et copié dans l'image bootc (`ghcr.io/micka420-collab/vibeos`) pendant le build CI ; l'unité `vibed.service`, le fichier `sysusers.d` (groupe `vibeos-agents`) et la politique par défaut (`/etc/vibeos/policy.d/default.toml`) sont livrés par l'image (racine en lecture seule, mise à jour atomique). La connexion côté agents (Claude Code, agent SDK, gemini-cli, codex, opencode, ollama) est documentée dans `agent/README.md`.
 
 ## Références
 

@@ -16,7 +16,7 @@ flowchart TB
     subgraph L5["Couche Agents IA"]
         CC["Claude Code + Claude Agent SDK<br/>(cloud)"]
         OL["ollama<br/>(modèles locaux, offline)"]
-        AID["gemini-cli · codex · aider"]
+        AID["gemini-cli · codex · opencode"]
     end
 
     subgraph L4["Couche Contrôle IA — vibed"]
@@ -135,7 +135,7 @@ Préinstallés dans l'image, en versions épinglées (voir ADR-006 et [BUILD.md]
 
 - **Claude Code** (`@anthropic-ai/claude-code`) et **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`) — agents cloud, capacité maximale ;
 - **gemini-cli** (`@google/gemini-cli`) et **codex** (`@openai/codex`) — CLIs agents cloud alternatifs ;
-- **aider** (`aider-chat`, pip) — pair-programming CLI ;
+- **opencode** (`opencode-ai`, npm — projet sst/opencode, MIT) — agent terminal multi-fournisseur, 100 % local via ollama ;
 - **ollama** — modèles locaux, fonctionnement hors-ligne complet.
 
 Tous consomment la même interface : le socket MCP de `vibed`. Aucun agent n'a de chemin privilégié.
@@ -145,7 +145,7 @@ Tous consomment la même interface : le socket MCP de `vibed`. Aucun agent n'a d
 ```mermaid
 sequenceDiagram
     autonumber
-    participant A as Agent IA<br/>(Claude Code / ollama / aider)
+    participant A as Agent IA<br/>(Claude Code / ollama / opencode)
     participant M as vibed — serveur MCP<br/>/run/vibed/mcp.sock
     participant P as Moteur de politiques<br/>/etc/vibeos/policy.d/*.toml
     participant H as Humain<br/>(dialogue Plasma)
@@ -235,7 +235,7 @@ Aux démarrages suivants (mode persistant), le marqueur `.initialized` existe : 
 ## 6. Plan mises à jour
 
 - **Format** : l'OS est une image OCI bootc **multi-architecture** (manifeste `linux/amd64` + `linux/arm64`, voir ADR-009 et [HARDWARE.md](HARDWARE.md)) construite par GitHub Actions et poussée sur `ghcr.io/micka420-collab/vibeos` (`micka420-collab` = placeholder jusqu'à la création du dépôt GitHub). ISO d'installation générée par architecture avec **bootc-image-builder**. Builds locaux : WSL2 Ubuntu + podman (voir [BUILD.md](BUILD.md)).
-- **Signature** : chaque image poussée est signée en CI avec **cosign** (sigstore, keyless — livré v0.1). La **vérification côté client** (bootc/OSTree refuse toute image non signée ; identité du workflow CI épinglée dans la politique embarquée) est une cible **Phase 2** : tant qu'elle n'est pas active, la signature existe mais n'est pas encore imposée localement.
+- **Signature** : chaque image poussée est signée en CI avec **cosign** (sigstore, keyless — livré v0.1). La **vérification côté client** (bootc/OSTree refuse toute image non signée ; identité du workflow CI épinglée dans la politique embarquée) est une cible **Phase 4** : tant qu'elle n'est pas active, la signature existe mais n'est pas encore imposée localement.
 - **Application atomique** : la mise à jour est un nouveau déploiement OSTree préparé à froid ; bascule au reboot. Il n'existe **aucun état intermédiaire** : soit l'ancienne image, soit la nouvelle.
 - **Rollback** : le déploiement précédent est conservé ; `bootc rollback` (ou le menu de boot) restaure l'état antérieur en un redémarrage. Échec de boot répété → retour automatique possible via boot-counting systemd.
 
@@ -261,7 +261,7 @@ flowchart LR
 | Sandbox d'exécution (**Phase 3**) | Isolation des outils approuvés — v0.1 : exécution in-process | Unités systemd transitoires (seccomp, landlock) — Phase 3 | Profils par tier (Phase 3) |
 | Genesis | Création de la mémoire au premier boot (arborescence, identité, journal — pas de cryptsetup/mkfs/montage) | Unité systemd one-shot (condition sur `.initialized`), env `VIBEOS_MEMORY_MODE` | `vibeos-genesis.service`, `/usr/libexec/vibeos/genesis.sh` (source : `memory/genesis.sh`) |
 | Mémoire | État persistant de la machine | v0.1 : répertoire en clair `root:root` 0700 ; **Phase 3** : volume LUKS2 (ou tmpfs en amnésique) | `/var/lib/vibeos/memory`, marqueur `.initialized` |
-| Runtime agents | Claude Code, Claude Agent SDK, gemini-cli, codex, aider, ollama | Client MCP → `/run/vibed/mcp.sock` | Binaires dans l'image ; modèles ollama sous `/var/lib/ollama` |
+| Runtime agents | Claude Code, Claude Agent SDK, gemini-cli, codex, opencode, ollama | Client MCP → `/run/vibed/mcp.sock` | Binaires dans l'image ; modèles ollama sous `/var/lib/ollama` |
 | `vibectl` | CLI d'administration (futur) | CLI → socket MCP privilégié | `/usr/bin/vibectl` (planifié) |
 | SELinux | Confinement obligatoire | Politique ciblée héritée de Fedora (module `vibed_t` : **Phase 4**) | `/etc/selinux/`, mode enforcing |
 | Bureau | Session graphique, dialogues d'approbation | Wayland, portails Plasma | KDE Plasma 6 (héritage Kinoite) |

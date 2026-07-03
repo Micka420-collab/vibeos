@@ -1,0 +1,49 @@
+// ~/.config/zellij/layouts/vibe.kdl — the VibeOS signature layout
+// « agent + lazygit + logs » — open it from your project directory with
+// `vibe` (fish abbr) or `zellij --layout vibe`.
+//
+//   ┌────────────────────────────┬────────────────────┐
+//   │                            │      lazygit       │
+//   │         agent CLI          ├────────────────────┤
+//   │ (claude / opencode / ...)  │  vibed audit log   │
+//   └────────────────────────────┴────────────────────┘
+//
+// v0.1 honesty note: the vibed daemon ships in Phase 2. Until it writes
+// /var/lib/vibeos/audit/vibed.jsonl, the log pane shows a clean "offline"
+// message and retries quietly — it never crashes.
+
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="vibe" focus=true {
+        pane split_direction="vertical" {
+
+            // Main stage: run your agent CLI here
+            // (claude, opencode, aider, gemini, codex — or plain fish).
+            pane name="agent" size="62%" focus=true
+
+            pane split_direction="horizontal" size="38%" {
+
+                // Review & commit what the agents produce.
+                // Guarded: falls back to a plain shell if lazygit is missing.
+                pane name="git" size="55%" command="bash" {
+                    args "-c" "if command -v lazygit >/dev/null 2>&1; then exec lazygit; else echo; echo '  lazygit est introuvable dans cette session.'; echo '  Utilisez git directement dans ce pane.'; exec ${SHELL:-bash}; fi"
+                }
+
+                // vibed audit trail — graceful when the daemon is offline
+                // (file absent in Phase 1, or not readable by this user).
+                pane name="vibed audit" size="45%" command="bash" {
+                    args "-c" "AUDIT=/var/lib/vibeos/audit/vibed.jsonl; while true; do if [ -r $AUDIT ]; then clear; echo '  ── journal d’audit vibed ──'; tail -n 40 -F $AUDIT; else clear; echo; echo '  [vibed hors ligne]'; echo; echo '  Journal d’audit indisponible :'; echo '  /var/lib/vibeos/audit/vibed.jsonl'; echo; echo '  Le démon vibed arrive en Phase 2.'; echo '  Nouvelle tentative dans 15 s…'; fi; sleep 15; done"
+                }
+            }
+        }
+    }
+}

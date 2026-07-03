@@ -27,7 +27,7 @@ Chaque appel d'outil est consigné dans un **journal d'audit JSONL append-only**
 Livré dès la v0.1 : racine en lecture seule, mises à jour atomiques et retour d'usine (bootc/OSTree), SELinux `enforcing` (politique targeted de Fedora), images OS **signées avec sigstore/cosign en CI**, image de base épinglée par digest et CLIs IA épinglées en versions exactes. Planifié : chaîne de démarrage mesurée **UEFI Secure Boot → UKI → dm-verity/composefs** (**Phase 4**), bac à sable par outil — systemd-run, seccomp, landlock (**Phase 3**), politique SELinux dédiée `vibed_t` (**Phase 4**). Référence d'image : `ghcr.io/micka420-collab/vibeos` (placeholder en attendant le dépôt GitHub).
 
 ### 🧰 Boîte à outils vibecoding complète — cloud + local
-Runtime d'agents hybride, préinstallé et épinglé dans l'image : **Claude Code** et le **Claude Agent SDK** (cloud Anthropic), **gemini-cli** (Google), **codex** (OpenAI), **aider** (multi-fournisseur) et **ollama** pour les modèles locaux — utilisable hors ligne. Codez avec le meilleur des deux mondes, même sans réseau.
+Runtime d'agents hybride, préinstallé et épinglé dans l'image : **Claude Code** et le **Claude Agent SDK** (cloud Anthropic), **gemini-cli** (Google), **codex** (OpenAI), **opencode** (agent terminal multi-fournisseur, 100 % local via ollama) et **ollama** pour les modèles locaux — utilisable hors ligne. Codez avec le meilleur des deux mondes, même sans réseau. `aider` reste installable à la demande (`uvx --python 3.12 aider-chat`) sans toucher l'OS immuable.
 
 ### 🧬 Multi-architecture — amd64 + arm64
 VibeOS cible **linux/amd64 et linux/arm64** : la CI construit un manifest multi-arch poussé sur ghcr.io et génère **une ISO par architecture**. La couche pilote **NVIDIA** (akmod, RPM Fusion) s'applique sur amd64 et est validée sur le PC de référence du projet — voir [docs/HARDWARE.md](docs/HARDWARE.md).
@@ -40,7 +40,7 @@ VibeOS cible **linux/amd64 et linux/arm64** : la CI construit un manifest multi-
 |---|---|
 | Image bootc immuable (Fedora Kinoite, racine RO, rollback atomique) | ✅ Livré v0.1 |
 | Image multi-arch amd64 + arm64 + ISO par architecture (CI) | ✅ Livré v0.1 |
-| CLIs IA préinstallées et épinglées (claude, agent SDK, gemini, codex, aider, ollama) | ✅ Livré v0.1 |
+| CLIs IA préinstallées et épinglées (claude, agent SDK, gemini, codex, opencode, ollama) | ✅ Livré v0.1 |
 | Signature cosign (keyless) des images en CI | ✅ Livré v0.1 |
 | Politique installée dans `/etc/vibeos/policy.d/` et chargée par `vibed` (fail-closed) | ✅ Livré v0.1 |
 | Journal d'audit JSONL (`/var/lib/vibeos/audit/vibed.jsonl`) avec identité de l'appelant | ✅ Livré v0.1 |
@@ -63,7 +63,7 @@ flowchart LR
     subgraph AGENTS["Agents IA"]
         CC["Claude Code / Agent SDK (cloud)"]
         OL["Modèles locaux (ollama)"]
-        AD["aider · gemini · codex"]
+        AD["opencode · gemini · codex"]
     end
     subgraph VIBED["vibed — démon système (Rust)"]
         MCP["Serveur MCP · JSON-RPC 2.0<br/>/run/vibed/mcp.sock"]
@@ -92,7 +92,7 @@ flowchart LR
 | `docs/` | Documentation : architecture, build ([docs/BUILD.md](docs/BUILD.md)), matériel de référence ([docs/HARDWARE.md](docs/HARDWARE.md)), mémoire, sécurité, décisions |
 | `os/` | Définition de l'image bootc/OSTree (dérivée de Fedora Kinoite, KDE Plasma 6, multi-arch) |
 | `vibed/` | Démon système `vibed` (Rust, tokio) : serveur MCP, moteur de politiques, audit |
-| `agent/` | Runtime d'agents : intégration Claude Code / Agent SDK, ollama, aider, prototype d'interview Genesis |
+| `agent/` | Runtime d'agents : intégration Claude Code / Agent SDK, ollama, opencode, prototype d'interview Genesis |
 | `memory/` | Sous-système mémoire : séquence Genesis (`memory/genesis.sh`) |
 | `security/` | Politiques (`policy.d`), durcissement, signature |
 | `.github/` | CI GitHub Actions : tests (`ci.yml`), build multi-arch de l'image OS, signature cosign, push vers ghcr.io, génération des ISO |

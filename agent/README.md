@@ -46,10 +46,12 @@ L'image VibeOS livre un runtime hybride : cloud quand c'est possible, local quan
 | `claude` | Claude Code + Claude Agent SDK : agent principal de vibecoding, client MCP de `vibed` | Cloud (Anthropic) |
 | `gemini` | CLI Gemini : second avis, tâches multimodales | Cloud (Google) |
 | `codex` | CLI Codex : alternative OpenAI | Cloud (OpenAI) |
-| `aider` | Pair-programming conscient de git, multi-fournisseur (peut cibler ollama) | Cloud ou local |
+| `opencode` | Agent terminal multi-fournisseur (`opencode-ai`, projet sst/opencode, MIT), peut cibler ollama — 100 % local possible | Cloud ou local |
 | `ollama` | Serveur de modèles locaux (ex. modèles de code quantisés) : capacité hors-ligne totale | Local |
 
-En mode hors-ligne, `aider` pointé sur `ollama` reste la voie de vibecoding fonctionnelle sans aucune clé API.
+En mode hors-ligne, `opencode` pointé sur `ollama` reste la voie de vibecoding fonctionnelle sans aucune clé API.
+
+`aider` n'est **pas** préinstallé : il exige Python < 3.13, incompatible avec le Python 3.13 de la base Fedora Kinoite 42. Il reste installable à la demande, sans toucher l'OS immuable : `uvx --python 3.12 aider-chat` (éphémère) ou `uv tool install --python 3.12 aider-chat` (persistant, `~/.local`).
 
 ## Clés API et secrets
 
@@ -57,8 +59,8 @@ En mode hors-ligne, `aider` pointé sur `ollama` reste la voie de vibecoding fon
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `claude`, `genesis_interview.py --with-claude` | |
 | `GEMINI_API_KEY` | `gemini` | |
-| `OPENAI_API_KEY` | `codex`, `aider` (mode OpenAI) | |
-| `OLLAMA_HOST` | `aider`, clients ollama | Local, aucune clé — défaut `http://127.0.0.1:11434` |
+| `OPENAI_API_KEY` | `codex`, `opencode` (mode OpenAI) | |
+| `OLLAMA_HOST` | `opencode`, clients ollama | Local, aucune clé — défaut `http://127.0.0.1:11434` |
 
 **Où vivent ces clés** — le mécanisme de référence est celui de [docs/SECURITY-ARCHITECTURE.md](../docs/SECURITY-ARCHITECTURE.md), §4, qui fait foi :
 
