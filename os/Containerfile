@@ -29,21 +29,19 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# PHASE 2 PLACEHOLDER (NOT ACTIVE YET): build vibed from source.
-# Uncomment this stage and the matching `COPY --from=vibed-builder` below once
-# the vibed/ crate is ready to ship. The vibed.service unit shipped in
-# os/rootfs is guarded by ConditionPathExists=/usr/bin/vibed, so activating
-# this stage is the ONLY switch needed to bring the daemon online — the unit
-# is silently skipped (not failed) as long as the binary is absent.
-# vibed/Cargo.lock is committed, so `--locked` builds are reproducible.
+# PHASE 2: build vibed from source (multi-stage). The vibed.service unit shipped
+# in os/rootfs is guarded by ConditionPathExists=/usr/bin/vibed; installing the
+# binary below (COPY --from=vibed-builder in layer 7) brings the daemon online
+# at boot. vibed/Cargo.lock is committed, so `--locked` builds are reproducible
+# (verified with Fedora's cargo). The stage is discarded from the final image;
+# only the stripped binary is copied in.
 # -----------------------------------------------------------------------------
-# FROM registry.fedoraproject.org/fedora:42 AS vibed-builder
-# RUN dnf -y install cargo rustc openssl-devel pkgconf-pkg-config && dnf clean all
-# COPY vibed/ /src/vibed/
-# WORKDIR /src/vibed
-# RUN cargo build --release --locked \
-#  && strip target/release/vibed
-# -----------------------------------------------------------------------------
+FROM registry.fedoraproject.org/fedora:42 AS vibed-builder
+RUN dnf -y install cargo && dnf clean all
+COPY vibed/ /src/vibed/
+WORKDIR /src/vibed
+RUN cargo build --release --locked \
+ && strip target/release/vibed
 
 # Digest pin of quay.io/fedora/fedora-kinoite:42 (manifest list, amd64+arm64).
 # Tag kept as a comment for humans; bump the digest deliberately, never float.
@@ -342,8 +340,13 @@ COPY desktop/plymouth/vibeos /usr/share/plymouth/themes/vibeos
 COPY desktop/kvantum/VibeOSDark /usr/share/Kvantum/VibeOSDark
 COPY desktop/quickshell /usr/share/vibeos/quickshell
 
-# --- PHASE 2 (NOT ACTIVE YET): install vibed from the builder stage ----------
-# COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed
+# --- PHASE 2: install vibed from the builder stage ---------------------------
+# Installing the binary satisfies vibed.service's ConditionPathExists guard, so
+# the daemon starts at boot: it creates /run/vibed (RuntimeDirectory), listens
+# on /run/vibed/mcp.sock (root:vibeos-agents 0660), loads /etc/vibeos/policy.d/
+# (fail-closed on invalid policy) and writes the audit log under StateDirectory
+# /var/lib/vibeos. See vibed/README.md and docs/ARCHITECTURE.md.
+COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed
 
 # =============================================================================
 # 8. Finalize: scrub machine-local state, then validate the image
