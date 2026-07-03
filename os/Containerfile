@@ -129,6 +129,22 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         btop \
     && dnf clean all
 
+# --- 1e. Vibecoding terminal stack (COPR) ------------------------------------
+# Tools not packaged in Fedora, from well-maintained COPRs (probed working on
+# Kinoite 42): starship (atim), zellij (varlad), lazygit (atim). dnf5-plugins
+# provides the `dnf copr` subcommand. The COPR repos stay enabled so these
+# tools receive updates on image rebuilds (same model as the VSCodium repo).
+# /etc/skel configures fish -> starship, and the Zellij "vibe" layout.
+RUN dnf -y install dnf5-plugins \
+    && dnf -y copr enable atim/starship \
+    && dnf -y copr enable varlad/zellij \
+    && dnf -y copr enable atim/lazygit \
+    && dnf -y install --setopt=install_weak_deps=False \
+        starship \
+        zellij \
+        lazygit \
+    && dnf clean all
+
 # =============================================================================
 # 2. VSCodium — community rpm repository (paulcarroty)
 #    LICENSING: official VS Code binaries are proprietary and NOT redistributable
