@@ -234,7 +234,7 @@ Notes :
 6. *(Phase 2)* L'agent demande une action **T2** (installer un paquet) : notification Plasma bord droit, badge **Peach**, dialogue d'approbation détaillant outil/arguments/tier — approuver, refuser, ou approuver avec durée limitée. Tout est audité dans `/var/lib/vibeos/audit/vibed.jsonl`.
 7. L'agent annonce la fin. `Meta+Tab` → activité **Review** : plein écran Zellij « review », lazygit pour relire les diffs hunk par hunk, `bat` pour lire les nouveaux fichiers, `yazi` (`Meta+Y`) pour survoler l'arborescence créée.
 8. Commit (l'humain signe — jamais l'agent seul), retour à **Vibe**, agent suivant — ou `Meta+Tab` vers **Focus** pour reprendre la main au calme, notifications coupées.
-9. Fin de journée : la session Zellij se détache (résurrection après reboot/mise à jour bootc) ; la machine se souvient *(v0.1 : journal Atuin + git ; Phase 2/3 : `memory.append` enrichit la mémoire de la machine)*.
+9. Fin de journée : la session Zellij se détache (résurrection après reboot/mise à jour bootc) ; la machine se souvient *(journal Atuin + git ; et `memory.append` — livré — permet aux agents d'enrichir la mémoire de la machine)*.
 
 Le bureau réussit si, à chaque étape, les trois questions du triptyque ont une réponse à moins d'un raccourci de distance.
 

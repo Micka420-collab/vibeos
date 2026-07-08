@@ -59,10 +59,11 @@ sequenceDiagram
 |---|---|---|---|
 | `os.status` | T0 | Allow | Uptime, charge, mémoire, points de montage (via `/proc`) |
 | `fs.read` | T0 | Allow (hors chemins refusés) | Lecture de fichier (UTF-8 lossy, tronqué à 256 KiB) ; denylist codée en dur + `paths.denied` de la politique ; re-vérification sur le chemin canonicalisé (symlinks) |
-| `fs.write` | T1 | Allow (périmètre restreint) | Écriture restreinte à `/home/**` et `/var/home/**` **uniquement** (sur Fedora, `/home` est un lien vers `/var/home`) ; la mémoire VibeOS n'est **pas** inscriptible par `fs.write` (cible Phase 2 : `memory.append`) |
+| `fs.write` | T1 | Allow (périmètre restreint) | Écriture restreinte à `/home/**` et `/var/home/**` **uniquement** (sur Fedora, `/home` est un lien vers `/var/home`) ; la mémoire VibeOS n'est **pas** inscriptible par `fs.write` — son chemin d'écriture gouverné est `memory.append` |
 | `pkg.install` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucun paquet installé |
 | `svc.restart` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucune unité redémarrée |
-| `memory.query` | T0 | Allow | Recherche par sous-chaîne dans `/var/lib/vibeos/memory` (argument unique `query` ; `scope`/`limit` et `memory.append` sont des cibles Phase 2/3, voir `docs/MEMORY.md`) |
+| `memory.query` | T0 | Allow | Recherche par sous-chaîne dans `/var/lib/vibeos/memory` ; arguments `query`, `scope` (identity/hardware/user/projects/journal/knowledge) et `limit` (plafond de résultats, drapeau `truncated`) — voir `docs/MEMORY.md` §9 |
+| `memory.append` | T1 | Allow | Écriture mémoire **strictement additive** : une ligne JSONL par appel, scopes `journal` (type/source/data, types réservés au système refusés) et `knowledge` (subject/fact/source[/confidence]) ; `ts` et `id` posés par vibed, ligne plafonnée à 16 KiB, `O_APPEND`+`O_NOFOLLOW`, aucun argument de chemin ; scopes `user`/`projects` = reste Phase 2/3 |
 
 **Default-deny absolu** : un outil absent du registre est refusé, et un outil sans règle qui matche est refusé aussi. Il n'existe aucun « défaut par tier » permissif.
 
@@ -127,7 +128,7 @@ Indépendamment de la politique chargée (une politique erronée ou altérée ne
 /proc/*/environ   /run/credentials/**   /boot/**
 ```
 
-et, pour les **écritures seulement** : `/etc/vibeos/policy.d/**` et `/var/lib/vibeos/memory/**` (la mémoire se lit via `memory.query` ; son chemin d'écriture, `memory.append`, est une cible Phase 2).
+et, pour les **écritures seulement** : `/etc/vibeos/policy.d/**` et `/var/lib/vibeos/memory/**` (la mémoire se lit via `memory.query` ; son chemin d'écriture gouverné est `memory.append`, qui ne prend aucun argument de chemin — cette denylist ne s'applique qu'à `fs.write`).
 
 Le rechargement de la politique se fait par redémarrage du démon (`systemctl restart vibed`) — la politique est immuable après chargement. La politique par défaut livrée est `security/policy.d/default.toml` (installée dans l'image sous `/etc/vibeos/policy.d/`).
 

@@ -72,7 +72,8 @@ Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance*
 | **HUD Quickshell** installé + auto-démarré (runtime compilé dans l'image) | ✅ Livré (Phase 2) — données mockées |
 | **Config MCP Claude Code** livrée (`/etc/skel/.claude.json` → socket `vibed`) | ✅ Livré (Phase 2) |
 | Branchement **live** du HUD sur le socket `vibed` (QML `Quickshell.Io`) | 🛣️ Phase 2 |
-| Outils **T1 réels** supplémentaires · `memory.append` · `scope`/`limit` | 🛣️ Phase 2 |
+| **`memory.append`** (T1, additif : journal + knowledge) · `scope`/`limit` de `memory.query` | ✅ Livré (Phase 2) |
+| Outils **T1 réels** supplémentaires · scopes `user`/`projects` de `memory.append` | 🛣️ Phase 2 |
 | Chiffrement LUKS/TPM2 de la mémoire | 🛣️ Phase 3 |
 | Mode amnésique (tmpfs recréé à chaque boot, generator systemd) | 🛣️ Phase 3 |
 | Interview de naissance (prototype : `agent/genesis_interview.py`, non câblé en v0.1) | 🛣️ Phase 3 |
