@@ -55,6 +55,11 @@ yazi            # copr: lihaohong/yazi
 ## [dnf vendor repo] 1f. Toolchain manager
 mise            # repo: https://mise.jdx.dev/rpm/mise.repo
 
+## [dnf] 1g. Desktop chrome runtime (Phase 2 — HUD + Global Theme)
+kvantum         # widget style engine of the VibeOS Dark Global Theme
+jemalloc        # runtime dep of quickshell (built from source, see 4bis)
+qt6-qtsvg       # runtime dep of quickshell (already in the Kinoite base)
+
 ## [dnf — VSCodium community rpm repo] 2. Editor
 # VS Code binaries are proprietary/non-redistributable; VSCodium is the MIT
 # build (Open VSX marketplace). See docs/ECOSYSTEM.md.
@@ -74,6 +79,14 @@ kernel-devel
 # Pinned via ARG OLLAMA_VERSION + per-arch sha256 (official sha256sum.txt of
 # the GitHub release) in os/Containerfile.
 ollama==0.31.1
+
+## [source build -> /usr] 4bis. Quickshell — HUD runtime (Phase 2)
+# No Fedora 42 package exists (the official Fedora package starts at f44, no
+# COPR ships an f42 chroot — verified 2026-07-08): built from source in the
+# quickshell-builder stage of os/Containerfile (official Fedora spec recipe),
+# version pinned + sha256-verified, X11=OFF (Wayland-only image). The final
+# image runs `quickshell --version` to catch any Qt private-ABI mismatch.
+quickshell==0.2.1
 
 ## [npm -g --prefix=/usr] 5. AI CLIs (pinned)
 @anthropic-ai/claude-code@2.1.199

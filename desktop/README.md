@@ -2,7 +2,7 @@
 
 Ce dossier contient les **sources du bureau VibeOS** : thème, palette, et les briques d'habillage de KDE Plasma 6. La spécification complète de l'expérience (« pourquoi » et « comment ») est dans [docs/DESKTOP.md](../docs/DESKTOP.md) — ce README n'est que la carte du dossier.
 
-> **Statut** : chantier « Bureau » (voir [docs/ECOSYSTEM.md](../docs/ECOSYSTEM.md), plan d'action). Le thème et les défauts utilisateur sont largement livrables en **v0.1** ; la liaison vivante HUD ↔ `vibed` est un livrable **Phase 2** ; le branding complet (SDDM, Plymouth, logo) est **Phase 5**.
+> **Statut** : chantier « Bureau » (voir [docs/ECOSYSTEM.md](../docs/ECOSYSTEM.md), plan d'action). Le **Global Theme est le défaut système** et le **HUD est installé et auto-démarré** (runtime Quickshell compilé dans l'image) ; la liaison vivante HUD ↔ `vibed` (données live) reste un livrable **Phase 2** ; le branding complet (SDDM, Plymouth, logo) est **Phase 5**.
 
 ---
 
@@ -24,7 +24,7 @@ Trois règles d'exécution : **le terminal (Ghostty) est la scène principale** 
 |---|---|---|
 | [`theme/vibeos-dark.colors`](theme/vibeos-dark.colors) | Schéma de couleurs Plasma 6 **« VibeOS Dark »** — fork de Catppuccin Mocha (MIT), accent Mauve `#cba6f7`. Cible image : `/usr/share/color-schemes/VibeOSDark.colors` | v0.1 |
 | [`theme/palette.md`](theme/palette.md) | La palette de référence : table nom/hex/usage, sémantique des tiers T0–T3, propagation vers Ghostty, éditeurs, HUD, prompt | v0.1 (doc) |
-| `quickshell/` | Le **HUD agents** (Qt6/QML via Quickshell, LGPL-3.0) : pastille + panneaux Agents / Confiance / Ressources / Mémoire | v0.1 : rendu + état « vibed hors ligne » · **Phase 2** : données vives via `/run/vibed/mcp.sock` |
+| `quickshell/` | Le **HUD agents** (Qt6/QML via Quickshell, LGPL-3.0) : pastille + panneaux Agents / Confiance / Ressources / Mémoire | livré : rendu + autostart + état « vibed hors ligne » · **Phase 2** : données vives via `/run/vibed/mcp.sock` |
 | *(à venir dans ce chantier)* wallpapers, preset Panel Colorizer, Global Theme (`layout.js`), défauts `/etc/skel` (raccourcis, activités) | voir [docs/DESKTOP.md](../docs/DESKTOP.md) §2.6 et §9 | v0.1 |
 | *(à venir, Phase 5)* `sddm/`, `plymouth/` | Thème de connexion (base SDDM Astronaut) et thème de boot **original** (l'existant adi1090x est rejeté — provenance d'assets floue) | 🛣️ Phase 5 |
 

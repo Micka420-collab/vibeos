@@ -152,11 +152,11 @@ dans [MEMORY.md](MEMORY.md) §4.1) :
 3. **[Phase 3]** L'**interview de naissance** se déroule ici (dialogue guidé,
    profil de l'humain, persona des agents). En v0.1 : rien — la mémoire naît
    avec ses placeholders, sans interaction.
-4. `vibed.service` démarre — **sauf en Phase 1** : le binaire `/usr/bin/vibed`
-   n'est pas encore dans l'image, l'unité est **sautée** proprement
-   (`ConditionPathExists=/usr/bin/vibed`, statut « condition failed », jamais
-   « failed »). Le HUD Quickshell du bureau affiche alors son état
-   **« daemon offline »** — c'est l'état nominal de la v0.1.
+4. `vibed.service` démarre : le binaire `/usr/bin/vibed` est **embarqué dans
+   l'image** (la garde `ConditionPathExists=/usr/bin/vibed` reste en place et
+   sauterait proprement l'unité si le binaire manquait). Le HUD Quickshell
+   affiche encore **« daemon offline »** (données mockées) tant que son
+   branchement live sur le socket n'est pas codé — reste du chantier Phase 2.
 5. SDDM → session KDE Plasma 6.
 
 Aux boots suivants (mode persistant), `.initialized` existe : Genesis est

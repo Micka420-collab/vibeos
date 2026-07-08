@@ -43,6 +43,55 @@ WORKDIR /src/vibed
 RUN cargo build --release --locked \
  && strip target/release/vibed
 
+# -----------------------------------------------------------------------------
+# PHASE 2: build Quickshell from source (multi-stage). Fedora 42 has no
+# quickshell package anywhere — the official Fedora package starts at f44 and
+# no COPR ships an f42 chroot (both verified 2026-07-08) — so the HUD runtime
+# is compiled here following the official Fedora quickshell.spec recipe
+# (BuildRequires + cmake flags), then copied into /usr as immutable image
+# content. Supply chain: version pinned + sha256 verified before extraction.
+# X11=OFF: the image is Wayland-only (Kinoite heritage, docs/DESKTOP.md §4).
+# CAVEAT (Qt private ABI): quickshell uses Qt6 PRIVATE APIs; the binary only
+# loads against the exact Qt patch version it was built with (versioned symbol
+# Qt_6.x.y_PRIVATE_API). The `quickshell --version` check in the final image
+# (layer 7) fails the build loudly on any mismatch with the pinned base —
+# bump the base digest and this stage rebuilds against the matching Qt.
+# -----------------------------------------------------------------------------
+FROM registry.fedoraproject.org/fedora:42 AS quickshell-builder
+ARG QUICKSHELL_VERSION=0.2.1
+ARG QUICKSHELL_SHA256=337bab5d4badb92e51d01ac1cfbeaeb784478bad82f3c8297fd7be42a6995af2
+# Dependency list transcribed 1:1 from the official Fedora quickshell.spec
+# (rawhide, 0.2.1): rich deps (cmake()/pkgconfig()) let dnf resolve the right
+# Fedora 42 package names instead of hardcoding them.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        cmake ninja-build gcc-c++ curl-minimal tar gzip \
+        'cmake(Qt6Core)' 'cmake(Qt6Qml)' \
+        'cmake(Qt6CorePrivate)' 'cmake(Qt6QuickPrivate)' \
+        'cmake(Qt6ShaderTools)' 'cmake(Qt6WaylandClient)' \
+        'pkgconfig(CLI11)' 'pkgconfig(glib-2.0)' 'pkgconfig(gbm)' \
+        'pkgconfig(jemalloc)' 'pkgconfig(libdrm)' 'pkgconfig(libpipewire-0.3)' \
+        'pkgconfig(pam)' 'pkgconfig(polkit-agent-1)' \
+        'pkgconfig(wayland-client)' 'pkgconfig(wayland-protocols)' \
+        spirv-tools \
+    && dnf clean all
+RUN set -eu; \
+    mkdir -p /src; \
+    curl -fsSL -o /tmp/quickshell.tar.gz \
+        "https://github.com/quickshell-mirror/quickshell/archive/refs/tags/v${QUICKSHELL_VERSION}.tar.gz"; \
+    echo "${QUICKSHELL_SHA256}  /tmp/quickshell.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/quickshell.tar.gz -C /src --strip-components=1; \
+    cmake -GNinja -S /src -B /build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_SKIP_INSTALL_RPATH=ON \
+        -DDISTRIBUTOR="VibeOS" \
+        -DDISTRIBUTOR_DEBUGINFO_AVAILABLE=NO \
+        -DINSTALL_QML_PREFIX=lib64/qt6/qml \
+        -DCRASH_REPORTER=OFF \
+        -DX11=OFF; \
+    cmake --build /build; \
+    DESTDIR=/out cmake --install /build
+
 # Digest pin of quay.io/fedora/fedora-kinoite:42 (manifest list, amd64+arm64).
 # Tag kept as a comment for humans; bump the digest deliberately, never float.
 FROM quay.io/fedora/fedora-kinoite:42@sha256:7d1e1c6457fe8e2b8c42bcce3bc5b1cc86d2e9346ffb45e2ef3cdd12dc93e258
@@ -160,6 +209,19 @@ RUN dnf -y install dnf5-plugins \
 # from the official jdx.dev rpm repo, pinned via GPG-checked metadata.
 RUN dnf -y config-manager addrepo --from-repofile=https://mise.jdx.dev/rpm/mise.repo \
     && dnf -y install --setopt=install_weak_deps=False mise \
+    && dnf clean all
+
+# --- 1g. Desktop chrome runtime (Phase 2 — HUD + Global Theme) ----------------
+# kvantum : Qt widget style engine required by the VibeOS Dark Global Theme
+#           (widgetStyle=kvantum in org.vibeos.dark/contents/defaults, which
+#           documents the graceful Breeze fallback if it were missing).
+# jemalloc / qt6-qtsvg : runtime dependencies of the quickshell binary built
+#           in the quickshell-builder stage (Requires: of the Fedora spec;
+#           qt6-qtsvg is already in the Kinoite base — kept explicit).
+RUN dnf -y install --setopt=install_weak_deps=False \
+        kvantum \
+        jemalloc \
+        qt6-qtsvg \
     && dnf clean all
 
 # =============================================================================
@@ -301,6 +363,11 @@ RUN HOME=/tmp npm_config_cache=/tmp/.npm-cache \
 #    build free of side effects in /etc. The sysusers.d fragment creates the
 #    vibed user and the vibeos-agents group on first boot.
 # =============================================================================
+# Guard: os/rootfs ships /etc/xdg/kdeglobals (the system-wide Global Theme
+# pointer). The pinned Kinoite base does not ship that file today; if a future
+# base starts shipping one, fail the build so the two files are merged
+# deliberately instead of silently clobbered by the COPY below.
+RUN test ! -e /etc/xdg/kdeglobals
 COPY os/rootfs/ /
 
 # --- Policy engine defaults ---------------------------------------------------
@@ -320,18 +387,18 @@ COPY security/policy.d/*.toml /etc/vibeos/policy.d/
 COPY --chmod=0755 memory/genesis.sh /usr/libexec/vibeos/genesis.sh
 
 # --- Desktop identity: VibeOS Dark theme assets ------------------------------
-# The design system lives in docs/DESIGN-SYSTEM.md. These assets are installed
-# system-wide so they are SELECTABLE in System Settings, but NONE is forced as
-# the default in v0.1 — the full look-and-feel activation, the Quickshell agent
-# HUD autostart (it binds to vibed) and the SDDM/Plymouth switch are wired in
-# Phase 2 / Phase 5 (docs/DESKTOP.md). Shipping the files now gives the identity
-# without any non-functional autostarted component.
-#   * color scheme   -> selectable now
-#   * look-and-feel  -> selectable (lookandfeeltool); not default (Phase 2)
-#   * wallpapers     -> available in the picker
+# The design system lives in docs/DESIGN-SYSTEM.md. PHASE 2 STATUS: the Global
+# Theme org.vibeos.dark is now the SYSTEM DEFAULT — a one-line pointer in
+# /etc/xdg/kdeglobals (shipped by the os/rootfs COPY above; KConfig cascade,
+# users override freely in ~/.config) — and the Quickshell HUD is autostarted
+# per-user (/etc/skel/.config/autostart/vibeos-hud.desktop -> /usr/bin/vibeos-hud).
+#   * color scheme   -> default via the Global Theme defaults
+#   * look-and-feel  -> DEFAULT (pointer in /etc/xdg/kdeglobals) — Phase 2 done
+#   * Kvantum        -> engine installed (layer 1g); default widget style
+#   * Quickshell QML -> autostarted HUD; data still mocked ("vibed hors ligne")
+#                       until the QML socket wiring lands (Phase 2 remainder)
+#   * wallpapers     -> available in the picker (default: Phase 5 branding)
 #   * SDDM/Plymouth  -> present; switched on at branding (Phase 5)
-#   * Kvantum        -> present; widget style switch is Phase 2
-#   * Quickshell QML -> present for the Phase 2 HUD; not autostarted
 COPY desktop/theme/vibeos-dark.colors /usr/share/color-schemes/VibeOSDark.colors
 COPY desktop/look-and-feel/org.vibeos.dark /usr/share/plasma/look-and-feel/org.vibeos.dark
 COPY desktop/wallpapers /usr/share/wallpapers/VibeOSDark
@@ -347,6 +414,15 @@ COPY desktop/quickshell /usr/share/vibeos/quickshell
 # (fail-closed on invalid policy) and writes the audit log under StateDirectory
 # /var/lib/vibeos. See vibed/README.md and docs/ARCHITECTURE.md.
 COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed
+
+# --- PHASE 2: install quickshell from the builder stage -----------------------
+# bin/qs + bin/quickshell, the Quickshell QML modules (lib64/qt6/qml) and the
+# desktop entry/icon land in /usr as immutable image content. The --version
+# run proves the Qt private-ABI contract (see the quickshell-builder header):
+# a mismatch with the base image's Qt aborts the build here, never on user
+# machines. Runtime deps (kvantum aside): jemalloc + qt6-qtsvg, layer 1g.
+COPY --from=quickshell-builder /out/usr/ /usr/
+RUN QT_QPA_PLATFORM=offscreen /usr/bin/quickshell --version
 
 # =============================================================================
 # 8. Finalize: scrub machine-local state, then validate the image

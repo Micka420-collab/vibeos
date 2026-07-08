@@ -8,7 +8,7 @@ Principe : les agents ne touchent jamais le système directement. Toute action p
 
 `vibed` parle JSON-RPC 2.0 délimité par lignes sur un socket unix. Claude Code (et la plupart des clients MCP) parlent le transport **stdio** : on fait le pont avec `socat`, présent dans l'image.
 
-Extrait de configuration `.mcp.json` (à la racine d'un projet, ou dans `~/.claude` pour une portée utilisateur) :
+**Livré dans l'image (Phase 2)** : la configuration est **pré-déclarée pour Claude Code** via `/etc/skel/.claude.json` (source : `os/rootfs/etc/skel/.claude.json`) — tout nouvel utilisateur a le serveur MCP `vibeos` en portée utilisateur, **sans configuration manuelle**. Seul prérequis : appartenir au groupe `vibeos-agents` (voir plus bas). Contenu livré :
 
 ```json
 {
@@ -21,7 +21,7 @@ Extrait de configuration `.mcp.json` (à la racine d'un projet, ou dans `~/.clau
 }
 ```
 
-Claude Code lance `socat`, qui relaie chaque ligne JSON entre stdio et le socket. Les outils `os.status`, `fs.read`, `fs.write`, `pkg.install`, `svc.restart`, `memory.query` apparaissent alors comme des outils MCP `vibeos` côté agent.
+Le même extrait fonctionne dans un `.mcp.json` à la racine d'un projet (portée projet), ou pour tout autre client MCP stdio (gemini-cli : `~/.gemini/settings.json`, opencode : voir sa doc). Claude Code lance `socat`, qui relaie chaque ligne JSON entre stdio et le socket. Les outils `os.status`, `fs.read`, `fs.write`, `pkg.install`, `svc.restart`, `memory.query` apparaissent alors comme des outils MCP `vibeos` côté agent.
 
 Points de comportement à connaître :
 

@@ -26,7 +26,7 @@ Trois principes d'exécution en découlent :
 
 - **Le terminal est la scène principale.** Le cœur du vibecoding est Ghostty + fish + Starship + Zellij ([ECOSYSTEM.md](ECOSYSTEM.md)). Le bureau ne s'interpose pas : il encadre, il informe, il s'efface (`Meta+Return` est le raccourci le plus important de l'OS).
 - **Plasma 6 n'est pas remplacé, il est habillé.** Global Theme, schéma de couleurs, Panel Colorizer, HUD Quickshell **en couche additionnelle** (même stack Qt6/QML que Plasma). Zéro fork du shell Plasma, zéro composant non supporté.
-- **Dégradation gracieuse partout.** `vibed` est désormais **embarqué et démarre au boot** (le socket `/run/vibed/mcp.sock` est présent) ; en revanche le **HUD Quickshell n'est ni installé ni auto-démarré en v0.1** (Phase 2). Quand il arrivera, il pourra se connecter à `vibed` — mais devra toujours gérer proprement l'absence du socket (état « daemon hors ligne ») quand le démon est arrêté ou indisponible, jamais une erreur ni un crash.
+- **Dégradation gracieuse partout.** `vibed` est **embarqué et démarre au boot** (le socket `/run/vibed/mcp.sock` est présent) et le **HUD Quickshell est installé et auto-démarré** (données mockées tant que son branchement live n'est pas codé). Quand il se connectera à `vibed`, il devra toujours gérer proprement l'absence du socket (état « daemon hors ligne ») quand le démon est arrêté ou indisponible, jamais une erreur ni un crash.
 
 ---
 
@@ -44,7 +44,7 @@ flowchart TB
         subgraph CENTER["Zone de travail — fond Base #1e1e2e"]
             direction LR
             WORK["Fenêtres<br/>(Ghostty/Zellij en scène principale,<br/>VSCodium, Firefox…)"]
-            HUD["HUD Quickshell — 🛣️ Phase 2<br/>(barre fine, couche additionnelle au panel Plasma)<br/>Agents · Tiers T0–T3 · Jauges ollama<br/>d'abord état «daemon hors ligne», puis données vives via MCP"]
+            HUD["HUD Quickshell — ✅ livré, données mockées<br/>(barre fine, couche additionnelle au panel Plasma)<br/>Agents · Tiers T0–T3 · Jauges ollama<br/>état «daemon hors ligne» aujourd'hui, données vives via MCP en Phase 2"]
         end
         subgraph DOCK["Dock bas — masquage auto, icônes seules"]
             direction LR
@@ -75,7 +75,7 @@ Panneau Plasma standard (Icons-Only Task Manager), **masquage automatique** — 
 
 Le HUD est une **barre fine** (Quickshell `PanelWindow`) ancrée au bord **supérieur**, pleine largeur, posée **en couche additionnelle au-dessus de Plasma 6** : le panneau Plasma garde son propre bord, le HUD réserve son propre strut. Ce n'est **jamais** un remplacement du shell Plasma — si Quickshell est absent ou plante, le bureau Plasma reste 100 % fonctionnel. C'est **la** surface du triptyque : agents, tiers, jauges.
 
-**Statut : 🛣️ Phase 2.** En v0.1, le **code QML du HUD est bien présent dans l'image** (`os/Containerfile` copie `desktop/quickshell` vers `/usr/share/vibeos/quickshell/`), mais **le HUD n'est ni lancé ni auto-démarré** : le paquet `quickshell` n'est pas installé et **aucun autostart n'est posé dans `/etc/skel`**. `vibed` est, lui, déjà embarqué et actif au boot ; il reste donc, en **Phase 2**, à installer `quickshell` et à poser l'autostart pour rendre le HUD vivant. Le **repli en pastille discrète** et le dépli/repli par `Meta+V` (barre réduite à un indicateur global) font partie du même livrable Phase 2.
+**Statut : ✅ câblé (Phase 2), données mockées.** Le **runtime Quickshell est compilé dans l'image** (étage `quickshell-builder` d'`os/Containerfile` — aucun paquet n'existe pour Fedora 42, voir `desktop/quickshell/README.md` §2) et le HUD est **auto-démarré** en session Plasma (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`). **Honnêteté** : les données affichées restent **mockées** (« vibed hors ligne ») tant que le branchement live du QML sur le socket (`Quickshell.Io`) n'est pas codé — c'est le reste du chantier HUD en Phase 2, avec le **repli en pastille discrète** et le dépli/repli par `Meta+V`.
 
 ### 2.5 Comportement des fenêtres (KWin)
 
@@ -92,13 +92,14 @@ Tout est posé **au build** (jamais à l'exécution). La colonne « Statut » di
 | Schéma de couleurs | `/usr/share/color-schemes/VibeOSDark.colors` — source : [`desktop/theme/vibeos-dark.colors`](../desktop/theme/vibeos-dark.colors) | ✅ livré v0.1 |
 | Défauts utilisateur **terminal** (config Ghostty/Zellij/fish/Starship/nvim) | `/etc/skel/.config/…` — copiés dans chaque nouveau `$HOME` | ✅ livré v0.1 |
 | Polices JetBrains Mono / Fira Code | `jetbrains-mono-fonts`, `fira-code-fonts` (paquets Fedora) | ✅ livré v0.1 |
-| Global Theme (Look-and-Feel) « VibeOS Dark » | `/usr/share/plasma/look-and-feel/org.vibeos.dark/` (contient `defaults` + `layout.js` du panneau/dock) | 🛣️ Phase 2 |
+| Global Theme (Look-and-Feel) « VibeOS Dark » | `/usr/share/plasma/look-and-feel/org.vibeos.dark/` — **défaut système** via `/etc/xdg/kdeglobals` (`LookAndFeelPackage`), moteur Kvantum installé + sélection `/etc/skel/.config/Kvantum/kvantum.kvconfig` | ✅ livré (Phase 2) |
 | Preset Panel Colorizer | appliqué via la config par défaut | 🛣️ Phase 2 |
 | Défauts utilisateur **bureau** (raccourcis, activités) | `/etc/skel/.config/…` | 🛣️ Phase 2 |
-| HUD Quickshell | QML présent sous `/usr/share/vibeos/quickshell/` ; paquet `quickshell` + autostart utilisateur à venir | 🛣️ Phase 2 (QML copié, non lancé) |
+| HUD Quickshell | Runtime compilé dans l'image (étage `quickshell-builder`) ; QML sous `/usr/share/vibeos/quickshell/` ; autostart `/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud` | ✅ livré (Phase 2) — données mockées (§2.4) |
+| Config MCP Claude Code → `vibed` | `/etc/skel/.claude.json` (pont `socat` vers `/run/vibed/mcp.sock`) | ✅ livré (Phase 2) |
 | Wallpapers | `/usr/share/wallpapers/VibeOSDark/` | 🛣️ Phase 5 (branding) |
 
-En v0.1, **Ghostty**, les polices **`jetbrains-mono-fonts` / `fira-code-fonts`** et le schéma de couleurs sont déclarés dans `os/Containerfile` (avec la couche terminal), et le **code QML du HUD y est copié** (`desktop/quickshell` → `/usr/share/vibeos/quickshell/`). En revanche, le **paquet `quickshell`** (runtime) n'est **pas encore installé**, le HUD n'est **pas auto-démarré**, et **Panel Colorizer** n'est pas intégré : ces trois points sont des livrables **Phase 2**. Ce document ne fait que **référencer** les noms de paquets restants — le Containerfile est un chantier distinct.
+Le `Containerfile` livre désormais toute la chaîne : couche terminal (Ghostty, polices), assets du thème, **runtime Quickshell compilé** (étage `quickshell-builder` — aucun paquet Fedora 42 n'existe, voir `desktop/quickshell/README.md`), **moteur Kvantum** (couche 1g), **pointeur de thème par défaut** (`/etc/xdg/kdeglobals`) et **autostart du HUD** (`/etc/skel`). Reste **Phase 2** : le preset **Panel Colorizer** (verre panneau/dock) et le **branchement live du HUD** sur le socket `vibed`. Ce document ne fait que **référencer** ces éléments — le Containerfile est un chantier distinct.
 
 ---
 
@@ -121,14 +122,14 @@ Les activités Plasma (mécanisme natif, stable) incarnent le pilier **Contexte*
 ## 4. La session par défaut
 
 1. **SDDM** (thème Breeze en v0.1 ; thème VibeOS en **Phase 5**, base SDDM Astronaut — voir ECOSYSTEM niveau 3) ouvre une **session Plasma 6 Wayland** (X11 non installé, héritage Kinoite).
-2. En v0.1, la session applique le **schéma de couleurs VibeOSDark** (livré) sur un Plasma 6 par ailleurs standard. Le Global Theme **VibeOS Dark** complet (layout panneau + dock, wallpaper de l'activité Vibe) est un livrable **Phase 2**.
-3. **Phase 2** : l'**autostart utilisateur** (fichier `.desktop` dans `/etc/skel/.config/autostart/`, donc dans `$HOME` — pas de service système) lancera le HUD Quickshell. *(En v0.1, aucun autostart HUD n'est posé dans l'image.)*
-4. **Phase 2** : le HUD tentera `connect()` sur `/run/vibed/mcp.sock` :
+2. La session s'ouvre en **Global Theme VibeOS Dark par défaut** (pointeur `/etc/xdg/kdeglobals`, layout panneau + dock du paquet `org.vibeos.dark` appliqué aux nouvelles sessions ; surchargeable par utilisateur). Le wallpaper par défaut reste Breeze (branding **Phase 5**).
+3. L'**autostart utilisateur** livré dans l'image (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`, `$HOME` — pas de service système) **lance le HUD Quickshell** en session Plasma. Le supprimer de son `$HOME` désactive le HUD.
+4. **Reste Phase 2** : le HUD tentera `connect()` sur `/run/vibed/mcp.sock` (aujourd'hui le QML n'ouvre aucun socket — données mockées, pastille « hors ligne ») :
    - `vibed` étant désormais embarqué et démarré au boot, le socket existe → handshake MCP, abonnement aux événements, données vives (§6) ;
    - si le démon est arrêté ou indisponible, le socket est absent → le HUD affiche l'état **« vibed hors ligne »** (pastille grise Overlay1, un texte court, un lien vers la doc). Il reste utile : jauges locales (CPU/RAM via les API systèmes standard) et raccourcis de lancement fonctionnent.
 5. Aucun agent ne démarre tout seul. VibeOS n'exécute **jamais** un agent sans action explicite de l'humain — le bureau propose (raccourcis, dock, HUD), l'humain dispose.
 
-En v0.1, la session par défaut est un Plasma 6 au schéma VibeOSDark, terminal prêt (Ghostty + fish + Starship + Zellij), **sans HUD ni activités pré-configurées** (Phase 2). Le premier geste attendu reste l'ouverture d'un terminal Ghostty (le raccourci `Meta+Return` sera posé en Phase 2 avec les défauts bureau).
+La session par défaut est désormais un Plasma 6 en **Global Theme VibeOS Dark**, terminal prêt (Ghostty + fish + Starship + Zellij), **HUD affiché** (données mockées tant que le branchement live n'est pas codé) — mais **sans activités pré-configurées ni verre Panel Colorizer** (Phase 2). Le premier geste attendu reste l'ouverture d'un terminal Ghostty (le raccourci `Meta+Return` sera posé en Phase 2 avec les défauts bureau).
 
 ---
 
@@ -179,7 +180,7 @@ v0.1 : **Breeze** (défaut Plasma, LGPL) — aucun fork d'icônes tant que le br
 
 ## 6. Le HUD agents (renvoi)
 
-Le HUD est spécifié et son code vit dans [`desktop/quickshell/`](../desktop/README.md) ; **rappel de statut : le HUD lui-même est un livrable Phase 2** (non embarqué dans l'image v0.1, §2.4). Ce paragraphe fixe son **contrat produit** cible ; les colonnes distinguent le comportement selon que `vibed` est absent (« hors ligne ») ou présent :
+Le HUD est spécifié et son code vit dans [`desktop/quickshell/`](../desktop/README.md) ; **rappel de statut : le HUD est installé et auto-démarré, mais ses données restent mockées** tant que le branchement live sur le socket n'est pas codé (§2.4). Ce paragraphe fixe son **contrat produit** cible ; les colonnes distinguent le comportement selon que `vibed` est absent (« hors ligne ») ou présent :
 
 | Surface | Contenu | vibed hors ligne | vibed présent |
 |---|---|---|---|
@@ -246,12 +247,12 @@ Le bureau réussit si, à chaque étape, les trois questions du triptyque ont un
 | Schéma de couleurs `VibeOSDark.colors` | ✅ livré (`desktop/theme/`) | — | — | — |
 | Dotfiles terminal `/etc/skel` (fish/Starship/Ghostty/Zellij/nvim) | ✅ livré | — | — | — |
 | Polices JetBrains Mono / Fira Code | ✅ livré (`os/Containerfile`) | — | — | — |
-| Global Theme (layout panneau + dock) | ❌ | 🛣️ **Phase 2** | — | raffinements identité |
+| Global Theme (layout panneau + dock) | ❌ | ✅ **livré** (défaut système via `/etc/xdg/kdeglobals` + Kvantum) | — | raffinements identité |
 | Preset Panel Colorizer | ❌ | 🛣️ **Phase 2** | — | — |
 | Activités Vibe / Focus / Review pré-configurées | ❌ | 🛣️ **Phase 2** (`/etc/skel`) + couplage agents (piste) | — | — |
 | Raccourcis globaux (§7) | ❌ | 🛣️ **Phase 2** (`/etc/skel/kglobalshortcutsrc`, actions branchées sur vibed) | — | — |
 | Wallpapers originaux (Genesis, Void) | ❌ | — | — | 🛣️ **Phase 5** (série complète + logo) |
-| HUD Quickshell — rendu, panneaux, état « vibed hors ligne » | ❌ | 🛣️ **Phase 2** | — | — |
+| HUD Quickshell — rendu, panneaux, état « vibed hors ligne » | ❌ | ✅ **livré** (runtime compilé + autostart ; données mockées) | — | — |
 | HUD ↔ vibed : agents, tiers, décisions **en direct** | ❌ | 🛣️ **Phase 2** (socket MCP `/run/vibed/mcp.sock`) | — | — |
 | Panneau Mémoire du HUD (`memory.query`) | ❌ (état « non accessible ») | 🛣️ Phase 2 | enrichi (mémoire v2) | — |
 | Dialogues d'approbation T2/T3 dans Plasma | ❌ (T2/T3 = refus fail-closed, cf. [ARCHITECTURE.md](ARCHITECTURE.md) §4.5) | 🛣️ Phase 2 | — | — |

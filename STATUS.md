@@ -1,7 +1,7 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-03 ~12h40** (session de travail continue).
+> Dernière mise à jour : **2026-07-08** (lot HUD Quickshell + thème par défaut + config MCP client).
 
 ## Vue d'ensemble
 
@@ -41,19 +41,21 @@
 
 - **2026-07-03** — **`vibed` branché dans l'image (Phase 2)** : le binaire est **embarqué** (compilé en multi-stage dans `os/Containerfile` → `/usr/bin/vibed`), **`vibed.service` démarre au boot**, **charge et applique la politique** installée (`/etc/vibeos/policy.d/`, 7 règles, fail-closed), **sert le serveur MCP** sur `/run/vibed/mcp.sock` (identité de l'appelant via `SO_PEERCRED`), **audite** sous `/var/lib/vibeos/audit/vibed.jsonl`, et expose l'outil MCP **`memory.query`**. Restent Phase 2 : HUD/quickshell (paquet + autostart), `memory.append` + `scope`/`limit`, outils T1 réels, config MCP côté client. `vibed` tourne encore en **root** (`User=vibed` : Phase 4).
 
+- **2026-07-08** — **Lot « HUD + thème par défaut + MCP client » livré (Phase 2)** : **Quickshell 0.2.1 compilé depuis les sources** dans l'image (étage `quickshell-builder` d'`os/Containerfile` — aucun paquet n'existe pour Fedora 42 : le paquet officiel commence à f44 et aucun COPR n'a de chroot f42, vérifié par API COPR + src.fedoraproject.org ; version épinglée + sha256, recette du spec Fedora officiel, `X11=OFF` — image Wayland-only, garde d'ABI privée Qt par `quickshell --version` dans l'image finale). **HUD auto-démarré** en session Plasma (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`, `TryExec` = dégradation gracieuse). **Global Theme `org.vibeos.dark` par défaut système** (pointeur une-ligne `/etc/xdg/kdeglobals` + garde anti-collision au build ; moteur **Kvantum installé** — couche 1g — avec sélection `VibeOSDark` en skel). **Config MCP Claude Code livrée** (`/etc/skel/.claude.json` : serveur `vibeos` → socat → `/run/vibed/mcp.sock`, portée utilisateur, zéro config manuelle — prérequis : groupe `vibeos-agents`). Honnêteté préservée : le HUD affiche encore des **données mockées** (« vibed hors ligne ») — le branchement live QML ↔ socket reste en Phase 2. Docs recalées (DESKTOP, quickshell, look-and-feel, agent, os, skel). Build local vert (stage quickshell + image complète, `bootc container lint`).
+
 - **2026-07-03** — **Audit de cybersécurité adversarial** (workflow multi-agents, 4 lentilles + vérification) : le cœur du moteur de politique est validé sûr (fail-closed, plancher T2/T3 non abaissable, T2 = refus, pas d'enregistrement dynamique d'outils). **2 failles critiques + 3 hautes corrigées** dans les outils fichiers de vibed (root) : `fs.write` symlink-safe (canonicalisation + `O_NOFOLLOW`) et confiné au home de l'appelant (uid `SO_PEERCRED`), denylist `fs.read` étendue aux secrets (SSH/AWS/kube/NM/gshadow/`/proc/**/environ`), rejet des fichiers spéciaux + lecture bornée (anti-DoS), audit enrichi. 47 tests verts. **Reste (décisions supply-chain)** : épingler les Actions par SHA, désactiver les repos COPR après install + NEVRA, `npm --ignore-scripts` + lockfile, `CapabilityBoundingSet` vide, faire *vérifier* cosign côté client, recaler `SECURITY.md`.
 
 ## 📋 Reste à faire (court terme)
 
-1. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 ; valider NVIDIA sur le PC de référence.
-2. **Câbler le HUD Quickshell** (installer le paquet `quickshell` + poser l'autostart) et activer le **Global Theme** — restent des livrables **Phase 2**. (`vibed` est désormais branché et démarre au boot — voir « Fait ».)
+1. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (désormais : thème VibeOS Dark + HUD au premier login) ; valider NVIDIA sur le PC de référence.
+2. **Brancher le HUD en live** : câbler le QML sur le socket (`Quickshell.Io` `Socket` + `SplitParser` ↔ `/run/vibed/mcp.sock`) — le HUD est installé et auto-démarré mais affiche des données mockées (« vibed hors ligne »).
 3. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
 4. Mettre à jour ce fichier + README à chaque jalon.
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
 - **Phase 1 (v0.1)** : CI verte sur GitHub Actions, ISO amd64+arm64 bootables en VM, validation NVIDIA sur le PC de référence.
-- **Phase 2 (v0.2)** : `vibed` **embarqué dans l'image** (étage cargo multi-stage) ✅ — restent les premiers **outils T1 réels**, l'outil `memory.append`, la **config MCP côté client** (Claude Code) et le **HUD Quickshell** (paquet + autostart).
+- **Phase 2 (v0.2)** : `vibed` embarqué ✅ · HUD Quickshell installé + auto-démarré ✅ · Global Theme par défaut ✅ · config MCP client (Claude Code) ✅ — restent les premiers **outils T1 réels**, l'outil **`memory.append`** + `scope`/`limit` de `memory.query`, le **branchement live du HUD** et le preset **Panel Colorizer**.
 - **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée, **sandbox par outil (systemd-run, seccomp, landlock)**.
 - **Phase 4 (v0.4)** : durcissement (UKI / boot mesuré, SELinux dédiée `vibed_t`, hash-chaining audit, `User=vibed`).
 - **Phase 5 (v0.5)** : installateur brandé + identité visuelle complète.

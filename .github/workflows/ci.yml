@@ -3,7 +3,8 @@
 #                 integration test suite loads the shipped policy file
 #                 security/policy.d/default.toml through the REAL parser, so a
 #                 policy/parser mismatch fails this job.
-#   * shellcheck  memory/genesis.sh (first-boot Genesis script)
+#   * shellcheck  memory/genesis.sh (first-boot Genesis script) and
+#                 os/rootfs/usr/bin/vibeos-hud (HUD launcher)
 #   * policy      quick schema validation of security/policy.d/*.toml with
 #                 Python tomllib (canonical [[rule]] schema: id / tools /
 #                 tier / action / approval), mirroring vibed's fail-closed
@@ -17,12 +18,14 @@ on:
       - "vibed/**"
       - "memory/**"
       - "security/**"
+      - "os/rootfs/usr/bin/**"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "vibed/**"
       - "memory/**"
       - "security/**"
+      - "os/rootfs/usr/bin/**"
       - ".github/workflows/ci.yml"
 
 permissions:
@@ -56,7 +59,7 @@ jobs:
         run: cargo clippy -- -D warnings
 
   shellcheck:
-    name: genesis.sh — shellcheck
+    name: scripts shell — shellcheck
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -67,8 +70,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: shellcheck memory/genesis.sh
-        run: shellcheck memory/genesis.sh
+      - name: shellcheck (genesis.sh, vibeos-hud)
+        run: shellcheck memory/genesis.sh os/rootfs/usr/bin/vibeos-hud
 
   policy:
     name: policy.d — TOML schema validation

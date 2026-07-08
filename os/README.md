@@ -21,6 +21,9 @@ détaillées dans [`docs/HARDWARE.md`](../docs/HARDWARE.md).
 | `rootfs/usr/lib/systemd/system-preset/50-vibeos.preset` | Activation des unités par *preset* (appliqué au premier boot, jamais de `systemctl enable` au build). |
 | `rootfs/usr/lib/sysusers.d/vibeos.conf` | Création au premier boot de l'utilisateur système `vibed` et du groupe `vibeos-agents` (accès au socket MCP `root:vibeos-agents 0660`). |
 | `rootfs/usr/lib/vibeos/image-info.json` | Identité de l'image (nom, version, variante, architectures, date). |
+| `rootfs/usr/bin/vibeos-hud` | Lanceur du HUD Quickshell (config immuable `/usr/share/vibeos/quickshell/`, lancée par chemin explicite). |
+| `rootfs/etc/xdg/kdeglobals` | Pointeur système du Global Theme par défaut (`LookAndFeelPackage=org.vibeos.dark`) — cascade KConfig, surchargeable par utilisateur ; garde anti-collision dans le `Containerfile`. |
+| `rootfs/etc/skel/` | Dotfiles du premier `$HOME` : pile terminal vibecoding, autostart du HUD (`.config/autostart/vibeos-hud.desktop`), config MCP de Claude Code (`.claude.json` → socket `vibed`). |
 | `packages.txt` | Manifeste des paquets, catégorisé et épinglé — doit rester **strictement synchronisé** avec le `Containerfile`. |
 
 Deux contenus livrés par l'image ont leur source **hors de `os/`** (ne pas les
@@ -74,12 +77,16 @@ flowchart LR
 
 ## Points d'attention spécifiques VibeOS
 
-- `vibed.service` est livré **avant** le binaire `/usr/bin/vibed` (Phase 2).
-  La garde `ConditionPathExists=/usr/bin/vibed` fait que systemd *saute*
-  l'unité sans casser le boot — **aucun placeholder de binaire**, sinon la
-  garde passerait et l'unité échouerait en boucle. L'activation du démon se
-  fera en décommentant l'étage `vibed-builder` du `Containerfile` — rien
-  d'autre à toucher.
+- `vibed` est **compilé et embarqué** par l'étage `vibed-builder` du
+  `Containerfile` (`/usr/bin/vibed`), et `vibed.service` démarre au boot.
+  La garde `ConditionPathExists=/usr/bin/vibed` reste en place : si l'étage
+  est retiré (image de debug), systemd *saute* l'unité sans casser le boot.
+- `quickshell` (runtime du HUD) est **compilé depuis les sources** par
+  l'étage `quickshell-builder` — aucun paquet n'existe pour Fedora 42 (le
+  paquet officiel commence à f44, aucun COPR n'a de chroot f42). Version
+  épinglée + sha256 vérifié ; le `Containerfile` exécute
+  `quickshell --version` dans l'image finale pour attraper tout décalage
+  d'ABI privée Qt avec la base épinglée.
 - `genesis.sh` a sa source dans [`memory/genesis.sh`](../memory/genesis.sh)
   (sous-système mémoire) : **ne pas l'éditer ici**. En v0.1 il crée la mémoire
   **en clair** (LUKS et mode amnésique = Phase 3, voir

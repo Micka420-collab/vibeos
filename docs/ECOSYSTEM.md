@@ -45,7 +45,7 @@ On démarre sur un **Plasma 6 brandé** — fork Catppuccin « VibeOS Dark », p
 | MCP Reference Servers | MIT | 🛣️ Phase 2 (registre MCP servi par `vibed`) | Socle MCP offline : filesystem, git, fetch, memory, time |
 | Playwright MCP | Apache-2.0 | 🛣️ Phase 2 | L'agent teste l'app web qu'il vient d'écrire (snapshots a11y) |
 | Serena | MIT | 🛣️ Phase 2 | Navigation/édition **symbolique LSP** (40+ langages) — multiplicateur pour agents |
-| Quickshell | LGPL-3.0 | 🛣️ Phase 2 (chantier bureau) | **HUD agents signature** (Qt6/QML comme Plasma) : statut agents, tiers, jauges |
+| Quickshell | LGPL-3.0 | ✅ livré (compilé depuis les sources — aucun paquet f42) | **HUD agents signature** (Qt6/QML comme Plasma) : statut agents, tiers, jauges |
 | Plasma Panel Colorizer | GPL-3.0 | 🛣️ Phase 2 (chantier bureau) | Identité visuelle des panels sans quitter Plasma supporté |
 | age | BSD-3 | À intégrer (pas encore dans le Containerfile) | Chiffrement minimaliste des secrets |
 | SOPS | MPL-2.0 | À intégrer | Secrets chiffrés versionnables (backend age), CNCF |
