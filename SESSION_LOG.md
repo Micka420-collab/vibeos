@@ -80,6 +80,39 @@
   outil T0 `policy.check` (groundwork Zed) + **12 tests vitest** de l'extension ;
   clippy `--locked` + fmt propres.
 
+**Nuit (2) — implémentation des 5 briques restantes**, tout poussé sur PR #11 :
+- **`svc.restart` (T2) — backend RÉEL** derrière le grant one-shot (n'est atteint
+  qu'après `vibectl approve`) : `systemctl restart` (nom validé, `--`, chemin
+  absolu, env vidé, borné par le timeout de job systemd) + **relecture d'état**
+  pour prouver le redémarrage. `handle_connection` reçoit désormais le répertoire
+  d'approbation (injectable) → **test e2e sur socket** : demande→refus T2→approve
+  hors bande→ré-appel→grant consommé→audit `started_approved(by_uid=0)`, one-shot
+  vérifié. + tests unitaires hermétiques (fake systemctl). THREAT-MODEL à jour.
+- **Extension Zed câblée dans l'image (ADR-015)** : étage `zed-agent-builder` —
+  `npm ci --ignore-scripts` + **bundle esbuild** vers un unique `.mjs` autonome
+  (jamais `node_modules` ni sources TS). **`npm audit --omit=dev` = 0 vuln**
+  (les 5 restantes sont dev-only). **Gardé off** (`ARG WITH_ZED_AGENT=0`, ADR-015
+  §6) : les deux chemins construisent (podman vérifié) ; à 0 le builder npm est
+  hors graphe (marqueur `NOT-INSTALLED.txt`), à 1 seul le bundle est copié.
+- **Phase 2.5 — reste livré** : `vibeos-agent@.service` (always-on, `User=%i`
+  jamais root, durci sans MDWX car CLI Node), **jeton scellé TPM2**
+  (`LoadCredentialEncrypted=` + `vibeos-agent-seal-token.sh`), **allowlist egress
+  par nom d'hôte** (`vibeos-agent-egress@.service` + `agent-egress.conf`,
+  `getent`→`IPAddressAllow`). shellcheck + `systemd-analyze verify` propres.
+- **E2E Zed turnkey** (`scripts/e2e-zed.sh` + `e2e-live-policy.mjs`) : **Tier A
+  VALIDÉ sur socket vibed live** — fs.read/fs.list (T0)→allow auto, pkg.install/
+  svc.restart (T2)→require_approval, disk.wipe→deny (5/5 PASS, audit écrit).
+  Overrides dev `VIBED_SOCKET`/`VIBED_POLICY_DIR`/`VIBED_AUDIT_DIR`. Tier B
+  (round-trip éditeur) = checklist, non lancé ici (Zed non headless).
+- **HUD branché en LIVE** : `Quickshell.Io.Socket` sur `/run/vibed/mcp.sock` —
+  os.status + memory.query + raisonnement (nouvel outil T0 **`agent.sessions`** →
+  `agent.thinking`) live ; observateur strict T0, dégradation gracieuse. Roster
+  agents + jauge ollama restent hors-ligne (pas d'`agents.list`).
+- **F6** inscrit en **dette explicite** (ROADMAP §9 ter, effort 1–2 j).
+- **État** : **145 tests vibed verts** (136 unit + 7 e2e MCP + 2 politique) +
+  **17 vitest** + smoke ACP + Tier A live ; clippy/fmt propres ; PR #11
+  **MERGEABLE, CI Rust verte** (11 checks pass, build image en cours).
+
 **Analyse + améliorations (matin)** — analyse ultracode (6 agents), revue
 adversariale (24 agents, 15 findings corrigés), et une **trousse cybersécurité
 gouvernée** (≈ 60 outils pentest/DFIR embarqués + catalogue `docs/SECURITY-TOOLKIT.md`
@@ -189,46 +222,47 @@ e2e + 2 politique) ; `clippy --all-targets --locked -D warnings` 0 warning ;
 Images `vibeos:dev-final`, `dev-final2` **et** `dev-final3` (arbre final complet)
 construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erreur).
 
-## 🔧 En cours / non terminé (checkpoint 2026-07-13 nuit)
+## 🔧 En cours / non terminé (checkpoint final 2026-07-13 nuit)
 
-- **Zed — E2E complet** : le cœur du fork est livré et **vérifié sans Zed**
-  (`tsc` + 17 tests + boot ACP headless) ; il reste le test bout-en-bout en
-  session réelle → voir **`BLOCKERS.md`** (liste précise).
-- **Zed — câblage dans l'image** : délibérément **pas fait** tant que l'E2E n'est
-  pas validé (ne pas ship ~148 paquets npm non éprouvés). Plan : **ADR-015**.
-- **Phase 2.5 — reste** : unité `vibeos-agent@.service` (always-on par défaut),
-  **auth par abonnement scellée TPM2**, **allowlist d'egress par unité**.
-- **F6 (découpe de `mcp.rs`)** : toujours différé (refactor mécanique ; protocole
-  décourage le cosmétique sans gain mesuré).
-- **Backends T2 réels** (`pkg.install`/`svc.restart`) : encore des stubs — la
-  plomberie d'approbation est prête, l'exécution réelle est **Phase 4**.
+- **Zed — E2E Tier B (round-trip éditeur)** : le **Tier A est validé sur socket
+  vibed live** (décisions fs.read→allow / pkg.install→require_approval, `scripts/
+  e2e-live-policy.mjs`). Reste le Tier B — Zed spawn le binaire Claude → vrai appel
+  d'outil → prompt supprimé pour un Allow, affiché pour un require_approval. Non
+  lançable ici (Zed non headless). Turnkey prêt : `scripts/e2e-zed.sh`.
+- **Zed — expédition dans l'image** : l'étage `zed-agent-builder` est livré et
+  **construit** (bundle esbuild vérifié), mais **gardé off** (`WITH_ZED_AGENT=0`,
+  ADR-015 §6) jusqu'à la validation du Tier B.
+- **Phase 2.5 — enforcement live** : unité `vibeos-agent@`, jeton TPM2, egress
+  livrés et statiquement validés ; le **comportement au boot** (unseal TPM2 réel,
+  egress BPF) exige une machine bootée.
+- **HUD** : os.status/memory.query/raisonnement **live** ; roster agents + jauge
+  ollama restent hors-ligne (pas d'outil `agents.list` ; sonde ollama séparée).
+- **F6 (découpe de `mcp.rs`, ~3710 l.)** : dette explicite (ROADMAP §9 ter), à
+  faire en session dédiée après le merge de #11.
+- **`pkg.install`** : encore un stub (backend rpm-ostree/bootc = Phase 4).
 
 ## 🚧 Blockers (précis)
 
-- **Zed E2E** : nécessite (1) le **binaire natif du Claude Agent SDK**, (2) un
-  **`vibed` démarré** servant `policy.check` sur `/run/vibed/mcp.sock`, (3) un
-  **client ACP complet** (Zed — non installable headless ici — ou un harnais
-  maison). Détail dans `BLOCKERS.md`.
+- **Zed E2E Tier B** : nécessite (1) le **binaire natif du Claude Agent SDK**,
+  (2) **Zed** (non installable headless en WSL) ou un client ACP maison. Le Tier A
+  (lien extension↔vibed) est **déjà prouvé**. Détail : `BLOCKERS.md`.
 - **Validation VM/matériel** (Phase 1) : boot ISO amd64+arm64, NVIDIA, `ollama
   run` hors-ligne, `bootc upgrade/rollback` — exigent une vraie machine.
+- **Boot Phase 2.5** : TPM2 réel + egress live + auth abonnement E2E = machine bootée.
 - **Merge des PR** : PR #11 (branche → main) est **MERGEABLE + CI Rust verte** ;
-  reste la revue humaine + le merge (je ne merge jamais). Le sort de PR #4
-  (empilée, cible `phase2-supply-chain`) est à trancher côté humain.
+  reste la revue + le merge humains (je ne merge jamais). **PR #4 ne se ferme PAS
+  automatiquement** (même branche source mais base `phase2-supply-chain` ≠ `main`,
+  `deleteBranchOnMerge=false`) → fermeture manuelle après #11.
 
 ## ➡️ Prochaine étape recommandée
 
 1. **Merger PR #11 → main** (CI Rust verte ; laisser finir le build image ~15 min),
-   puis clore/retirer PR #4 (superseded).
-2. **Zed E2E** sur une machine avec Zed + un `vibed` local : lancer une session,
-   déclencher un `vibeos:fs.read` (T0, doit passer sans prompt) et un `pkg.install`
-   (T2, doit prompter) ; étendre `scripts/smoke-acp.mjs` en client ACP complet
-   pour automatiser sans éditeur.
-3. **Câbler l'extension dans l'image** selon **ADR-015** (étage npm dédié, `npm ci
-   --ignore-scripts --omit=dev`, seul `dist/` copié).
-4. **Phase 2.5 reste** : auth abonnement TPM2 (`systemd-creds`), allowlist egress,
-   unité always-on.
-5. **Backends T2 réels** derrière l'approbation (`svc.restart` via `systemctl`) —
-   la démo « l'agent demande, l'humain approuve, l'unité redémarre, l'audit le
-   prouve ».
-6. **Branchement live du HUD** (`Quickshell.Io`) + Phase 3 (LUKS/TPM2, sandbox
-   par outil).
+   puis **fermer manuellement PR #4** (superseded).
+2. **Zed E2E Tier B** : sur une machine avec Zed, lancer `zed/vibeos-claude-acp/
+   scripts/e2e-zed.sh` tel quel (Tier A auto déjà vert, puis la checklist éditeur).
+3. **Activer l'expédition** de l'extension (`WITH_ZED_AGENT=1`) une fois le Tier B ok.
+4. **Brancher l'agent-runner** sur une vraie machine : sceller un jeton
+   (`vibeos-agent-seal-token.sh`), écrire `agent.d/<user>.conf`, `systemctl enable
+   --now vibeos-agent@<user>` — vérifier unseal TPM2 + egress.
+5. **F6** (découpe `mcp.rs`) en session dédiée ; **`agents.list`** (roster HUD live) ;
+   **`pkg.install`** réel derrière approbation. Puis Phase 3 (LUKS/TPM2, sandbox).

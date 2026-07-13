@@ -1,7 +1,7 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-13** (journée d'amélioration continue : CI durcie, sécurité vibed, `svc.status`/`fs.list`, chaîne agent→vibed out-of-box, wallpaper officiel par défaut, recalage documentaire — PR #4).
+> Dernière mise à jour : **2026-07-13 (nuit)** — `svc.restart` T2 réel, extension Zed câblée dans l'image (bundle, gardée), Phase 2.5 (unité agent + TPM2 + egress), E2E Zed turnkey (Tier A validé live), HUD branché en live. **PR #11 → main MERGEABLE, CI Rust verte.**
 
 ## Vue d'ensemble
 
@@ -81,13 +81,23 @@
   - **Hygiène PR** : PR #5 (branche→main) mergée à l'état du matin ; ~44 commits d'après-midi/soir orphelins → **PR draft #11 (branche → main)** pour les rapatrier.
   - **140 tests vibed verts** (132 unit + 6 e2e MCP + 2 politique) + **17 tests vitest** de l'extension Zed, clippy `--locked` + fmt propres ; images `dev-final`…`dev-final4`, `bootc container lint` 0 erreur.
 
+- **2026-07-13 (nuit, session autonome)** — Nettoyage + concrétisation : les vérifications des 8 points + 5 nouvelles briques livrées et vérifiées, poussées sur [PR #11 → main](https://github.com/Micka420-collab/vibeos/pull/11) (**MERGEABLE, CI Rust verte**) :
+  - **`svc.restart` (T2) — backend réel** derrière le grant d'approbation one-shot (n'est atteint qu'après `vibectl approve`) : `systemctl restart` (nom validé, `--`, chemin absolu, env vidé) + relecture d'état pour *prouver* le redémarrage. Chaîne demande→refus T2→approve→grant→redémarrage→audit `started_approved(by_uid)` couverte **e2e sur socket**. `pkg.install` reste un stub.
+  - **Extension Zed câblée dans l'image (ADR-015)** : étage `zed-agent-builder` — `npm ci --ignore-scripts` + **bundle esbuild** vers un unique `.mjs` (jamais `node_modules` ni sources TS ; `npm audit --omit=dev` = 0 vuln). **Gardé off** par défaut (`ARG WITH_ZED_AGENT=0`, pas d'expédition avant l'E2E). Les deux chemins construisent (podman vérifié).
+  - **Phase 2.5 — reste livré** : unité `vibeos-agent@.service` (always-on, `User=%i` jamais root, durcie) + **jeton scellé TPM2** (`LoadCredentialEncrypted=` + `vibeos-agent-seal-token.sh`) + **allowlist egress par nom d'hôte** (`vibeos-agent-egress@.service`, `getent`→`IPAddressAllow`). shellcheck + `systemd-analyze verify` propres ; enforcement live = machine bootée.
+  - **E2E Zed turnkey** : `scripts/e2e-zed.sh` (build+bundle, vibed, Tier A auto + checklist Tier B). **Tier A VALIDÉ sur socket vibed live** (fs.read T0→allow auto ; pkg.install/svc.restart T2→require_approval ; disk.wipe→deny). Overrides dev `VIBED_SOCKET`/`VIBED_POLICY_DIR`/`VIBED_AUDIT_DIR`.
+  - **HUD branché en live** : `Quickshell.Io.Socket` sur `/run/vibed/mcp.sock` — os.status + memory.query + raisonnement (`agent.sessions`→`agent.thinking`) live ; observateur strict T0, dégradation gracieuse. Nouvel outil T0 **`agent.sessions`**. Roster agents + ollama restent hors-ligne (pas d'`agents.list`).
+  - **Docs** : F6 inscrit en dette explicite (ROADMAP) ; THREAT-MODEL à jour (svc.restart, egress, TPM2) ; ADR-014/015 recalés.
+  - **145 tests vibed verts** (136 unit + 7 e2e MCP + 2 politique) + **17 tests vitest** + smoke ACP + Tier A live, clippy/fmt propres.
+
 ## 📋 Reste à faire (court terme)
 
-1. **Merger les 4 draft PRs empilées** (côté utilisateur, dans l'ordre) : [#1 HUD/thème/MCP client](https://github.com/Micka420-collab/vibeos/pull/1) → [#2 memory.append](https://github.com/Micka420-collab/vibeos/pull/2) → [#3 supply-chain](https://github.com/Micka420-collab/vibeos/pull/3) → [#4 améliorations 2026-07-13](https://github.com/Micka420-collab/vibeos/pull/4).
-2. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (désormais : thème VibeOS Dark, wallpaper officiel, HUD au premier login) ; valider NVIDIA sur le PC de référence.
-3. **Brancher le HUD en live** : câbler le QML sur le socket (`Quickshell.Io` `Socket` + `SplitParser` ↔ `/run/vibed/mcp.sock`) — le HUD est installé et auto-démarré mais affiche des données mockées (« vibed hors ligne »).
-4. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
-5. Mettre à jour ce fichier + README à chaque jalon.
+1. **Merger [PR #11 → main](https://github.com/Micka420-collab/vibeos/pull/11)** (côté utilisateur) : **MERGEABLE, CI Rust verte** ; laisser finir le build image (~15 min). Ensuite **fermer manuellement [PR #4](https://github.com/Micka420-collab/vibeos/pull/4)** (même branche source, base `phase2-supply-chain` ≠ `main` → GitHub ne la ferme pas automatiquement, et `deleteBranchOnMerge=false`).
+2. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (thème VibeOS Dark, wallpaper officiel, HUD au premier login) ; valider NVIDIA sur le PC de référence.
+3. **E2E Zed Tier B** (côté utilisateur, machine avec Zed) : lancer `zed/vibeos-claude-acp/scripts/e2e-zed.sh` — Tier A auto, puis la checklist éditeur (fs.read sans prompt, pkg.install qui prompte). Le Tier A (décisions live) est déjà vérifié.
+4. **Activer l'expédition de l'extension Zed** (`WITH_ZED_AGENT=1`) une fois le Tier B validé ; **brancher l'agent-runner** sur une vraie machine (TPM2 + egress live).
+5. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
+6. Mettre à jour ce fichier + README à chaque jalon.
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
