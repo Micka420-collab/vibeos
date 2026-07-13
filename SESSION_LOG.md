@@ -76,12 +76,22 @@ par défaut. ~40 recalages docs. Image bootc construite et inspectée.
   dépassement = refus fail-closed audité `rate_limited`. Rétention/purge du
   journal = politique opérateur (purge = T3) ; rotation par jour déjà en place.
 
-**État tests** : **112 tests vibed verts** (105 unitaires + 5 intégration MCP
+**Revue adversariale du code du jour** (sous-agent, 4 fichiers) : **aucun bug
+high/medium** ; 1 MED + points low traités — TOCTOU du plafond `MAX_PENDING`
+sous concurrence (verrou de sérialisation + test 128 threads), parse euid
+fail-closed (`parse_effective_uid`, uid effectif uniquement). Le grant consommé
+si l'audit échoue est laissé tel quel (fail-closed voulu du one-shot).
+
+**Phase 2.5 ajoutée au ROADMAP** (« Autonomie encadrée & accès IA externes »,
+proposée) : superviseur d'agent budgété + kill-switch humain, auth abonnement
+scellée TPM2, allowlist egress par unité, type réservé `autonomous_session` —
+périmètre figé T0/T1.
+
+**État tests** : **114 tests vibed verts** (107 unitaires + 5 intégration MCP
 e2e + 2 politique) ; `clippy --all-targets -D warnings` 0 warning ; `fmt
 --check` OK ; `cargo build --release` des 2 binaires OK ; shellcheck vert.
-Image `vibeos:dev-final` construite et `bootc container lint` OK (2 warnings
-d'hygiène, 0 erreur) sur l'arbre du matin ; rebuild de validation du nouveau
-Rust lancé.
+Images `vibeos:dev-final` **et** `dev-final2` (avec le nouveau Rust) construites,
+`bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erreur).
 
 ## 🔧 En cours / non terminé
 
