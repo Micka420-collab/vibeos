@@ -580,6 +580,14 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"unit": {"type": "string"}}}),
         ),
         (
+            "svc.status",
+            Tier::T0,
+            "Read-only state of one systemd unit (systemctl show: load/active/sub state, \
+             unit file state, description). Strict unit-name validation; no state change",
+            json!({"type": "object", "required": ["unit"],
+                   "properties": {"unit": {"type": "string"}}}),
+        ),
+        (
             "memory.query",
             Tier::T0,
             "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match \
@@ -655,10 +663,109 @@ fn execute_tool(
                        The systemd D-Bus backend lands with vibectl (see ROADMAP.md)."
         })
         .to_string()),
+        "svc.status" => svc_status(args),
         "memory.query" => memory_query(args),
         "memory.append" => memory_append(args),
         _ => Err(format!("unknown tool: {name}")),
     }
+}
+
+/// svc.status (T0): read-only state of one systemd unit via `systemctl show`.
+///
+/// Safety posture (vibed runs as root and this SPAWNS a process):
+///   * the unit name is validated by `validate_unit_name` BEFORE anything
+///     runs — conservative allow-list of characters, no `/`, no leading `-`,
+///     bounded length — so neither options nor paths can be injected;
+///   * `--` terminates option parsing as a second fence;
+///   * systemctl is invoked by ABSOLUTE path with a cleared environment;
+///   * `show` is a pure read (no state change), and its D-Bus client applies
+///     its own timeout, so the spawn_blocking worker is not held hostage.
+fn svc_status(args: &Value) -> Result<String, String> {
+    let raw = args
+        .get("unit")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing 'unit' argument".to_string())?;
+    let unit = validate_unit_name(raw)?;
+
+    let output = std::process::Command::new("/usr/bin/systemctl")
+        .env_clear()
+        .args([
+            "show",
+            "--no-pager",
+            "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp",
+            "--",
+            &unit,
+        ])
+        .output()
+        .map_err(|e| format!("svc.status: cannot run systemctl: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let snippet: String = stderr.chars().take(200).collect();
+        return Err(format!(
+            "svc.status {unit}: systemctl exited with {}: {}",
+            output.status,
+            snippet.trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut payload = parse_systemctl_show(&stdout);
+    payload.insert("unit".to_string(), Value::String(unit));
+    Ok(Value::Object(payload).to_string())
+}
+
+/// Conservative systemd unit-name validation. Accepts `name`, `name.service`,
+/// `template@instance.service`, `dbus.socket`, systemd-escaped names (`\x2d`);
+/// appends `.service` when no type suffix is present (systemctl's own
+/// convention). Refuses anything that could be an option or a path.
+fn validate_unit_name(raw: &str) -> Result<String, String> {
+    if raw.is_empty() {
+        return Err("svc.status: 'unit' must not be empty".to_string());
+    }
+    if raw.len() > 255 {
+        return Err("svc.status: unit name exceeds 255 characters".to_string());
+    }
+    if raw.starts_with('-') {
+        return Err(format!(
+            "svc.status: invalid unit name '{raw}' (leading '-')"
+        ));
+    }
+    let valid = raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '@' | '\\'));
+    if !valid {
+        return Err(format!(
+            "svc.status: invalid unit name '{raw}' (allowed: alphanumerics and :-_.@\\)"
+        ));
+    }
+    Ok(if raw.contains('.') {
+        raw.to_string()
+    } else {
+        format!("{raw}.service")
+    })
+}
+
+/// Parse `systemctl show` KEY=VALUE lines into a JSON object with lowercase
+/// snake_case keys. Pure function, unit-tested without spawning anything.
+fn parse_systemctl_show(stdout: &str) -> serde_json::Map<String, Value> {
+    const KEYS: [(&str, &str); 7] = [
+        ("Id", "id"),
+        ("Description", "description"),
+        ("LoadState", "load_state"),
+        ("ActiveState", "active_state"),
+        ("SubState", "sub_state"),
+        ("UnitFileState", "unit_file_state"),
+        ("ActiveEnterTimestamp", "active_enter_timestamp"),
+    ];
+    let mut map = serde_json::Map::new();
+    for line in stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if let Some((_, out_key)) = KEYS.iter().find(|(k, _)| *k == key) {
+            map.insert(out_key.to_string(), Value::String(value.to_string()));
+        }
+    }
+    map
 }
 
 fn os_status() -> Result<String, String> {
@@ -1948,6 +2055,7 @@ mod tests {
         assert_eq!(tool_tier("fs.write"), Some(Tier::T1));
         assert_eq!(tool_tier("pkg.install"), Some(Tier::T2));
         assert_eq!(tool_tier("svc.restart"), Some(Tier::T2));
+        assert_eq!(tool_tier("svc.status"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
         assert_eq!(
@@ -1955,6 +2063,71 @@ mod tests {
             None,
             "unknown tool has no tier => default-deny"
         );
+    }
+
+    // -- svc.status (T0) -------------------------------------------------------
+
+    #[test]
+    fn unit_name_validation_accepts_real_units_and_appends_service() {
+        assert_eq!(validate_unit_name("sshd").unwrap(), "sshd.service");
+        assert_eq!(validate_unit_name("sshd.service").unwrap(), "sshd.service");
+        assert_eq!(validate_unit_name("dbus.socket").unwrap(), "dbus.socket");
+        assert_eq!(
+            validate_unit_name("getty@tty1.service").unwrap(),
+            "getty@tty1.service"
+        );
+        assert_eq!(
+            validate_unit_name("systemd-journald").unwrap(),
+            "systemd-journald.service"
+        );
+        // systemd-escaped names stay intact.
+        assert_eq!(
+            validate_unit_name("run-media-usb\\x2ddisk.mount").unwrap(),
+            "run-media-usb\\x2ddisk.mount"
+        );
+    }
+
+    #[test]
+    fn unit_name_validation_refuses_injection_shapes() {
+        for bad in [
+            "",
+            "-p",            // an option, not a unit
+            "--property=Id", // ditto
+            "../etc/passwd", // path traversal (contains '/')
+            "/usr/bin/true", // absolute path
+            "a unit",        // whitespace
+            "unit;reboot",   // shell metacharacter
+            "unit$(reboot)", // ditto
+            "unit\nother",   // newline
+        ] {
+            assert!(
+                validate_unit_name(bad).is_err(),
+                "'{bad}' must be refused by unit-name validation"
+            );
+        }
+        let oversized = "a".repeat(256);
+        assert!(validate_unit_name(&oversized).is_err());
+    }
+
+    #[test]
+    fn systemctl_show_output_parses_to_snake_case_json() {
+        let stdout = "Id=sshd.service\n\
+                      Description=OpenSSH server daemon\n\
+                      LoadState=loaded\n\
+                      ActiveState=active\n\
+                      SubState=running\n\
+                      UnitFileState=enabled\n\
+                      ActiveEnterTimestamp=Mon 2026-07-13 08:00:00 UTC\n\
+                      IgnoredKey=whatever\n\
+                      not-a-kv-line\n";
+        let map = parse_systemctl_show(stdout);
+        assert_eq!(map["id"], "sshd.service");
+        assert_eq!(map["active_state"], "active");
+        assert_eq!(map["sub_state"], "running");
+        assert_eq!(map["unit_file_state"], "enabled");
+        assert_eq!(map["load_state"], "loaded");
+        assert!(!map.contains_key("IgnoredKey"));
+        assert!(!map.contains_key("ignored_key"));
     }
 
     // -- memory.query (scope/limit) and memory.append -------------------------

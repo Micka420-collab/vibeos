@@ -106,6 +106,13 @@ denied = [
   "**/.config/sops/**",        # SOPS/age private keys (keys.txt)
 ]
 
+[[rule]]
+id = "svc-status"
+tools = ["svc.status"]
+tier = "T0"
+action = "allow"
+reason = "Read-only systemd unit state (systemctl show); no state change, strict unit-name validation in code."
+
 # --- T1: user-scope mutation ------------------------------------------------
 
 [[rule]]
