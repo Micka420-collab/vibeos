@@ -261,6 +261,19 @@ ShellRoot {
                 // ---- hairline divider ----
                 Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 16; color: Theme.hairline }
 
+                // ---- reasoning (3rd pillar "why" — Phase 2.5 scaffolding) ----
+                // Ships EMPTY (honesty rule): live/history stay [] until the
+                // Phase 2.5 agent supervisor publishes reasoning (tapped from the
+                // CLI stream, never the CLI transcript — docs/DECISIONS.md ADR-012).
+                // The chip shows "raisonnement — hors ligne" until then.
+                ReasoningPanel {
+                    Layout.alignment: Qt.AlignVCenter
+                    online: root.vibedOnline
+                }
+
+                // ---- hairline divider ----
+                Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 16; color: Theme.hairline }
+
                 // ===== RIGHT: resources (ollama + memory + load) =====
                 OllamaGauge {
                     Layout.alignment: Qt.AlignVCenter

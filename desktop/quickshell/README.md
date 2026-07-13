@@ -134,6 +134,7 @@ est absent (c'est le cas nominal de la Phase 1) :
 | `shell.qml` | racine Quickshell : `PanelWindow` frosté (barre haute verre, ombre d'élévation, marque + état global + triptyque) qui compose les widgets, détient l'état et le point de branchement Phase 2 |
 | `AgentStatus.qml` | chips d'agents élevés : anneau-avatar signature (Mauve→Blue), nom, pastille de tier, élévation au survol, tooltip verre (activité/projet/durée) |
 | `PolicyTierIndicator.qml` | pastille de tier en dégradé + anneau conique T0–T3, glyphe cadenas dessiné et pulsation douce quand T2+ attend une approbation |
+| `ReasoningPanel.qml` | 3ᵉ pilier « pourquoi » : chip + popup verre du **raisonnement des agents** (live streaming + historique par session), toggle de capture, note de transparence (résumé fournisseur vs brut local). **Scaffolding Phase 2.5** : ship avec `[]` (règle d'honnêteté) — alimenté par le superviseur d'agent (tap sur flux, jamais le transcript CLI — `docs/DECISIONS.md` ADR-012) et l'outil T0 `agent.thinking` |
 | `OllamaGauge.qml` | anneau VRAM circulaire à dégradé (arc Canvas, cap arrondi) + modèle chargé + Gio, seuils Sky→Peach→Red, « — » honnête hors ligne |
 | `vibed_client.js` | formats JSON-RPC du socket MCP (alignés sur `vibed/src/mcp.rs`) + données mock v0.1 (`available:false` par défaut) |
 

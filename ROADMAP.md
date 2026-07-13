@@ -21,7 +21,7 @@
 | 0 | — | Fondation | ✅ Fait (2026-07-03) | 2–3 semaines (effectué) |
 | 1 | v0.1 | Première ISO | 🔄 En cours (reste : validation VM + NVIDIA) | 6–10 semaines |
 | 2 | v0.2 | vibed + MCP | 🔄 Bien avancée (vibed + HUD + thème + MCP client + memory.append complet + svc.status/fs.list/sectools.list + audit chaîné + **fs.read/list confinés** + **memory.query extraits** + **plomberie d'approbation T2/T3** + **rate-limiting par uid**) | 3–4 mois |
-| 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | Proposée (superviseur d'agent budgété + kill-switch humain, auth abonnement scellée TPM2, allowlist egress par unité — périmètre figé T0/T1) | 3–5 semaines |
+| 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | Proposée (superviseur d'agent budgété + **mode autonome always-on** T0/T1 avec T2/T3 en file asynchrone + kill-switch humain, auth abonnement scellée TPM2, allowlist egress par unité, **capture du raisonnement** — périmètre figé T0/T1, plancher T2/T3 non levé) | 3–5 semaines |
 | 3 | v0.3 | Genesis & mémoire | 🔄 Démarrée (generator amnésique + hardware.json schema 2 + ébauche vibectl livrés) | 2–3 mois |
 | 4 | v0.4 | Durcissement | 🔄 Amorcée (audit chaîné SHA-256 + rotation ; reste : ancrage TPM/Rekor, User=vibed, SELinux) | 4–6 mois |
 | 5 | v0.5 | Installateur & identité | Planifiée | 2–3 mois |
@@ -171,6 +171,20 @@ gantt
 - **Nouveau type de journal réservé au système** : `autonomous_session` (5ᵉ entrée de `JOURNAL_RESERVED_TYPES`, aux côtés de `genesis`/`boot`/`tool_call`/`purge`) — émis par le superviseur lui-même au début et à la fin d'une session, **jamais forgeable par l'agent** (invariant §4).
 - **Identité d'authentification en mémoire** : `identity.toml` ou le journal note **quel compte** a authentifié les agents de la machine (label déclaratif, jamais le jeton) — cohérent avec « la mémoire appartient à la machine et à son humain ».
 
+**Mode autonome permanent (« always-on ») — autonomie maximale, gate préservé.**
+
+- **Mode autonome par défaut, sur toute la surface T0/T1.** Le superviseur peut tourner en permanence (`vibectl agent run --always`, ou l'unité `vibeos-agent@.service` activée) : l'agent enchaîne **seul** toute action T0 (observation) et T1 (modification-utilisateur), sans validation humaine geste-par-geste. C'est l'autonomie maximale que le contrat de capacités existant autorise déjà — on ne change **pas** ce qui est permis, on retire seulement l'humain de la boucle synchrone du T0/T1.
+- **T2/T3 : approbation asynchrone, jamais un bypass.** En mode always-on, une action T2/T3 ne **bloque** plus l'agent : la demande est **mise en file** (le store d'approbation déjà livré + son bornage) et l'agent **poursuit son travail T0/T1** pendant que l'humain approuve/refuse **en différé et en lot** (`vibectl approvals list` → `approve`/`deny`). Le **plancher d'approbation T2/T3 n'est jamais levé** (invariant §7 ; THREAT-MODEL S1 — un OS « autonome pour tout, destructif compris, sans accord » serait un vecteur de ransomware sur simple injection de prompt). « Autonome pour tout » = **autonome sur tout le T0/T1 sans babysitting**, pas « exécute du destructif sans accord ». Décision et frontière : **ADR-013**.
+
+**Capture du raisonnement des agents** *(par tap sur le flux, jamais depuis le transcript CLI — ADR-012)*.
+
+- **Capture du raisonnement, par tap sur le flux, jamais depuis le transcript CLI** : le superviseur invoque le CLI en mode structuré (`claude -p --output-format stream-json` pour Claude Code ; équivalent côté codex/gemini si disponible — à vérifier à l'implémentation) et copie chaque bloc `thinking` vu passer vers un store dédié, indépendamment de ce que le CLI écrit lui-même sur disque. Capture **passive** uniquement : on ne reconstruit jamais la conversation renvoyée à l'API, on ne fait que la lire au passage (cf. risques).
+- **Store dédié** : `/var/lib/vibeos/memory/reasoning/<session-id>.jsonl` — un fichier par session, sibling de `journal/` et `knowledge/`, mêmes permissions (root:root 0700, denylist d'écriture déjà couverte par `/var/lib/vibeos/memory/**`). Volume nettement plus lourd qu'un journal classique (un budget de raisonnement peut peser plusieurs Ko par tour) : **politique de rétention propre** à trancher pendant la phase, plus courte que les 365 jours du journal.
+- **Lecture gouvernée** : nouvel outil T0 `agent.thinking` (session_id, tail, since) plutôt qu'un scope de plus sur `memory.query` — le raisonnement d'un agent n'est pas un fait appris sur l'humain, c'est de l'observabilité ; garder les deux modèles séparés.
+- **Vue live** : extension d'`AgentStatus.qml`/`ReasoningPanel.qml` (HUD) avec un panneau streaming du raisonnement en cours pendant une session autonome (composant **livré en scaffolding**, ship avec `[]` — règle d'honnêteté).
+- **Vue historique** : `vibectl agent thinking --session <id>` en CLI d'abord (lecture du store, cheap) ; navigateur HUD par session en fast-follow si le temps le permet.
+- **Toggle par session** : capture/affichage désactivable (équivalent `display: omitted` côté API) pour les runs de production pure — le raisonnement est facturé comme de l'output, un budget de pensée non coupé peut vider une fenêtre d'usage d'abonnement en une session.
+
 ### Critères de sortie (mesurables)
 
 - [ ] `vibectl agent run --budget 8h` tourne en autonomie et s'arrête au budget écoulé même sans intervention ; journal exploitable (début/fin, actions T0/T1, erreurs).
@@ -180,14 +194,30 @@ gantt
 - [ ] Kill-switch : `vibectl agent stop` interrompt une session en **< 5 s**, dernier append mémoire cohérent (pas de ligne JSONL tronquée).
 - [ ] Toute tentative T2/T3 pendant une session autonome reste refusée **exactement comme aujourd'hui** — zéro régression du contrat existant.
 
+**Mode always-on.**
+
+- [ ] En mode always-on, une session enchaîne ≥ N actions T0/T1 **sans aucune interaction humaine** ; une action T2/T3 rencontrée **ne bloque pas** la session — elle apparaît dans `vibectl approvals list` et l'agent a continué son travail T0/T1 pendant ce temps.
+- [ ] Une demande T2/T3 mise en file puis **approuvée en différé** s'exécute au ré-appel exactement via le grant one-shot existant ; **refusée en différé**, elle ne s'exécute jamais. Test de non-régression : le plancher T2/T3 reste strictement identique au mode supervisé.
+
+**Capture du raisonnement.**
+
+- [ ] Une session `vibectl agent run` avec capture activée produit un fichier `reasoning/<session-id>.jsonl` non vide, lisible via `agent.thinking`, y compris pour un run de plusieurs heures.
+- [ ] Le transcript propre de Claude Code (`~/.claude/projects/...`) reste **inchangé** — la capture ne modifie jamais ce que le CLI envoie/reçoit de l'API (non-régression : une session capturée reste `--resume`-able normalement).
+- [ ] `agent.thinking` **refuse tout accès hors du home de l'appelant** tant que le confinement de lecture mémoire (dette notée dans l'audit de capacités) n'est pas corrigé — pas de nouvelle fuite cross-utilisateur créée par cette fonctionnalité.
+- [ ] Toggle testé : capture désactivée → **zéro octet** de raisonnement écrit, latence de premier token inchangée.
+
 ### Risques principaux
 
 | Risque | Mitigation |
 |---|---|
 | Confondre « plus autonome » et « moins gouverné » | Périmètre figé à T0/T1 dès le lancement ; toute tentative d'anticiper l'approbation T2/T3 (Phase 4) refusée en revue |
+| **Mode always-on interprété comme « exécute tout sans accord »** | Le plancher T2/T3 reste **non abaissable** (invariant §7) : le mode ne fait que rendre l'approbation **asynchrone** (file d'attente), jamais optionnelle ; ADR-013 fige la frontière, revue adversariale à chaque évolution |
+| File d'approbation qui gonfle si l'humain n'approuve jamais (agent always-on qui accumule des T2/T3) | Store d'approbation **déjà borné** (purge des périmés, dedup, plafond) ; l'agent est prévenu (`pending`) et continue en T0/T1 sans être bloqué |
 | Politique d'usage des abonnements IA en mouvement côté fournisseurs | Documenter la règle « un humain, un abonnement, une machine » dans `docs/` ; revoir à chaque changement de policy constaté |
 | Allowlist d'egress cassée par un changement d'IP/CDN fournisseur | Allowlist **par nom d'hôte** (résolution DNS), testée en CI régulièrement |
 | Kill-switch exposé par erreur à l'agent | `vibectl agent stop` est une commande **opérateur** (comme `approve`/`deny`, root) ; jamais un outil MCP — vérifié en revue |
+| S'appuyer sur le format JSONL interne de Claude Code (non contractuel, fragile — bugs ouverts sur des transcripts corrompus par des blocs thinking) | **Ne jamais lire/parser ce fichier** ; tap uniquement le flux `stream-json` du process qu'on supervise soi-même (ADR-012) |
+| Confusion : croire voir le raisonnement brut du modèle | Documenter dans le HUD/README : résumé fourni par l'API pour les modèles cloud, raisonnement réellement complet seulement en local via ollama (note de transparence dans `ReasoningPanel.qml`) |
 
 **Durée indicative** : 3–5 semaines (délibérément resserré : pas de sandbox seccomp/Landlock complet, ça reste Phase 4).
 

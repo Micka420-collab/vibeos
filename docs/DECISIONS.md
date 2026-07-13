@@ -318,3 +318,82 @@ lecture de log n'est livré tant que sa forme sûre n'est pas arrêtée.
 pas le cross-user) ; (c) pas d'outil de log — statu quo, mais prive l'agent d'un
 auto-diagnostic légitime. La forme (1)–(5) est le compromis retenu ; son
 implémentation attend la revue de l'allowlist et du rédacteur.
+
+## ADR-012 — Capture du raisonnement par tap sur le flux, jamais via le transcript du CLI — *proposé, cible Phase 2.5*
+
+**Statut** : proposé (non implémenté). Ouvert le 2026-07-13.
+
+**Contexte.** Le raisonnement affiché par les CLI IA (Claude Code compris) n'est,
+pour les modèles actuels, pas persisté sur disque par le CLI lui-même — seule une
+signature cryptographique survit à la session. Le récupérer après coup depuis les
+fichiers du CLI est donc impossible pour l'historique récent, et le format de ces
+fichiers n'est de toute façon **pas contractuel** (plusieurs bugs ouverts sur des
+transcripts corrompus par des blocs `thinking`).
+
+**Décision.** Le superviseur d'agent (Phase 2.5) capte le raisonnement en tapant
+le **flux structuré** (`stream-json`) au moment où il streame, en lecture seule, et
+l'écrit dans un store VibeOS dédié (`/var/lib/vibeos/memory/reasoning/<session>.jsonl`)
+— indépendant du transcript propre du CLI. Lecture gouvernée par un outil T0
+`agent.thinking` (pas un scope de `memory.query` : le raisonnement est de
+l'observabilité, pas un fait appris sur l'humain).
+
+**Alternatives considérées.**
+- Parser les transcripts JSONL du CLI après coup : rejeté — le champ pertinent est
+  vide pour les modèles actuels, et le format n'est pas garanti stable entre versions.
+- Demander au CLI de désactiver son propre effacement du champ `thinking` : hors de
+  portée, ce n'est pas un comportement configurable côté VibeOS.
+
+**Conséquences.**
+- (+) Fonctionne quel que soit le fournisseur, indépendamment de ce qu'il choisit de
+  persister lui-même.
+- (+) Zéro risque de casser la reprise de session du CLI (capture **passive**).
+- (−) Ne capte que ce qui est effectivement streamé — si un fournisseur streame moins
+  que ce qu'il facture (modèles cloud résumés), VibeOS ne peut pas voir plus loin ; la
+  note de transparence du HUD (`ReasoningPanel.qml`) le dit explicitement.
+
+## ADR-013 — Mode autonome permanent (« always-on ») : autonomie totale T0/T1, T2/T3 en file asynchrone, plancher jamais levé — *proposé, cible Phase 2.5*
+
+**Statut** : proposé (non implémenté). Ouvert le 2026-07-13 à la demande explicite
+d'un « mode autonome always pour tout ».
+
+**Contexte.** L'utilisateur veut que l'IA travaille en **autonomie permanente, pour
+tout**. Pris au pied de la lettre — « exécute n'importe quoi, y compris destructif
+et système, sans accord humain » — cela **abaisserait le plancher d'approbation
+T2/T3**, ce que les invariants du projet interdisent explicitement (§7 : purge/
+destruction = T3 humain ; plancher T2/T3 **non abaissable** ; « INTERDIT d'affaiblir
+un invariant »). Un OS où un agent prompt-injecté peut tout faire sans accord est un
+**vecteur de ransomware** — précisément le scénario S1 du [THREAT-MODEL](THREAT-MODEL.md)
+que toute l'architecture combat.
+
+**Décision.** « Always-on » est implémenté comme **autonomie maximale à l'intérieur
+du contrat de capacités existant**, sans jamais toucher au plancher :
+1. Le superviseur tourne **par défaut/en permanence** ; l'agent enchaîne **seul**
+   toute action T0 (observation) et T1 (modification-utilisateur) — l'humain n'est
+   plus dans la boucle **synchrone** du T0/T1.
+2. Une action **T2/T3 ne bloque plus** l'agent : elle est **mise en file** (le store
+   d'approbation déjà livré, borné) et l'agent poursuit son travail T0/T1 ; l'humain
+   approuve/refuse **en différé et en lot** (`vibectl approvals list` → `approve`/
+   `deny`), et l'exécution passe alors par le **grant one-shot existant**, inchangé.
+3. Le **plancher T2/T3 n'est jamais levé** : « autonome pour tout » = « autonome sur
+   tout le T0/T1 sans babysitting », pas « exécute du destructif sans accord ».
+
+**Alternatives considérées.**
+- **Bypass total de l'approbation** (un vrai « exécute tout ») : **rejeté** — viole
+  l'invariant §7 et le plancher non abaissable, transforme l'OS en surface de
+  ransomware sur injection de prompt (S1). Si un opérateur le voulait malgré tout, ce
+  serait un **risque assumé documenté**, jamais un défaut livré en dur.
+- **Auto-approbation par l'agent** : rejeté par construction — un agent ne peut jamais
+  approuver sa propre requête (store root-only + denylist ; F3).
+- **Statu quo** (approbation synchrone bloquante) : conserve la sécurité mais casse
+  l'autonomie longue voulue — d'où la file asynchrone.
+
+**Conséquences.**
+- (+) Autonomie réellement continue : une session de plusieurs heures ne s'arrête pas
+  sur la première action système ; l'humain traite les T2/T3 quand il revient.
+- (+) Aucune régression de sécurité : le chemin T2/T3 est **exactement** celui du mode
+  supervisé (grant one-shot, audit `ok_approved(by_uid=N)`, rate-limiting).
+- (−) Une file d'approbation peut s'accumuler si l'humain est absent longtemps —
+  bornée par le plafond du store d'approbation (purge/dedup/cap déjà livrés).
+- (−) L'agent peut rester « bloqué » sur une tâche qui *exige* un T2/T3 non encore
+  approuvé ; il doit alors basculer sur d'autres travaux T0/T1 (comportement à cadrer
+  côté superviseur).
