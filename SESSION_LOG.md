@@ -85,13 +85,35 @@ si l'audit échoue est laissé tel quel (fail-closed voulu du one-shot).
 **Phase 2.5 ajoutée au ROADMAP** (« Autonomie encadrée & accès IA externes »,
 proposée) : superviseur d'agent budgété + kill-switch humain, auth abonnement
 scellée TPM2, allowlist egress par unité, type réservé `autonomous_session` —
-périmètre figé T0/T1.
+périmètre figé T0/T1. **ADR-011** (log.read T0 anti-exfiltration) posé.
+
+**Extension Phase 2.5 (demande utilisateur)** :
+- **Mode autonome « always-on »** (ADR-013) : le superviseur tourne en
+  permanence, l'agent enchaîne seul TOUT le T0/T1 sans humain synchrone ; les
+  T2/T3 ne bloquent plus mais sont **mis en file** pour approbation asynchrone.
+  Le plancher T2/T3 **n'est jamais levé** (invariant §7, THREAT-MODEL S1) —
+  interprétation responsable de « autonome pour tout » = autonome sur tout le
+  T0/T1 sans babysitting, pas « exécute du destructif sans accord ».
+- **Capture du raisonnement** (ADR-012) : tap passif sur le flux `stream-json`
+  du CLI (jamais son transcript disque), store `memory/reasoning/`, futur outil
+  T0 `agent.thinking`, toggle par session.
+- **HUD** : `ReasoningPanel.qml` livré en **scaffolding** (3ᵉ pilier « pourquoi »,
+  chip + popup verre, ship avec `[]` — règle d'honnêteté), câblé dans la barre.
+
+**Revue adversariale finale** (2ᵉ passe, tout le code de la session) : **aucun
+bug de correction high/medium**. Rust propre (mutex approval, parseur euid,
+câblage rate-limit/approbation), pas de régression ; ADR uniques/séquentiels,
+invariant T2/T3-sans-bypass préservé partout, tokens `Theme` du QML tous
+présents, structure QML bien formée. Corrigé : import `QtQuick.Shapes` inutilisé.
+Laissés (non-bugs) : ancrage `PopupWindow` (auto-signalé, à valider sur desktop
+booté), I/O bloquante sur reactor + grant-burn-si-audit-échoue (fail-closed,
+pattern existant).
 
 **État tests** : **114 tests vibed verts** (107 unitaires + 5 intégration MCP
-e2e + 2 politique) ; `clippy --all-targets -D warnings` 0 warning ; `fmt
---check` OK ; `cargo build --release` des 2 binaires OK ; shellcheck vert.
-Images `vibeos:dev-final` **et** `dev-final2` (avec le nouveau Rust) construites,
-`bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erreur).
+e2e + 2 politique) ; `clippy --all-targets --locked -D warnings` 0 warning ;
+`fmt --check` OK ; `cargo build --locked` des 2 binaires OK ; shellcheck vert.
+Images `vibeos:dev-final`, `dev-final2` **et** `dev-final3` (arbre final complet)
+construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erreur).
 
 ## 🔧 En cours / non terminé
 

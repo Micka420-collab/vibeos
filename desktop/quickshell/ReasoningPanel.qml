@@ -36,7 +36,6 @@
 
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Shapes
 import QtQuick.Effects
 import Quickshell
 
