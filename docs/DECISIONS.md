@@ -528,3 +528,34 @@ fusionnées dans `mcpServers` et surfacés via la machinerie MCP de Claude Code
 **Build/run** : `tsc` → `dist/index.js` (`start`), `vitest` pour les tests ; entrée
 `src/index.ts` → `runAcp()` ; `src/lib.ts` réexporte `ClaudeAcpAgent`/`runAcp` (le fork
 peut consommer la classe en bibliothèque plutôt que patcher en place). Amont Apache-2.0.
+
+**Forme de fork retenue (vérifiée sur le source) : un paquet d'EXTENSION, pas un
+patch de source.** Vérifié dans le clone : `export class ClaudeAcpAgent` (ligne 937,
+non-abstract), `canUseTool(sessionId): CanUseTool` est une **méthode publique**
+(ligne 3546) qui retourne un callback, et `lib.ts` réexporte `ClaudeAcpAgent`/`runAcp`.
+On peut donc :
+- **dépendre** de `@agentclientprotocol/claude-agent-acp` (npm, Node ≥ 22, déjà la
+  chaîne utilisée par l'image) et **sous-classer** `ClaudeAcpAgent` : `canUseTool` se
+  **wrappe** (`const base = super.canUseTool(sid); return async (t, input, ctx) => { …
+  policy.check … return base(t, input, ctx) }`) — aucun code amont recopié ;
+- injecter `disallowedTools`/`mcpServers` en surchargeant `createSession` (idem wrap) ;
+- fournir notre propre entrée (car `runAcp()` construit l'agent en interne) qui instancie
+  la sous-classe et rejoue le câblage ndjson/ACP de `runAcp`.
+Avantage : **rebasable** par simple bump de la dépendance amont (surface de fork =
+2 méthodes wrappées + une entrée). Le paquet vit dans `zed/` (hors TCB `vibed`).
+La classification vient de l'outil T0 `vibeos:policy.check` (livré). L'implémentation
+complète (dont les fonctionnalités éditeur innovantes) + le test d'intégration en
+session Zed réelle restent à faire.
+
+**La couche 1 (désactiver les outils natifs) peut être largement CONFIG, pas un
+fork.** L'adaptateur lit les règles `permissions.deny` de Claude Code (`settings.ts`
+§12-22 : `"Read"`, `"Write"`, `"Edit"`, `"Bash(...)"`…), consommées côté SDK. Ajouter
+`permissions.deny: ["Read","Write","Edit"]` dans les settings Claude Code désactive
+donc les outils fichiers natifs **sans fork**, l'agent étant orienté vers `vibeos:fs.*`
+par le `mcpServers` (déjà livré) + un `systemPrompt.append`. Le **fork ne reste donc
+requis que pour la couche 2** (le pont policy dans `canUseTool`).
+**Décision de design ouverte (à trancher côté humain)** : ce `permissions.deny`
+s'appliquerait via les settings Claude Code **partagés** — il désactiverait les outils
+natifs aussi pour **Claude Code en terminal**, pas seulement dans Zed. Gouvernance
+globale cohérente (tout passe par `vibed`) **ou** portée limitée à l'éditeur ? Ce choix,
+et la spec des fonctionnalités innovantes, conditionnent l'écriture de la couche 1/2.
