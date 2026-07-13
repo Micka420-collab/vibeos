@@ -405,8 +405,8 @@ et invariants : [docs/DECISIONS.md](docs/DECISIONS.md) **ADR-014**.
 | Couche | Livrable | Fork ? | Statut |
 |---|---|---|---|
 | **0** | `settings.json` VibeOS pour Zed (`/etc/skel/.config/zed/`) : `agent_servers` (adaptateur ACP) + `context_servers` → `vibed` (MCP `vibeos:*`) | Non (config) | 🔶 Scaffolding livré (à valider sur Zed réel) |
-| **1** | Fork ciblé de l'adaptateur : Read/Write/Edit natifs **désactivés** et **routés** vers `vibeos:fs.read`/`fs.write`/`memory.query` — toute action fichier passe par la politique + l'audit | Oui | Proposé |
-| **2** | **Mode auto gouverné** : le prompt de permission ACP est remplacé par la décision de `vibed` — `Allow` (T0/T1) sans prompt, `RequireApproval` (T2/T3) **jamais** auto-accepté (flux d'approbation existant). Groundwork côté vibed : outil T0 **`policy.check`** (classification dry-run) livré | Oui (fork) | 🔶 Groundwork `policy.check` livré ; fork proposé |
+| **1** | Read/Write/Edit natifs **désactivés par CONFIG** (`permissions.deny` dans un `CLAUDE_CONFIG_DIR` **Zed-only**) et l'agent routé vers `vibeos:fs.*`/`memory.query` — décision Zed-only (le terminal garde ses outils) | Non (config) | 🔶 Config livrée (`/etc/skel/.config/vibeos/zed-claude/`), à valider Zed |
+| **2** | **Mode auto gouverné** (le fork) : `zed/vibeos-claude-acp` patche `canUseTool` → `vibeos:policy.check` ; `Allow` (T0/T1) sans prompt, `RequireApproval` (T2/T3) **jamais** auto-accepté. Ne touche jamais `approval.rs`. Groundwork vibed : outil T0 **`policy.check`** livré | Oui (extension) | 🔶 Cœur livré (`tsc` OK + 8 tests) ; intégration Zed live à valider |
 | **3** | Intégrations éditeur : raisonnement (ADR-012) visible dans Zed, indicateurs de tier, journal de session | Oui | Proposé |
 
 **Contrainte de méthode** : **investigation avant fork** — cartographier le code réel

@@ -529,20 +529,27 @@ fusionnées dans `mcpServers` et surfacés via la machinerie MCP de Claude Code
 `src/index.ts` → `runAcp()` ; `src/lib.ts` réexporte `ClaudeAcpAgent`/`runAcp` (le fork
 peut consommer la classe en bibliothèque plutôt que patcher en place). Amont Apache-2.0.
 
-**Forme de fork retenue (vérifiée sur le source) : un paquet d'EXTENSION, pas un
-patch de source.** Vérifié dans le clone : `export class ClaudeAcpAgent` (ligne 937,
-non-abstract), `canUseTool(sessionId): CanUseTool` est une **méthode publique**
-(ligne 3546) qui retourne un callback, et `lib.ts` réexporte `ClaudeAcpAgent`/`runAcp`.
-On peut donc :
-- **dépendre** de `@agentclientprotocol/claude-agent-acp` (npm, Node ≥ 22, déjà la
-  chaîne utilisée par l'image) et **sous-classer** `ClaudeAcpAgent` : `canUseTool` se
-  **wrappe** (`const base = super.canUseTool(sid); return async (t, input, ctx) => { …
-  policy.check … return base(t, input, ctx) }`) — aucun code amont recopié ;
-- injecter `disallowedTools`/`mcpServers` en surchargeant `createSession` (idem wrap) ;
-- fournir notre propre entrée (car `runAcp()` construit l'agent en interne) qui instancie
-  la sous-classe et rejoue le câblage ndjson/ACP de `runAcp`.
-Avantage : **rebasable** par simple bump de la dépendance amont (surface de fork =
-2 méthodes wrappées + une entrée). Le paquet vit dans `zed/` (hors TCB `vibed`).
+**Forme de fork retenue (vérifiée sur le source) : un paquet d'EXTENSION qui
+patche le prototype de `canUseTool`, pas un patch de source ni un sous-classement.**
+Vérifié dans le clone :
+- `export class ClaudeAcpAgent` (ligne 937) ; `constructor(client, logger?)`, champs
+  `sessions`/`client`/`clientCapabilities` **publics** ; `canUseTool(sessionId):
+  CanUseTool` **méthode publique** (ligne 3546).
+- MAIS `createSession` est **`private`** (ligne 4232) — non surchargeable ; et
+  `runAcp()` (ligne 6349) **construit la classe de base en interne** (`new
+  ClaudeAcpAgent(new ClientConnection(...))`) avec des internes **non exportés**
+  (`ClientConnection`, `methods`, `acpAgent`, `ndJsonStream`, `runPromptWithCancellation`).
+  Donc un sous-classement ne peut pas s'injecter dans `runAcp` sans recopier ce câblage.
+
+Approche verrouillée, minimale, n'utilisant **que** les symboles exportés
+(`ClaudeAcpAgent`, `runAcp`) : **patcher `ClaudeAcpAgent.prototype.canUseTool`** avant
+d'appeler `runAcp()` — on wrappe l'original (`const base =
+orig.call(this, sid); return async (t, input, ctx) => { … policy.check … return
+base(t, input, ctx) }`). Aucun code amont recopié, **rebasable** par bump de
+dépendance. La désactivation des outils natifs (couche 1) passe par la **config**
+(`permissions.deny` + `CLAUDE_CONFIG_DIR` propre à la session Zed — décision
+**Zed-only**, le terminal garde ses outils), pas par un override de `createSession`
+(privé). Le paquet vit dans `zed/` (hors TCB `vibed`).
 La classification vient de l'outil T0 `vibeos:policy.check` (livré). L'implémentation
 complète (dont les fonctionnalités éditeur innovantes) + le test d'intégration en
 session Zed réelle restent à faire.

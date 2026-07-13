@@ -18,17 +18,23 @@
 //
 // Zed accepte les commentaires (JSONC).
 {
-  // --- Agent ACP : Claude Code via l'adaptateur ---------------------------
-  // `agent_servers` déclare des agents ACP externes lançables depuis le panneau
-  // agent de Zed. On lance l'adaptateur ; il spawn le binaire du Claude Agent SDK
-  // et lit la config MCP de Claude Code (dont le serveur `vibeos`).
-  // NOTE couche 1 : remplacer cette commande par le binaire du FORK VibeOS de
-  // l'adaptateur (Read/Write/Edit routés vers vibed) une fois livré.
+  // --- Agent ACP : Claude Code gouverné par VibeOS ------------------------
+  // Lance l'extension `vibeos-claude-acp` (zed/vibeos-claude-acp, ADR-014) : elle
+  // patche `canUseTool` pour brancher les permissions sur `vibeos:policy.check`
+  // (mode auto gouverné, couche 2). `CLAUDE_CONFIG_DIR` pointe vers un dossier de
+  // config Claude PROPRE À ZED (couche 1, Zed-only) où `permissions.deny`
+  // désactive les Read/Write/Edit natifs — le Claude Code en terminal n'est PAS
+  // affecté. Statut : à valider sur une session Zed réelle (voir le README de
+  // l'extension). L'expansion de `~`/`$HOME` dans `env` dépend de la version de
+  // Zed — utiliser un chemin absolu si besoin.
   "agent_servers": {
-    "VibeOS (Claude Code)": {
-      "command": "npx",
-      "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
-      "env": {}
+    "VibeOS (Claude Code, gouverné)": {
+      "command": "vibeos-claude-acp",
+      "args": [],
+      "env": {
+        "CLAUDE_CONFIG_DIR": "~/.config/vibeos/zed-claude",
+        "VIBED_MCP_SOCKET": "/run/vibed/mcp.sock"
+      }
     }
   },
 
