@@ -20,6 +20,15 @@
 set -euo pipefail
 
 instance="${1:?usage: vibeos-agent-egress.sh <instance>}"
+# Defense in depth: the instance (systemd %i, operator-chosen) lands in file
+# paths below. Reject anything but a safe name so a malformed instance can never
+# escape agent.d/ or the /run drop-in dir (no '/', hence no path traversal).
+case "$instance" in
+    '' | *[!A-Za-z0-9._-]*)
+        echo "vibeos-agent-egress: invalid instance name '${instance}'" >&2
+        exit 1
+        ;;
+esac
 
 conf=/etc/vibeos/agent-egress.conf
 extra="/etc/vibeos/agent.d/${instance}.egress"

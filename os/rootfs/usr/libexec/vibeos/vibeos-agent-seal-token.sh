@@ -17,6 +17,14 @@
 set -euo pipefail
 
 instance="${1:?usage: vibeos-agent-seal-token.sh <instance>  (token on stdin)}"
+# Defense in depth: the instance names the output credential file below; reject
+# anything but a safe name (no '/', so no path traversal out of credentials/).
+case "$instance" in
+    '' | *[!A-Za-z0-9._-]*)
+        echo "vibeos-agent-seal-token: invalid instance name '${instance}'" >&2
+        exit 1
+        ;;
+esac
 
 if ! command -v systemd-creds >/dev/null 2>&1; then
     echo "systemd-creds not found (systemd too old?)" >&2

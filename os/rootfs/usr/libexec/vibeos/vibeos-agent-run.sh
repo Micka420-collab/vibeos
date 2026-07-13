@@ -9,6 +9,14 @@
 set -euo pipefail
 
 instance="${1:?usage: vibeos-agent-run.sh <instance>}"
+# Defense in depth: the instance (systemd %i) is interpolated into the config
+# path below; reject anything but a safe name (no '/', no path traversal).
+case "$instance" in
+    '' | *[!A-Za-z0-9._-]*)
+        echo "vibeos-agent-run: invalid instance name '${instance}'" >&2
+        exit 1
+        ;;
+esac
 
 conf="/etc/vibeos/agent.d/${instance}.conf"
 if [ ! -r "$conf" ]; then
