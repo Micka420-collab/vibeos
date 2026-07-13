@@ -45,6 +45,8 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const O_NOFOLLOW: i32 = 0x20000;
 /// Per-file cap when scanning memory content in memory.query.
 const MAX_MEMORY_SCAN_BYTES: usize = 64 * 1024;
+/// Hard cap on entries returned by one fs.list call.
+const MAX_LIST_ENTRIES: usize = 500;
 /// Upper bound on files walked by memory.query.
 const MAX_MEMORY_FILES: usize = 200;
 /// Hard cap on one serialized memory.append line, newline included (anti-DoS:
@@ -559,6 +561,16 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"path": {"type": "string"}}}),
         ),
         (
+            "fs.list",
+            Tier::T0,
+            "List one directory (non-recursive, capped at 500 entries): name, type \
+             (file/dir/symlink/other) and size for regular files. Symlinks are reported, \
+             never followed; the same denylist as fs.read applies",
+            json!({"type": "object", "required": ["path"],
+                   "properties": {"path": {"type": "string"},
+                                  "limit": {"type": "integer", "minimum": 1}}}),
+        ),
+        (
             "fs.write",
             Tier::T1,
             "Write a user-scope file (restricted to /home and /var/home)",
@@ -664,6 +676,7 @@ fn execute_tool(
         })
         .to_string()),
         "svc.status" => svc_status(args),
+        "fs.list" => fs_list(args, policy),
         "memory.query" => memory_query(args),
         "memory.append" => memory_append(args),
         _ => Err(format!("unknown tool: {name}")),
@@ -907,6 +920,81 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
         text.push_str("\n[vibed: truncated, file exceeds 256 KiB]");
     }
     Ok(text)
+}
+
+/// fs.list (T0): bounded, non-recursive listing of one directory.
+///
+/// Same confinement discipline as fs.read: lexical normalization (done by the
+/// caller pipeline too), canonicalization, built-in denylist + operator
+/// policy re-checked on BOTH the lexical and canonical form. Symlinks inside
+/// the directory are REPORTED (type "symlink") but never followed — neither
+/// their target type nor size is disclosed.
+fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+    let raw = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing 'path' argument".to_string())?;
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => MAX_LIST_ENTRIES,
+        Some(value) => match value.as_u64() {
+            Some(n) if n >= 1 => (n as usize).min(MAX_LIST_ENTRIES),
+            _ => return Err("fs.list: 'limit' must be an integer >= 1".to_string()),
+        },
+    };
+    let path = normalize_path(raw).ok_or_else(|| format!("fs.list: invalid path '{raw}'"))?;
+    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("fs.list {path}: {e}"))?;
+    let canonical_str = canonical.to_string_lossy();
+    for candidate in [path.as_str(), canonical_str.as_ref()] {
+        if let Some(pattern) = builtin_denied(candidate, false) {
+            return Err(format!(
+                "fs.list: '{candidate}' is denied by the built-in denylist ({pattern})"
+            ));
+        }
+    }
+    recheck_policy_canonical(policy, "fs.list", &canonical_str)?;
+
+    let read_dir = std::fs::read_dir(&canonical).map_err(|e| format!("fs.list {path}: {e}"))?;
+    let mut entries: Vec<(String, Value)> = Vec::new();
+    let mut truncated = false;
+    for entry in read_dir.flatten() {
+        if entries.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // file_type() does not follow symlinks; size only for regular files
+        // (symlink_metadata: the link itself, never its target).
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let kind = if file_type.is_dir() {
+            "dir"
+        } else if file_type.is_file() {
+            "file"
+        } else if file_type.is_symlink() {
+            "symlink"
+        } else {
+            "other"
+        };
+        let size = if file_type.is_file() {
+            entry.metadata().ok().map(|m| m.len())
+        } else {
+            None
+        };
+        entries.push((
+            name.clone(),
+            json!({"name": name, "type": kind, "size": size}),
+        ));
+    }
+    // Deterministic output: lexicographic by name.
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let listed: Vec<Value> = entries.into_iter().map(|(_, v)| v).collect();
+    Ok(json!({
+        "path": canonical_str,
+        "entries": listed,
+        "truncated": truncated
+    })
+    .to_string())
 }
 
 fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String, String> {
@@ -2052,6 +2140,7 @@ mod tests {
     fn registry_tiers_are_stable() {
         assert_eq!(tool_tier("os.status"), Some(Tier::T0));
         assert_eq!(tool_tier("fs.read"), Some(Tier::T0));
+        assert_eq!(tool_tier("fs.list"), Some(Tier::T0));
         assert_eq!(tool_tier("fs.write"), Some(Tier::T1));
         assert_eq!(tool_tier("pkg.install"), Some(Tier::T2));
         assert_eq!(tool_tier("svc.restart"), Some(Tier::T2));
@@ -2107,6 +2196,91 @@ mod tests {
         }
         let oversized = "a".repeat(256);
         assert!(validate_unit_name(&oversized).is_err());
+    }
+
+    // -- fs.list (T0) ----------------------------------------------------------
+
+    /// A policy allowing fs.list everywhere except an explicit denied subtree,
+    /// mirroring the shipped fs-read rule shape.
+    fn list_policy() -> PolicyEngine {
+        policy_from_toml(
+            r#"
+            [[rule]]
+            id = "fs-read"
+            tools = ["fs.read", "fs.list"]
+            tier = "T0"
+            action = "allow"
+            "#,
+        )
+    }
+
+    #[test]
+    fn fs_list_lists_names_types_sizes_sorted() {
+        let policy = list_policy();
+        let dir = std::env::temp_dir().join(format!("vibed-list-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        std::fs::write(dir.join("b.txt"), "12345").unwrap();
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        std::os::unix::fs::symlink("/etc/os-release", dir.join("link")).expect("symlink");
+        let payload: Value = serde_json::from_str(
+            &fs_list(&json!({"path": dir.to_string_lossy()}), &policy).unwrap(),
+        )
+        .unwrap();
+        let entries = payload["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["a.txt", "b.txt", "link", "sub"], "sorted by name");
+        assert_eq!(entries[0]["type"], "file");
+        assert_eq!(entries[0]["size"], 1);
+        assert_eq!(entries[1]["size"], 5);
+        assert_eq!(entries[2]["type"], "symlink");
+        assert!(
+            entries[2]["size"].is_null(),
+            "a symlink discloses no target size"
+        );
+        assert_eq!(entries[3]["type"], "dir");
+        assert_eq!(payload["truncated"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_list_respects_limit_and_flags_truncation() {
+        let policy = list_policy();
+        let dir = std::env::temp_dir().join(format!("vibed-list-lim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("f{i}")), "x").unwrap();
+        }
+        let payload: Value = serde_json::from_str(
+            &fs_list(&json!({"path": dir.to_string_lossy(), "limit": 3}), &policy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["entries"].as_array().unwrap().len(), 3);
+        assert_eq!(payload["truncated"], true);
+        let err =
+            fs_list(&json!({"path": dir.to_string_lossy(), "limit": 0}), &policy).unwrap_err();
+        assert!(err.contains("integer >= 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_list_refuses_denylisted_directories() {
+        let policy = list_policy();
+        // The denylist applies to the DIRECTORY itself: /root and a user's
+        // .ssh directory are unlistable, whoever asks.
+        for path in ["/root", "/home/dev/.ssh", "/home/dev/.claude"] {
+            let err = builtin_denied(path, false);
+            assert!(err.is_some(), "{path} must be builtin-denied");
+        }
+        // End-to-end through fs_list for a path that exists on every test box.
+        if std::path::Path::new("/root").exists() {
+            let err = fs_list(&json!({"path": "/root"}), &policy).unwrap_err();
+            assert!(err.contains("denylist"), "unexpected error: {err}");
+        }
     }
 
     #[test]

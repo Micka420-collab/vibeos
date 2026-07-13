@@ -175,6 +175,7 @@ async fn handshake_tools_list_and_t0_call_end_to_end() {
     for expected in [
         "os.status",
         "fs.read",
+        "fs.list",
         "fs.write",
         "pkg.install",
         "svc.restart",

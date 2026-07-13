@@ -52,6 +52,13 @@ fn shipped_default_policy_canonical_decisions() {
         "os.status (T0) must be allowed by the shipped policy"
     );
 
+    // fs.list shares the fs-read rule: same T0 read-only surface.
+    assert_eq!(
+        engine.evaluate("fs.list", Some(Tier::T0), NO_CTX),
+        Decision::Allow,
+        "fs.list (T0) must be allowed by the shipped policy"
+    );
+
     // svc.status: read-only unit state is T0 observation.
     assert_eq!(
         engine.evaluate("svc.status", Some(Tier::T0), NO_CTX),

@@ -63,10 +63,10 @@ reason = "Read-only system introspection; no state change of any kind."
 
 [[rule]]
 id = "fs-read"
-tools = ["fs.read"]
+tools = ["fs.read", "fs.list"]
 tier = "T0"
 action = "allow"
-reason = "Read-only file access outside the audit trail, secret stores and key material."
+reason = "Read-only file access and directory listing outside the audit trail, secret stores and key material (same denylist for both tools)."
 
 # Mirrors the built-in hard denylist (enforced in code even without this list).
 [rule.paths]
