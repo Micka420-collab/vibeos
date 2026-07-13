@@ -25,3 +25,9 @@ updates:
     labels: ["rust", "supply-chain"]
     commit-message:
       prefix: "vibed"
+    ignore:
+      # toml 1.x tire serde_spanned >= 1.1, dont le manifeste n'est pas parsable
+      # par Cargo 1.75 -> casse le job MSRV. Rester sur la ligne 0.8 tant que la
+      # MSRV n'est pas relevée délibérément (voir job « MSRV (Rust 1.75) »).
+      - dependency-name: "toml"
+        update-types: ["version-update:semver-major"]
