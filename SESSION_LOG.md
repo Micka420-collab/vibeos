@@ -222,6 +222,32 @@ e2e + 2 politique) ; `clippy --all-targets --locked -D warnings` 0 warning ;
 Images `vibeos:dev-final`, `dev-final2` **et** `dev-final3` (arbre final complet)
 construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erreur).
 
+**Nuit 3 (2026-07-14) — durcissement + agents.list + F6 + ADR**, tout poussé sur PR #11 :
+- **PR #11 état FRAIS vérifié** (`gh pr checks`) : `mergeStateStatus: CLEAN`,
+  12 pass / 3 skipping / **0 échec** — entièrement verte (build image inclus).
+- **CRITIQUE — allowlist de CIBLES svc.restart** : l'allowlist **existait déjà**
+  (`[rule.services].denied`, évaluée AVANT le floor T2 dans `policy.rs` → `Deny`,
+  pas `require_approval`) mais était **incomplète**. Complétée avec les unités
+  d'**accès** (`sshd`, `NetworkManager`/`networkd`, `display-manager`/`sddm`,
+  `logind`), d'**approbation** (`vibed`, `vibeos-agent@*`, `polkit`) et le **bus**
+  (`dbus-broker`/`dbus`) — refus d'office, hors de portée de la file d'approbation.
+  **Test sur la politique livrée** (`shipped_policy_denies_restart_of_critical_units_before_approval`).
+- **`agents.list` (T0)** : roster HUD dérivé de l'audit, **confiné à l'uid appelant**
+  (l'agent de A ne voit jamais B ; soi-même exclu), groupé par pid. Anti-DoS
+  (rate-limit, queue/fenêtre bornées). HUD : roster live + jauge ollama (probe
+  local XHR/nvidia-smi). Fait sauter le dernier « hors-ligne » du HUD.
+- **F6 — 3/4 familles extraites** (mécanique, zéro changement, 147 tests inchangés) :
+  `tools/svc.rs`, `tools/sectools.rs`, `tools/memory.rs` (impl **et** tests).
+  **mcp.rs 4257 → 2777 lignes (−35 %)**. `fs` reste (entrelacé : 7 internes testés
+  + `builtin_denied` partagé + helpers de test partagés) → session dédiée.
+- **Docs** : `agent.sessions` spécifié (ADR-012) ; `WITH_ZED_AGENT=0` verrouillé
+  comme choix intentionnel (ADR-015 §6, avertissement anti-régression) ;
+  **ADR-016** — `pkg.install` backend **reporté** (allowlist paquets/dépôts non
+  tranchée sur OS immuable ; stub conservé) ; THREAT-MODEL à jour (svc.restart
+  cibles, agents.list confinement). Tier B Zed relu : **aucun bug**.
+- **État** : **147 tests vibed verts** (137 unit + 7 e2e MCP + 3 politique) +
+  17 vitest ; clippy/fmt propres ; PR #11 MERGEABLE.
+
 ## 🔧 En cours / non terminé (checkpoint final 2026-07-13 nuit)
 
 - **Zed — E2E Tier B (round-trip éditeur)** : le **Tier A est validé sur socket
@@ -235,11 +261,14 @@ construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erre
 - **Phase 2.5 — enforcement live** : unité `vibeos-agent@`, jeton TPM2, egress
   livrés et statiquement validés ; le **comportement au boot** (unseal TPM2 réel,
   egress BPF) exige une machine bootée.
-- **HUD** : os.status/memory.query/raisonnement **live** ; roster agents + jauge
-  ollama restent hors-ligne (pas d'outil `agents.list` ; sonde ollama séparée).
-- **F6 (découpe de `mcp.rs`, ~3710 l.)** : dette explicite (ROADMAP §9 ter), à
-  faire en session dédiée après le merge de #11.
-- **`pkg.install`** : encore un stub (backend rpm-ostree/bootc = Phase 4).
+- **HUD** : os.status/memory.query/raisonnement **+ roster agents (`agents.list`)
+  + jauge ollama (probe local)** désormais **live** — plus de « hors-ligne » (QML
+  non vérifiable au runtime ici : Quickshell non headless).
+- **F6 (découpe de `mcp.rs`)** : **3/4 faits** (svc, sectools, memory ; mcp.rs
+  4257 → 2777 l.). **`fs` reste** (entrelacé : 7 internes testés + `builtin_denied`
+  partagé + helpers de test partagés) → session dédiée (ROADMAP §9 ter).
+- **`pkg.install`** : stub conservé **volontairement** (ADR-016 — allowlist
+  paquets/dépôts non tranchée sur OS immuable ; backend = Phase 4).
 
 ## 🚧 Blockers (précis)
 
@@ -264,5 +293,6 @@ construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erre
 4. **Brancher l'agent-runner** sur une vraie machine : sceller un jeton
    (`vibeos-agent-seal-token.sh`), écrire `agent.d/<user>.conf`, `systemctl enable
    --now vibeos-agent@<user>` — vérifier unseal TPM2 + egress.
-5. **F6** (découpe `mcp.rs`) en session dédiée ; **`agents.list`** (roster HUD live) ;
-   **`pkg.install`** réel derrière approbation. Puis Phase 3 (LUKS/TPM2, sandbox).
+5. **F6 — extraire `fs`** (dernière famille) en session dédiée ; `pkg.install`
+   réel derrière approbation **une fois l'allowlist tranchée** (ADR-016). Puis
+   Phase 3 (LUKS/TPM2, sandbox par outil).
