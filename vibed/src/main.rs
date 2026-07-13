@@ -36,6 +36,33 @@ const SOCKET_GROUP: &str = "vibeos-agents";
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Offline maintenance subcommand, handled before any daemon setup:
+    //   vibed --verify-audit [path]
+    // Verifies the tamper-evident hash chain of the audit log and prints a
+    // JSON report, exiting 0 if intact and 1 if broken. Usable by an operator
+    // (or a future `vibectl audit verify`) without stopping the daemon.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--verify-audit") {
+        let path = args
+            .iter()
+            .position(|a| a == "--verify-audit")
+            .and_then(|i| args.get(i + 1))
+            .map(String::as_str)
+            .unwrap_or(audit::DEFAULT_AUDIT_PATH);
+        let report = audit::verify_chain(Path::new(path))?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "path": path,
+                "records": report.records,
+                "ok": report.ok,
+                "broken_at": report.broken_at,
+                "reason": report.reason,
+            })
+        );
+        std::process::exit(if report.ok { 0 } else { 1 });
+    }
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();

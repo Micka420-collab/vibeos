@@ -22,7 +22,7 @@ flowchart TB
         POLICY -->|allow T0/T1| SANDBOX[Exécution outil<br/>v0.1 : in-process — sandbox<br/>systemd-run + seccomp + Landlock : Phase 3]
         POLICY -->|T2/T3| APPROVAL{{Approbation humaine}}
         APPROVAL --> SANDBOX
-        VIBED --> AUDIT[(Audit JSONL append-only<br/>/var/lib/vibeos/audit/vibed.jsonl<br/>journald + chaînage : Phase 4)]
+        VIBED --> AUDIT[(Audit JSONL append-only + chaîné SHA-256<br/>/var/lib/vibeos/audit/vibed.jsonl<br/>ancrage TPM/Rekor + journald : Phase 4)]
     end
     subgraph DATA["Données"]
         LUKS[(/var/lib/vibeos/memory<br/>v0.1 : en clair — LUKS : Phase 3)]
@@ -147,15 +147,16 @@ La création de la mémoire au premier boot est décrite dans [MEMORY.md](MEMORY
 
 ## 8. Audit inviolable
 
-### v0.1 (servi par `vibed` dès la Phase 2) : JSONL append-only simple
+### Livré (servi par `vibed` dès la Phase 2) : JSONL append-only **chaîné par hachage**
 
-**JSONL append-only** : `/var/lib/vibeos/audit/vibed.jsonl` — un objet JSON par appel d'outil : horodatage, **identité de l'appelant** (uid/gid/pid capturés par peer credentials sur le socket), outil, **digest FNV-1a des arguments** (non cryptographique — corrélation, pas preuve d'intégrité), règle de politique appliquée, tier, décision, résultat d'exécution. Le fichier est ouvert en `O_APPEND` par `vibed` uniquement, et **illisible/inaccessible en écriture pour les agents** à double titre : chemins refusés de la politique ([../security/policy.d/default.toml](../security/policy.d/default.toml)) **et** denylist intégrée au code de `vibed` (`/var/lib/vibeos/audit/**`), qui s'applique quelle que soit la politique. Si l'écriture d'audit échoue, l'action échoue (fail-closed sur le chemin Allow).
+**JSONL append-only** : `/var/lib/vibeos/audit/vibed.jsonl` — un objet JSON par appel d'outil : horodatage, **identité de l'appelant** (uid/gid/pid capturés par peer credentials sur le socket), outil, **digest FNV-1a des arguments** (non cryptographique — corrélation, pas preuve d'intégrité), règle de politique appliquée, tier, décision, résultat d'exécution. Le fichier est ouvert en `O_APPEND` par `vibed` uniquement, `fsync` à chaque enregistrement, et **illisible/inaccessible en écriture pour les agents** à double titre : chemins refusés de la politique ([../security/policy.d/default.toml](../security/policy.d/default.toml)) **et** denylist intégrée au code de `vibed` (`/var/lib/vibeos/audit/**`), qui s'applique quelle que soit la politique. Si l'écriture d'audit échoue, l'action échoue (fail-closed sur le chemin Allow).
 
-### Phase 4 : intégrité forte
+**Chaînage de hachés (tamper evidence) — livré** : chaque entrée porte `seq` (compteur monotone depuis 0), `prev` (SHA-256 de l'enregistrement précédent, IV = 64 zéros pour la genèse) et `hash` (SHA-256 de l'enregistrement sérialisé sans `hash`). Toute suppression, réécriture ou réordonnancement casse la chaîne de manière **détectable et localisée** par `vibed --verify-audit [chemin]` (JSON + code de sortie). La chaîne est reprise au redémarrage (état récupéré depuis la dernière entrée valide). Le SHA-256 est l'implémentation maison **sans dépendance** de vibed (`src/sha256.rs`, vecteurs NIST testés) — cohérent avec la doctrine « TCB sans dépendance » (glob et FNV faits maison). Limite intrinsèque d'un journal append-only : la **troncature du dernier enregistrement** n'est pas détectable par la chaîne seule → ancrage externe ci-dessous (Phase 4).
 
-- **Chaînage de hachés** : chaque entrée embarquera `prev_hash = SHA-256(entrée précédente)` — toute suppression ou réécriture cassera la chaîne de manière détectable.
+### Phase 4 : intégrité forte (ancrage externe)
+
 - **Réplication journald** : chaque décision émise en journal structuré (`SYSLOG_IDENTIFIER=vibed`, champs `VIBEOS_TOOL=`, `VIBEOS_TIER=`, `VIBEOS_DECISION=`), avec `Seal=yes` (FSS) pour détecter la falsification a posteriori ; `chattr +a` posé sur le JSONL.
-- **Scellement TPM périodique** : ancrage régulier du haché de tête (signature par clé TPM résidente, ou étendue dans un PCR/NV index) — même root ne pourra pas réécrire l'historique *antérieur au dernier scellement* sans détection.
+- **Scellement TPM périodique** : ancrage régulier du haché de **tête de chaîne** (signature par clé TPM résidente, ou étendue dans un PCR/NV index) — ferme aussi la troncature du dernier enregistrement ; même root ne pourra pas réécrire l'historique *antérieur au dernier scellement* sans détection.
 - **Verrou MAC** : `vibeos_audit_t` (module SELinux dédié, §2), append-only au niveau MAC.
 - **Export** : `vibectl audit verify` (CLI future) revalidera la chaîne complète ; export vers un collecteur distant en option (Phase 5).
 
@@ -164,7 +165,7 @@ La création de la mémoire au premier boot est décrite dans [MEMORY.md](MEMORY
 | Garanti | Non garanti |
 |---|---|
 | Toute action d'agent passée par `vibed` est tracée | Les actions d'un attaquant déjà root hors `vibed` (hors modèle, cf. [THREAT-MODEL.md](THREAT-MODEL.md) §2) |
-| Falsification détectable **à partir de la Phase 4** (FSS, chaîne de hachés, TPM) — en v0.1, le JSONL n'est protégé que par les permissions et la denylist | Confidentialité du journal en cas de vol de session déverrouillée |
+| Falsification **détectable dès aujourd'hui** par la chaîne de hachés SHA-256 (`vibed --verify-audit`) sauf troncature du dernier enregistrement ; FSS/TPM en Phase 4 ferment ce dernier cas | Confidentialité du journal en cas de vol de session déverrouillée |
 | Corrélation agent ↔ action ↔ approbation | Interprétation sémantique (« cette action était-elle *souhaitable* ? ») |
 
 ## 9. État récapitulatif par phase
@@ -176,7 +177,8 @@ La création de la mémoire au premier boot est décrite dans [MEMORY.md](MEMORY
 | SELinux enforcing | ✅ (targeted) | | | politique `vibed_t` | |
 | Signature cosign des images | ✅ (CI) | | | vérif. client | provenance SLSA |
 | Moteur de politiques + tiers + approbation T2+ | politique par défaut installée (`/etc/vibeos/policy.d`) | ✅ (servi par `vibed`) | | | |
-| Audit JSONL append-only (`vibed.jsonl`, identité appelant, digest FNV-1a) | | ✅ | | hash chain + journald/FSS + TPM | export distant |
+| Audit JSONL append-only (`vibed.jsonl`, identité appelant, digest FNV-1a) | | ✅ | | | export distant |
+| Audit **chaîné SHA-256** + `vibed --verify-audit` (tamper evidence) | | ✅ | | ancrage TPM/Rekor + journald/FSS | |
 | Genesis + mémoire | ✅ (répertoire en clair) | | LUKS + amnésique | scellement TPM | |
 | Sandbox par outil (systemd-run + seccomp + Landlock) | durcissement `vibed.service` (root, deny-list) | | ✅ | `User=vibed`, caps allow-list vide | |
 | Secrets systemd-creds / keyring | | cible (local — non câblé) | | scellés TPM2 | |

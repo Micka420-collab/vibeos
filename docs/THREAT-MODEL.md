@@ -172,8 +172,9 @@ Phases de la [../ROADMAP.md](../ROADMAP.md) (qui fait foi) : Phase 1 = v0.1 Prem
 | S5 | Boot mesuré (UKI) + scellement TPM2 | Phase 4 |
 | S5 | Secrets scellés TPM (`systemd-creds`) | Phase 4 |
 | S6 MCP tiers | Allowlist + épinglage + sandbox dédié | Phase 3 |
-| A5 Audit falsifiable | JSONL append-only (`vibed.jsonl`) + deny agents | Phase 2 |
-| A5 | Chaînage de hachés, réplication journald, scellement TPM | Phase 4 |
+| A5 Audit falsifiable | JSONL append-only (`vibed.jsonl`) + deny agents | Phase 2 ✅ |
+| A5 | Chaînage de hachés SHA-256 (`seq`/`prev`/`hash`) + `vibed --verify-audit` | Phase 2 ✅ |
+| A5 | Ancrage externe de la tête (TPM/Rekor), réplication journald | Phase 4 |
 | A3 Intégrité système | Root RO, composefs/fs-verity, SELinux enforcing | Phase 1 ✅ (base) / Phase 4 (complet) |
 
 ## 7. Limites assumées (v0.x)

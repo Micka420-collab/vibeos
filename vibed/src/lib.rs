@@ -7,3 +7,4 @@ pub mod audit;
 pub mod glob;
 pub mod mcp;
 pub mod policy;
+pub mod sha256;
