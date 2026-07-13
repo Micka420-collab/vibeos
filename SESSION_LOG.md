@@ -243,9 +243,22 @@ construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erre
 - **Docs** : `agent.sessions` spécifié (ADR-012) ; `WITH_ZED_AGENT=0` verrouillé
   comme choix intentionnel (ADR-015 §6, avertissement anti-régression) ;
   **ADR-016** — `pkg.install` backend **reporté** (allowlist paquets/dépôts non
-  tranchée sur OS immuable ; stub conservé) ; THREAT-MODEL à jour (svc.restart
-  cibles, agents.list confinement). Tier B Zed relu : **aucun bug**.
-- **État** : **147 tests vibed verts** (137 unit + 7 e2e MCP + 3 politique) +
+  tranchée sur OS immuable ; stub conservé) ; THREAT-MODEL à jour. Tier B Zed
+  relu : **aucun bug**.
+- **Revue adversariale indépendante** (sous-agent) du code de la nuit → **3
+  défauts réels corrigés, dont 1 HIGH** :
+  - **HIGH — bypass de la deny-list svc.restart** : la policy recevait le nom
+    d'unité **brut** (`args["unit"]`) mais la canonicalisation (`+ .service`)
+    ne tournait qu'**après** la décision → `svc.restart {"unit":"vibed"}`
+    passait en `RequireApproval` au lieu de `Deny` (les 13 unités critiques
+    redevenaient approuvables). **Mon test d'hier soir ratait le trou** (noms
+    qualifiés seulement). Fix : canonicalisation dans `handle_tools_call`
+    **avant** l'évaluation + **test e2e socket** (nom nu → `Deny`).
+  - **MED** — `agents.list`/`agent.sessions` sans règle allow → default-deny →
+    inertes en prod (fix : règle T0 `agent-observability`).
+  - **MED** — deny-list complétée (`user@*.service`, `dbus.socket`).
+  - Confinement `agents.list`, extraction F6 memory, anti-DoS : **confirmés sains**.
+- **État** : **148 tests vibed verts** (137 unit + 8 e2e MCP + 3 politique) +
   17 vitest ; clippy/fmt propres ; PR #11 MERGEABLE.
 
 ## 🔧 En cours / non terminé (checkpoint final 2026-07-13 nuit)
