@@ -20,3 +20,8 @@ __pycache__/
 
 # Local Claude Code session state (machine-specific, never commit)
 .claude/
+
+# Sorties locales de genesis_interview.py lancé à la racine (memory_dir de test)
+/user/
+/projects/
+/journal/

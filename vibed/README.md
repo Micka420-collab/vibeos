@@ -127,7 +127,7 @@ Indépendamment de la politique chargée (une politique erronée ou altérée ne
 
 ```
 /var/lib/vibeos/audit/**    /etc/shadow*    /etc/gshadow*    **/.ssh/**
-**/.gnupg/**    /etc/ssh/*    **/.aws/credentials    **/.aws/config
+**/.gnupg/**    /etc/ssh/*    **/.aws/**
 **/.config/gcloud/**    /etc/NetworkManager/system-connections/**
 **/.docker/config.json    **/.kube/config    **/.netrc    /root/**
 /proc/**/environ    /proc/**/cmdline    /run/credentials/**    /boot/**

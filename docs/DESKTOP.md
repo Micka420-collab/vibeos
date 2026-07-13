@@ -18,7 +18,7 @@ Un bureau classique organise l'écran autour des **applications**. Un bureau de 
    Le projet courant, la mémoire de la machine (`/var/lib/vibeos/memory`, interrogée via l'outil MCP `memory.query`, livré v0.1), l'historique des commandes (Atuin), les diffs en attente (lazygit). C'est le rôle des **activités KDE** (§3) : un contexte = une activité.
 
 3. **Confiance** — *qu'est-ce que j'autorise, et qu'est-ce qui a été fait en mon nom ?*
-   Les tiers de policy T0–T3, les demandes d'approbation T2/T3, le journal d'audit. C'est le rôle du **code couleur des tiers** (voir [desktop/theme/palette.md](../desktop/theme/palette.md) §2), des futurs dialogues d'approbation Plasma (Phase 2) et du panneau « policy » du HUD.
+   Les tiers de policy T0–T3, les demandes d'approbation T2/T3, le journal d'audit. C'est le rôle du **code couleur des tiers** (voir [desktop/theme/palette.md](../desktop/theme/palette.md) §2), des futurs dialogues d'approbation Plasma (**Phase 4**, cf. [ROADMAP.md](../ROADMAP.md)) et du panneau « policy » du HUD.
 
 Tout choix de design du bureau se juge à cette aune : *est-ce que cela rend l'un des trois plus visible, plus rapide d'accès, ou plus honnête ?* Le reste est du décor.
 
@@ -154,7 +154,7 @@ La session par défaut est désormais un Plasma 6 en **Global Theme VibeOS Dark*
 | Tier **T2** (modify-system, approbation) | Peach | `#fab387` |
 | Tier **T3** (destructif) | Red | `#f38ba8` |
 
-- **Le code couleur des tiers est un invariant produit** : le même Peach signale une action T2 dans le HUD, dans le terminal et dans le futur dialogue d'approbation Plasma (Phase 2). L'utilisateur doit pouvoir évaluer la gravité d'une demande **à la couleur, avant de lire**.
+- **Le code couleur des tiers est un invariant produit** : le même Peach signale une action T2 dans le HUD, dans le terminal et dans le futur dialogue d'approbation Plasma (Phase 4). L'utilisateur doit pouvoir évaluer la gravité d'une demande **à la couleur, avant de lire**.
 
 ### 5.2 Typographie
 
@@ -218,7 +218,7 @@ Règle absolue (contrainte de dégradation gracieuse) : **toute absence de dépe
 
 Notes :
 
-- Aucun raccourci ne déclenche d'action T2/T3 : les raccourcis **ouvrent des surfaces d'information ou des outils**, jamais une approbation (une approbation T2/T3 exigera toujours une interaction explicite dans le dialogue dédié — Phase 2).
+- Aucun raccourci ne déclenche d'action T2/T3 : les raccourcis **ouvrent des surfaces d'information ou des outils**, jamais une approbation (une approbation T2/T3 exigera toujours une interaction explicite dans le dialogue dédié — Phase 4).
 - `Meta+A`, `Meta+M`, `Meta+P` sont volontairement adjacents au triptyque : **A**gent, **M**émoire (contexte), **P**olicy (confiance).
 - Tout sera remappable par l'utilisateur (Réglages système → Raccourcis) : `/etc/skel` ne fournira que des défauts.
 
@@ -231,7 +231,7 @@ Notes :
 3. `zoxide` (`z monprojet`) pour rejoindre le projet ; Atuin retrouvera chaque commande de la session (piste d'audit locale).
 4. `Meta+A` → nouvel agent : l'utilisateur choisit `claude` (cloud) ou `opencode` sur ollama (offline). Il décrit l'objectif ; l'agent lit, écrit, compile. *(Phase 2 : la session apparaît dans le HUD ; ses appels d'outils passent par `/run/vibed/mcp.sock` et le moteur de politiques.)*
 5. Pendant que l'agent travaille : `Meta+B` (btop) pour surveiller la VRAM si ollama tourne ; `Meta+V` pour jeter un œil au HUD. *(Phase 2 : le HUD affiche d'abord l'état hors ligne + jauges locales, puis agents et tiers en direct une fois `vibed` livré.)*
-6. *(Phase 2)* L'agent demande une action **T2** (installer un paquet) : notification Plasma bord droit, badge **Peach**, dialogue d'approbation détaillant outil/arguments/tier — approuver, refuser, ou approuver avec durée limitée. Tout est audité dans `/var/lib/vibeos/audit/vibed.jsonl`.
+6. *(Phase 4)* L'agent demande une action **T2** (installer un paquet) : notification Plasma bord droit, badge **Peach**, dialogue d'approbation détaillant outil/arguments/tier — approuver, refuser, ou approuver avec durée limitée. Tout est audité dans `/var/lib/vibeos/audit/vibed.jsonl`.
 7. L'agent annonce la fin. `Meta+Tab` → activité **Review** : plein écran Zellij « review », lazygit pour relire les diffs hunk par hunk, `bat` pour lire les nouveaux fichiers, `yazi` (`Meta+Y`) pour survoler l'arborescence créée.
 8. Commit (l'humain signe — jamais l'agent seul), retour à **Vibe**, agent suivant — ou `Meta+Tab` vers **Focus** pour reprendre la main au calme, notifications coupées.
 9. Fin de journée : la session Zellij se détache (résurrection après reboot/mise à jour bootc) ; la machine se souvient *(journal Atuin + git ; et `memory.append` — livré — permet aux agents d'enrichir la mémoire de la machine)*.
@@ -255,7 +255,7 @@ Le bureau réussit si, à chaque étape, les trois questions du triptyque ont un
 | HUD Quickshell — rendu, panneaux, état « vibed hors ligne » | ❌ | ✅ **livré** (runtime compilé + autostart ; données mockées) | — | — |
 | HUD ↔ vibed : agents, tiers, décisions **en direct** | ❌ | 🛣️ **Phase 2** (socket MCP `/run/vibed/mcp.sock`) | — | — |
 | Panneau Mémoire du HUD (`memory.query`) | ❌ (état « non accessible ») | 🛣️ Phase 2 | enrichi (mémoire v2) | — |
-| Dialogues d'approbation T2/T3 dans Plasma | ❌ (T2/T3 = refus fail-closed, cf. [ARCHITECTURE.md](ARCHITECTURE.md) §4.5) | 🛣️ Phase 2 | — | — |
+| Dialogues d'approbation T2/T3 dans Plasma | ❌ (T2/T3 = refus fail-closed, cf. [ARCHITECTURE.md](ARCHITECTURE.md) §4.5) | 🛣️ Phase 4 | — | — |
 | Indicateur de mode amnésique dans la zone système | ❌ | — | 🛣️ **Phase 3** (avec le mode lui-même) | — |
 | Thèmes SDDM et Plymouth VibeOS (originaux) | ❌ (Breeze / défaut distro) | ✅ **copiés dans l'image** (sélectionnables, non actifs par défaut ; PNG Plymouth à générer) | — | 🛣️ **Phase 5** (activation par défaut, GRUB, icônes) |
 | Session « focus » distincte au login | ❌ | — | — | 🛣️ Phase 5 (optionnelle) |

@@ -17,7 +17,7 @@ Toute contribution, toute décision d'architecture et toute revue de code doiven
 - Aucun composant de VibeOS ne doit écrire dans `/usr`. L'état mutable est confiné à `/etc` (géré) et `/var`.
 
 ### 1.2 Vérifié
-- **Livré en v0.1** : les images OS publiées sont signées avec sigstore/cosign (keyless) en CI — la signature accompagne chaque **release** (tag `v*`, ou dispatch manuel explicitement confirmé). Les push ordinaires sur la branche principale déclenchent un build de vérification **non publié et non signé** : il n'existe donc pas d'image officielle non signée.
+- **Livré en v0.1** : les images OS publiées sont signées avec sigstore/cosign (keyless) en CI — la signature accompagne chaque **release** (tag `v*`, ou dispatch manuel explicitement confirmé) et porte sur le **digest du manifest multi-arch**, celui que référencent les tags de consommation (`latest`, `<sha>`, la version). Les push ordinaires sur la branche principale déclenchent un build de vérification **non publié et non signé**. (Note : les tags par architecture `:<sha>-amd64` / `:<sha>-arm64` poussés pendant une release sont des artefacts intermédiaires du manifest, non signés individuellement ; consommez toujours un tag de manifest et vérifiez sa signature.)
 - **Livré en v0.1** : les dépendances sont réellement épinglées — `vibed/Cargo.lock` commité, CLIs npm installées en versions exactes, image de base référencée par digest (`fedora-kinoite:42@sha256:…`), archives binaires (ollama) et sources compilées (quickshell) vérifiées par sha256 avant usage.
 - **Livré (2026-07-08, suites de l'audit)** :
   - les **GitHub Actions sont épinglées par SHA de commit** (le tag lisible reste en commentaire ; un tag ne peut plus être déplacé sous la CI) ;

@@ -30,15 +30,18 @@ racine.
 Le pipeline officiel est [`.github/workflows/build-os.yml`](../.github/workflows/build-os.yml) :
 
 - **Déclencheurs** :
-  - *push* sur `main` ou *pull request* touchant `os/**`, `memory/**`,
-    `security/**` ou le workflow → **build de vérification amd64 seul**
-    (`bootc container lint`), **sans push ni signature**. Garde-fou rapide.
-  - *tag* `v*` **ou** `workflow_dispatch` (manuel) → **release** : build
-    `amd64 + arm64`, push sur `ghcr.io`, assemblage du manifest multi-arch,
-    signature cosign, **plus** les jobs ISO (une par architecture).
+  - *push* sur `main` ou *pull request* touchant `os/**`, `vibed/**`,
+    `memory/**`, `security/**` ou le workflow → **build de vérification amd64
+    seul** (`bootc container lint`), **sans push ni signature**. Garde-fou
+    rapide. Un `workflow_dispatch` **non confirmé** fait la même chose.
+  - *tag* `v*` **ou** `workflow_dispatch` avec l'entrée `confirm_release`
+    valant exactement `publier` → **release** : build `amd64 + arm64`, push sur
+    `ghcr.io`, assemblage du manifest multi-arch, signature cosign, **plus**
+    les jobs ISO (une par architecture).
 
-  Autrement dit : les commits ordinaires sur `main` sont *validés* mais **non
-  publiés** ; pour publier/signer une image, on **pose un tag `v*`**.
+  Autrement dit : les commits ordinaires sur `main` (et un dispatch non
+  confirmé) sont *validés* mais **non publiés** ; pour publier/signer une
+  image, on **pose un tag `v*`** (ou l'on tape `publier` dans le dispatch).
 - **Runners natifs (pas d'émulation)** : le build est une matrice où chaque
   architecture tourne sur **son propre runner natif** — amd64 sur
   `ubuntu-latest`, arm64 sur `ubuntu-24.04-arm`. Chacun construit
@@ -255,7 +258,7 @@ avec l'ensemble des outils.
 > puis `wsl --shutdown` avant de relancer. (L'image OS, elle, se construit sans
 > problème à 8 Go — seule l'étape ISO exige cette marge.) En CI, les runners
 > GitHub sont suffisamment dotés : la génération d'ISO y est déclenchée sur
-> tag `v*` / `workflow_dispatch`.
+> tag `v*` (ou un `workflow_dispatch` confirmé par `confirm_release=publier`).
 
 Pour une ISO **arm64** depuis un hôte amd64 (qemu-user-static requis,
 section 2.6) : pull de l'image arm64 (`sudo podman pull --arch arm64 ...` ou

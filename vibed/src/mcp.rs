@@ -97,8 +97,7 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "**/.gnupg/**",             // GnuPG key material, wherever it lives
     "/etc/ssh/*",               // sshd config AND host keys
     "/etc/ssh/ssh_host_*",      // host private keys (explicit, in case of subdirs)
-    "**/.aws/credentials",      // AWS access keys
-    "**/.aws/config",           // AWS profiles / sso config
+    "**/.aws/**",               // AWS credentials, config, SSO cache — whole dir
     "**/.config/gcloud/**",     // Google Cloud credentials store
     "/etc/NetworkManager/system-connections/**", // Wi-Fi/VPN PSKs and certs
     "**/.docker/config.json",   // registry auth tokens
@@ -953,17 +952,45 @@ fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     }
     recheck_policy_canonical(policy, "fs.list", &canonical_str)?;
 
+    // Anti-TOCTOU (same discipline as fs.read; vibed runs as root): capture the
+    // directory's identity right before the read and re-check it right after.
+    // canonicalize resolved every symlink, so the target must be a real
+    // directory now; if a component is swapped for a symlink in the window
+    // around read_dir (e.g. `proj` -> /root), dev/ino changes and we refuse.
+    // Full closure (parent-component swaps mid-read) awaits openat2
+    // (RESOLVE_NO_SYMLINKS) in Phase 3.
+    let before =
+        std::fs::symlink_metadata(&canonical).map_err(|e| format!("fs.list {path}: {e}"))?;
+    if !before.file_type().is_dir() {
+        return Err(format!("fs.list: '{canonical_str}' is not a directory"));
+    }
     let read_dir = std::fs::read_dir(&canonical).map_err(|e| format!("fs.list {path}: {e}"))?;
-    let mut entries: Vec<(String, Value)> = Vec::new();
-    let mut truncated = false;
-    for entry in read_dir.flatten() {
-        if entries.len() >= limit {
-            truncated = true;
-            break;
+
+    // Keep the `limit` lexicographically-smallest names with O(limit) memory,
+    // so a truncated result is a STABLE prefix regardless of readdir order (a
+    // sort AFTER truncation would return an arbitrary readdir-order subset).
+    struct ByName(String, Value);
+    let mut kept: std::collections::BinaryHeap<ByName> = std::collections::BinaryHeap::new();
+    impl PartialEq for ByName {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
         }
+    }
+    impl Eq for ByName {}
+    impl PartialOrd for ByName {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for ByName {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.cmp(&other.0)
+        }
+    }
+    let mut total = 0usize;
+    for entry in read_dir.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // file_type() does not follow symlinks; size only for regular files
-        // (symlink_metadata: the link itself, never its target).
+        // file_type() does not follow symlinks; size only for regular files.
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -981,14 +1008,39 @@ fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
         } else {
             None
         };
-        entries.push((
+        total += 1;
+        let item = ByName(
             name.clone(),
             json!({"name": name, "type": kind, "size": size}),
-        ));
+        );
+        // Max-heap of size `limit`: its root is the largest kept name; a
+        // smaller incoming name evicts it, so we retain the smallest `limit`.
+        if kept.len() < limit {
+            kept.push(item);
+        } else if let Some(top) = kept.peek() {
+            if item.0 < top.0 {
+                kept.pop();
+                kept.push(item);
+            }
+        }
     }
-    // Deterministic output: lexicographic by name.
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let listed: Vec<Value> = entries.into_iter().map(|(_, v)| v).collect();
+
+    let after =
+        std::fs::symlink_metadata(&canonical).map_err(|e| format!("fs.list {path}: {e}"))?;
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return Err(format!(
+                "fs.list: '{canonical_str}' changed during the read (possible symlink race); \
+                 refusing (fail-closed)"
+            ));
+        }
+    }
+
+    let truncated = total > kept.len();
+    let mut sorted = kept.into_vec();
+    sorted.sort();
+    let listed: Vec<Value> = sorted.into_iter().map(|b| b.1).collect();
     Ok(json!({
         "path": canonical_str,
         "entries": listed,
@@ -1185,6 +1237,8 @@ fn memory_query(args: &Value) -> Result<String, String> {
 /// Body of memory.query with the store root as a parameter, so the tests can
 /// run it against a scratch layout without touching /var/lib/vibeos/memory.
 fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -1233,12 +1287,20 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
     // trail.
     let mut files = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    // A walk root is only pushed if it is a REAL directory (symlink_metadata
+    // does not follow): if `journal` (or the store root itself) is a symlink,
+    // the walk must not descend through it out of the store.
+    let push_if_real_dir = |stack: &mut Vec<std::path::PathBuf>, p: std::path::PathBuf| {
+        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
+            stack.push(p);
+        }
+    };
     match scope {
-        None => stack.push(root.to_path_buf()),
+        None => push_if_real_dir(&mut stack, root.to_path_buf()),
         Some((_, relative, is_dir)) => {
             let start = root.join(relative);
             if is_dir {
-                stack.push(start);
+                push_if_real_dir(&mut stack, start);
             } else if start
                 .symlink_metadata()
                 .is_ok_and(|m| m.file_type().is_file())
@@ -1289,18 +1351,26 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
         let name_hit = relative.to_lowercase().contains(&query);
         // Bounded scan: never pull more than MAX_MEMORY_SCAN_BYTES of one file
         // into memory (same take() discipline as fs.read) — a huge file in the
-        // store must not translate into an unbounded allocation.
-        let content_hit = std::fs::File::open(path).ok().is_some_and(|file| {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            let ok = file
-                .take(MAX_MEMORY_SCAN_BYTES as u64)
-                .read_to_end(&mut bytes)
-                .is_ok();
-            ok && String::from_utf8_lossy(&bytes)
-                .to_lowercase()
-                .contains(&query)
-        });
+        // store must not translate into an unbounded allocation. O_NOFOLLOW:
+        // the file was a regular file when the walk collected it; if it was
+        // swapped for a symlink before this open (TOCTOU), open() fails with
+        // ELOOP instead of following it out of the store.
+        let content_hit = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
+            .ok()
+            .is_some_and(|file| {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                let ok = file
+                    .take(MAX_MEMORY_SCAN_BYTES as u64)
+                    .read_to_end(&mut bytes)
+                    .is_ok();
+                ok && String::from_utf8_lossy(&bytes)
+                    .to_lowercase()
+                    .contains(&query)
+            });
         if name_hit || content_hit {
             matches.push(json!({ "file": relative }));
         }
@@ -2247,24 +2317,53 @@ mod tests {
     }
 
     #[test]
-    fn fs_list_respects_limit_and_flags_truncation() {
+    fn fs_list_respects_limit_and_returns_stable_lexicographic_prefix() {
         let policy = list_policy();
         let dir = std::env::temp_dir().join(format!("vibed-list-lim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
-        for i in 0..5 {
-            std::fs::write(dir.join(format!("f{i}")), "x").unwrap();
+        // Create in a shuffled order so a readdir-order bug would surface.
+        for name in ["e", "b", "d", "a", "c"] {
+            std::fs::write(dir.join(name), "x").unwrap();
         }
         let payload: Value = serde_json::from_str(
             &fs_list(&json!({"path": dir.to_string_lossy(), "limit": 3}), &policy).unwrap(),
         )
         .unwrap();
-        assert_eq!(payload["entries"].as_array().unwrap().len(), 3);
+        let entries = payload["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        // The truncated set must be the SMALLEST `limit` names, sorted — a
+        // stable prefix, not an arbitrary readdir-order subset.
+        assert_eq!(
+            names,
+            ["a", "b", "c"],
+            "truncation must keep the lexicographic prefix"
+        );
         assert_eq!(payload["truncated"], true);
         let err =
             fs_list(&json!({"path": dir.to_string_lossy(), "limit": 0}), &policy).unwrap_err();
         assert!(err.contains("integer >= 1"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_list_refuses_when_target_is_not_a_directory() {
+        // canonicalize follows a symlink to its real target; that target must
+        // itself be a real directory. A symlink to a regular file is refused.
+        let policy = list_policy();
+        let base = std::env::temp_dir().join(format!("vibed-list-sym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        let file = base.join("regular.txt");
+        std::fs::write(&file, "x").unwrap();
+        let link = base.join("link-to-file");
+        std::os::unix::fs::symlink(&file, &link).expect("symlink");
+        let err = fs_list(&json!({"path": link.to_string_lossy()}), &policy).unwrap_err();
+        assert!(err.contains("not a directory"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

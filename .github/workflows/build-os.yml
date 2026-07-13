@@ -63,11 +63,17 @@ permissions:
   contents: read
 
 # Deux pushes rapprochés ne doivent pas builder deux images ~12 Go en
-# parallèle. Les runs de release (tag v*) ne sont jamais annulés en vol : un
-# push/tag concurrent attend au lieu d'interrompre une publication.
+# parallèle. Aucun run de PUBLICATION n'est annulé en vol :
+#   - une release par tag v* a déjà un groupe unique (refs/tags/v*) ;
+#   - une release par dispatch confirmé reçoit un groupe unique par run_id, de
+#     sorte qu'un push concurrent sur main ne peut jamais l'interrompre en
+#     plein push/signature cosign.
+# Seuls les builds de vérification (push/PR sur une même ref) s'annulent.
 concurrency:
-  group: build-os-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: >-
+    build-os-${{ github.event_name == 'workflow_dispatch'
+      && format('dispatch-{0}', github.run_id) || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
   setup:

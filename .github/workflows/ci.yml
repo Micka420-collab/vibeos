@@ -74,8 +74,8 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-      # --all-targets : le code des tests (~50 tests unitaires + intégration)
-      # est linté au même niveau que le code de production.
+      # --all-targets : le code des tests (nombreux tests unitaires +
+      # intégration) est linté au même niveau que le code de production.
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --locked -- -D warnings
 
@@ -93,8 +93,12 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-08)
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      # Prebuilt binary — no from-source recompile of cargo-audit and its ~200
+      # deps on every run (cohérent avec la politique de pins SHA du dépôt).
+      - name: Install cargo-audit (prebuilt)
+        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
+        with:
+          tool: cargo-audit
 
       - name: cargo audit
         run: cargo audit

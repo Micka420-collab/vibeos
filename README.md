@@ -179,7 +179,7 @@ podman build -t vibeos:dev -f os/Containerfile .
 | | |
 |---|---|
 | **Phase** | Pré-alpha — Phase 1 « Première ISO » (validation VM restante) · Phase 2 « vibed + MCP » en cours |
-| **Dernière mise à jour** | 2026-07-08 |
+| **Dernière mise à jour** | 2026-07-13 |
 | **Image OS** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — manifest amd64 + arm64, **signé cosign** (Rekor) |
 | **ISO** | amd64 (7,0 Go) + arm64 (6,3 Go) — artefacts CI de la release `v0.1.0-dev` |
 | **Build** | CI verte (runners natifs, ~15 min/arch) · `bootc container lint` OK · 72 tests `vibed` verts |

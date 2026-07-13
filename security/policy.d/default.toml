@@ -18,7 +18,7 @@
 # BUILT-IN HARD DENYLIST: independently of this file, the engine denies in
 # code, for reads AND writes: /var/lib/vibeos/audit/**, /etc/shadow*,
 # /etc/gshadow*, **/.ssh/**, **/.gnupg/**, /etc/ssh/* (+ /etc/ssh/ssh_host_*),
-# **/.aws/credentials, **/.aws/config, **/.config/gcloud/**,
+# **/.aws/**, **/.config/gcloud/**,
 # /etc/NetworkManager/system-connections/**, **/.docker/config.json,
 # **/.kube/config, **/.netrc, /root/**, /proc/*/environ, /proc/**/environ,
 # /proc/**/cmdline, /run/credentials/**, /boot/**, plus the credentials of
@@ -78,8 +78,7 @@ denied = [
   "**/.gnupg/**",              # GnuPG key material, wherever it lives
   "/etc/ssh/*",                # sshd config AND host keys
   "/etc/ssh/ssh_host_*",       # host private keys (explicit)
-  "**/.aws/credentials",       # AWS access keys
-  "**/.aws/config",            # AWS profiles / SSO config
+  "**/.aws/**",                # AWS credentials, config, SSO cache — whole dir
   "**/.config/gcloud/**",      # Google Cloud credentials store
   "/etc/NetworkManager/system-connections/**", # Wi-Fi/VPN PSKs and certs
   "**/.docker/config.json",    # container registry auth tokens
