@@ -428,27 +428,37 @@ async fn handle_tools_call(
     // operator has already granted this exact (tool, target, uid) call. The
     // grant is one-shot and short-lived — consumed here so it can never be
     // replayed. An agent cannot reach the approval store (root-only + denylist),
-    // so it can never approve its own request.
-    let mut approved = false;
-    let decision = if matches!(decision, Decision::RequireApproval)
-        && crate::approval::check_and_consume_grant(
+    // so it can never approve its own request. The consumed grant carries the
+    // approver's uid, which we fold into the audit outcome: the grant file is
+    // deleted on consumption, so the tamper-evident log is the ONLY durable
+    // record of who authorized the action.
+    let consumed = if matches!(decision, Decision::RequireApproval) {
+        crate::approval::check_and_consume_grant(
             std::path::Path::new(crate::approval::APPROVAL_DIR),
             &name,
             target.as_deref(),
             caller.uid,
             now_epoch_secs(),
-        ) {
-        approved = true;
-        Decision::Allow
+        )
     } else {
-        decision
+        None
     };
+    let approved = consumed.is_some();
+    let decision = if approved { Decision::Allow } else { decision };
+    let suffix = consumed
+        .as_ref()
+        .map(|c| approver_suffix(c.approver_uid))
+        .unwrap_or_default();
     let started_outcome = if approved {
-        "started_approved"
+        format!("started_approved{suffix}")
     } else {
-        "started"
+        "started".to_string()
     };
-    let ok_outcome = if approved { "ok_approved" } else { "ok" };
+    let ok_outcome = if approved {
+        format!("ok_approved{suffix}")
+    } else {
+        "ok".to_string()
+    };
 
     match decision {
         Decision::Deny => {
@@ -506,7 +516,7 @@ async fn handle_tools_call(
                 &args,
                 target.as_deref(),
                 decision,
-                started_outcome,
+                &started_outcome,
                 caller,
             ) {
                 return tool_result(
@@ -532,7 +542,7 @@ async fn handle_tools_call(
                         &args,
                         target.as_deref(),
                         decision,
-                        ok_outcome,
+                        &ok_outcome,
                         caller,
                     );
                     // Feed the machine's own memory: record executed,
@@ -630,6 +640,17 @@ fn now_epoch_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Audit-outcome suffix identifying WHO approved a consumed grant, appended to
+/// the `*_approved` outcomes. The grant file is deleted on consumption, so this
+/// is what preserves the operator identity in the tamper-evident log. `?` when
+/// the approver uid was not recorded at approve time.
+fn approver_suffix(approver_uid: Option<u32>) -> String {
+    match approver_uid {
+        Some(uid) => format!("(by_uid={uid})"),
+        None => "(by_uid=?)".to_string(),
+    }
 }
 
 fn try_audit(
@@ -3449,5 +3470,13 @@ mod tests {
         // end-of-year boundary
         assert_eq!(utc_date_string(1_767_225_600 - 1), "2025-12-31");
         assert_eq!(utc_iso8601(1_767_225_600 - 1), "2025-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn approver_suffix_records_operator_identity() {
+        // A known approver lands in the audit outcome; an unknown one is `?`.
+        assert_eq!(approver_suffix(Some(0)), "(by_uid=0)");
+        assert_eq!(approver_suffix(Some(1000)), "(by_uid=1000)");
+        assert_eq!(approver_suffix(None), "(by_uid=?)");
     }
 }

@@ -139,20 +139,32 @@ pub fn request_approval(
     Ok(id)
 }
 
+/// Details of a grant that was found and consumed. Carries the operator
+/// identity so the caller can record WHO approved the action in the audit log
+/// — the grant file is deleted on consumption, so this is the only place that
+/// identity survives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantConsumption {
+    /// Operator uid that approved the request (`None` if it was unreadable at
+    /// approve time).
+    pub approver_uid: Option<u32>,
+    /// The grant/request id, for cross-referencing the audit trail.
+    pub id: Option<String>,
+}
+
 /// Look for a FRESH, matching grant for `(tool, target, caller_uid)`. If one is
-/// found it is CONSUMED (deleted) and `true` is returned. Expired grants are
-/// pruned as they are encountered. One-shot by construction.
+/// found it is CONSUMED (deleted) and `Some(GrantConsumption)` is returned with
+/// the approver's identity; `None` otherwise. Expired grants are pruned as they
+/// are encountered. One-shot by construction.
 pub fn check_and_consume_grant(
     root: &Path,
     tool: &str,
     target: Option<&str>,
     caller_uid: Option<u32>,
     now: u64,
-) -> bool {
+) -> Option<GrantConsumption> {
     let dir = granted_dir(root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return false;
-    };
+    let entries = std::fs::read_dir(&dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -182,11 +194,20 @@ pub fn check_and_consume_grant(
             // Consume before returning so a grant can never be replayed, even
             // if two calls race (the loser simply sees the file gone).
             if std::fs::remove_file(&path).is_ok() {
-                return true;
+                return Some(GrantConsumption {
+                    approver_uid: grant
+                        .get("granted_by_uid")
+                        .and_then(Value::as_u64)
+                        .map(|u| u as u32),
+                    id: grant
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
             }
         }
     }
-    false
+    None
 }
 
 /// Operator action: turn pending request `id` into a one-shot grant. Returns
@@ -289,51 +310,40 @@ mod tests {
         assert_eq!(list_pending(&root).len(), 1);
 
         // No grant yet: a matching call is not authorized.
-        assert!(!check_and_consume_grant(
-            &root,
-            "svc.restart",
-            Some("sshd.service"),
-            Some(1000),
-            now
-        ));
+        assert!(check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
+            .is_none());
 
-        // Operator approves.
+        // Operator (uid 0) approves.
         approve(&root, &id, Some(0), now).expect("approve");
         assert_eq!(list_pending(&root).len(), 0, "request moves out of pending");
 
         // A DIFFERENT call is not covered by this grant.
-        assert!(!check_and_consume_grant(
-            &root,
-            "svc.restart",
-            Some("nginx.service"),
-            Some(1000),
-            now
-        ));
-        assert!(!check_and_consume_grant(
-            &root,
-            "pkg.install",
-            Some("sshd.service"),
-            Some(1000),
-            now
-        ));
-        assert!(!check_and_consume_grant(
-            &root,
-            "svc.restart",
-            Some("sshd.service"),
-            Some(1001),
-            now
-        ));
-
-        // The exact call is authorized — ONCE.
-        assert!(check_and_consume_grant(
-            &root,
-            "svc.restart",
-            Some("sshd.service"),
-            Some(1000),
-            now
-        ));
         assert!(
-            !check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now),
+            check_and_consume_grant(&root, "svc.restart", Some("nginx.service"), Some(1000), now)
+                .is_none()
+        );
+        assert!(
+            check_and_consume_grant(&root, "pkg.install", Some("sshd.service"), Some(1000), now)
+                .is_none()
+        );
+        assert!(
+            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1001), now)
+                .is_none()
+        );
+
+        // The exact call is authorized — ONCE — and carries the approver identity.
+        let consumed =
+            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
+                .expect("exact call authorized");
+        assert_eq!(
+            consumed.approver_uid,
+            Some(0),
+            "audit can attribute the approval to operator uid 0"
+        );
+        assert_eq!(consumed.id.as_deref(), Some(id.as_str()));
+        assert!(
+            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
+                .is_none(),
             "a grant is single-use (consumed)"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -348,21 +358,13 @@ mod tests {
         approve(&root, &id, Some(0), now).expect("approve");
         // Well after expiry: refused and pruned.
         let later = now + GRANT_TTL_SECS + 1;
-        assert!(!check_and_consume_grant(
-            &root,
-            "pkg.install",
-            Some("htop"),
-            Some(1000),
-            later
-        ));
+        assert!(
+            check_and_consume_grant(&root, "pkg.install", Some("htop"), Some(1000), later).is_none()
+        );
         // Even at `now` it would be gone now (pruned by the expired check above).
-        assert!(!check_and_consume_grant(
-            &root,
-            "pkg.install",
-            Some("htop"),
-            Some(1000),
-            now
-        ));
+        assert!(
+            check_and_consume_grant(&root, "pkg.install", Some("htop"), Some(1000), now).is_none()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -381,13 +383,10 @@ mod tests {
         .expect("request");
         deny(&root, &id).expect("deny");
         assert_eq!(list_pending(&root).len(), 0);
-        assert!(!check_and_consume_grant(
-            &root,
-            "svc.restart",
-            Some("sshd.service"),
-            Some(1000),
-            now
-        ));
+        assert!(
+            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
