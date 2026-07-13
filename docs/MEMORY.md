@@ -87,15 +87,18 @@ c'est le mécanisme, pas un cas particulier.
 |---|---|---|---|---|
 | `identity.toml` | TOML | Genesis uniquement | `memory.query` (T0) | **interdite** |
 | `hardware.json` | JSON | Genesis uniquement | `memory.query` (T0) | **interdite** |
-| `user/` | TOML/MD | `vibed` | `memory.query` (T0) | `memory.append` (T1)* — scope à venir |
-| `projects/index.json` | JSON | `vibed` | `memory.query` (T0) | `memory.append` (T1)* — scope à venir |
+| `user/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `user`) |
+| `projects/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `projects`) |
 | `journal/*.jsonl` | JSONL | Genesis puis `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
 | `knowledge/facts.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
 | `.initialized` | texte | Genesis uniquement | — | — |
 
-\* `memory.append` est **livré** pour les scopes append-only `journal` et
-`knowledge` (voir §9) ; les scopes `user` et `projects` (fusion structurée
-TOML/JSON, pas un simple append) restent une **cible Phase 2/3**. La mémoire
+\* `memory.append` est **livré** pour les quatre scopes agents `journal`,
+`knowledge`, `user` et `projects` (voir §9). Invariant §4 oblige :
+**tous append-only** — `user` et `projects` ne « fusionnent » pas par
+réécriture mais accumulent des mises à jour dans `updates.jsonl` ; la vue
+courante (profil, index) est le *fold* de ces lignes (dernière écriture gagne
+par clé/`path`), jamais un fichier réécrit sur place. La mémoire
 n'est inscriptible par aucun autre outil MCP : `fs.write` est confiné à
 `/home/**`/`/var/home/**` et la mémoire figure dans la denylist intégrée au
 code de `vibed` — `memory.append`, qui ne prend aucun argument de chemin, est
@@ -149,19 +152,23 @@ quand le matériel change.
 ### 3.3 `user/`
 
 Ce que la machine sait de **son humain**. Rempli progressivement par `vibed` via
-`memory.append` (le scope `user` — fusion TOML structurée — reste une cible
-Phase 2/3 ; jamais par Genesis, qui ne pose qu'un `README.md`) :
-`profile.toml` (nom d'usage, langue — le français est détecté dès la locale),
-`preferences.toml` (éditeur, shell, thème, outils préférés), `codestyle.md`
-(conventions observées dans les sessions de vibecoding : indentation, nommage,
-frameworks favoris).
+`memory.append` scope `user` (jamais par Genesis, qui ne pose qu'un
+`README.md`). Invariant §4 : c'est **append-only**, pas une réécriture. Chaque
+appel ajoute une ligne à `user/updates.jsonl` : `{ ts, key, value, source }`,
+où `key` est une clé pointée `[A-Za-z0-9._-]` (ex. `profile.lang`,
+`preferences.editor`, `codestyle.indent`). La **vue courante** (profil,
+préférences) est le *fold* de ces lignes — **dernière écriture gagne par
+`key`** — matérialisée par `memory.query` ou un futur `vibectl`, jamais par un
+fichier réécrit sur place.
 
 ### 3.4 `projects/`
 
-`index.json` : tableau d'objets `{ "path", "name", "languages", "vcs",
-"first_seen", "last_opened", "summary" }`. Alimenté quand un agent ouvre un
-projet ; consulté en début de session pour retrouver le contexte (« reprends le
-projet d'hier »).
+Index des projets connus, **append-only** : `projects/updates.jsonl`, une ligne
+par mise à jour `{ ts, path, source, name?, languages?, vcs?, summary?,
+last_opened? }` (champs hors liste ignorés). `path` (absolu) est la clé de
+*fold* : la vue courante est l'agrégat **dernière écriture gagne par `path`**.
+Alimenté quand un agent ouvre un projet ; consulté en début de session pour
+retrouver le contexte (« reprends le projet d'hier »).
 
 ### 3.5 `journal/`
 
@@ -381,15 +388,15 @@ La mémoire est portable — elle appartient à l'humain, pas au matériel.
 Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
 `vibed`, désormais **embarqué dans l'image et démarré au boot**).
 `memory.query` (arguments `query`, `scope`, `limit`) et `memory.append`
-(scopes `journal` et `knowledge`) sont **implémentés, testés et exposés** par le
-démon `vibed`. Restent une **cible Phase 2/3** : les scopes `user` et
-`projects` de `memory.append` (fusion structurée TOML/JSON, pas un simple
-append) et la recherche sémantique par embeddings.
+(scopes `journal`, `knowledge`, `user`, `projects` — tous append-only) sont
+**implémentés, testés et exposés** par le démon `vibed`. Reste une **cible
+Phase 3+** : la matérialisation du *fold* (vue courante profil/index) côté
+`memory.query`/`vibectl` et la recherche sémantique par embeddings.
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
 | `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`) | ✅ **livré** (scope/limit depuis v0.2) |
-| `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`/`knowledge` ; scopes `user`/`projects` = **cible Phase 2/3** |
+| `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`, `knowledge`, `user`, `projects` (tous append-only) |
 
 Points durs :
 
@@ -468,8 +475,13 @@ plafond 16 KiB) et audite :
 - **`knowledge`** → `knowledge/facts.jsonl`. `entry` : `subject` (≤ 256 o),
   `fact` (≤ 4 096 o), `source`, `confidence` optionnel ∈ [0, 1] ; `vibed`
   génère l'`id`.
-- **`user`** / **`projects`** → erreur explicite : fusion structurée TOML/JSON,
-  **cible Phase 2/3** — pas un simple append.
+- **`user`** → `user/updates.jsonl`. `entry` : `key` (clé pointée
+  `[A-Za-z0-9._-]`, ≤ 256 o), `value` (JSON libre), `source`. Append-only ;
+  vue courante = fold last-write-wins par `key` (§3.3).
+- **`projects`** → `projects/updates.jsonl`. `entry` : `path` (absolu, ≤ 4096 o,
+  clé de fold), `source`, et champs structurés optionnels
+  `name`/`languages`/`vcs`/`summary`/`last_opened` (le reste est ignoré).
+  Append-only ; vue courante = fold last-write-wins par `path` (§3.4).
 
 Si la mémoire n'existe pas encore (Genesis n'a pas tourné), l'appel échoue
 explicitement — `memory.append` ne crée jamais la racine du store.

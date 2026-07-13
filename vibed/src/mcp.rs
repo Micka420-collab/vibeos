@@ -635,9 +635,12 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             "memory.append",
             Tier::T1,
             "Append ONE entry to the VibeOS memory store — strictly additive, no delete or \
-             rewrite. Writable scopes in v0.2: 'journal' (entry: type/source/data) and \
-             'knowledge' (entry: subject/fact/source[/confidence]); vibed stamps ts (and the \
-             fact id). 'user' and 'projects' are a Phase 2/3 remainder (docs/MEMORY.md §9)",
+             rewrite, no path argument (the file is scope-derived). Scopes: 'journal' \
+             (entry: type/source/data), 'knowledge' (entry: subject/fact/source[/confidence]), \
+             'user' (entry: key/value/source — append-only update, current profile = fold, \
+             last-write-wins per key), 'projects' (entry: path/source[/name/languages/vcs/\
+             summary/last_opened] — fold per path). vibed stamps ts (and the fact id). \
+             See docs/MEMORY.md §9",
             json!({"type": "object", "required": ["scope", "entry"],
             "properties": {
                 "scope": {"type": "string",
@@ -1601,12 +1604,56 @@ fn memory_append_at(
             }
             ("knowledge/facts.jsonl".to_string(), fact_value)
         }
-        "user" | "projects" => {
-            return Err(format!(
-                "memory.append: scope '{scope}' is not implemented yet (structured TOML/JSON \
-                 merge — Phase 2/3 remainder, docs/MEMORY.md §3); the append-only scopes \
-                 'journal' and 'knowledge' are the writable surface of v0.2"
-            ));
+        "user" => {
+            // Invariant §4 forbids read-modify-write / merge in memory.append.
+            // So `user` is an APPEND-ONLY log of key/value updates
+            // (user/updates.jsonl); the "current profile" is the fold of these
+            // entries, last-write-wins per key (materialized by memory.query /
+            // a future vibectl, never by rewriting a file here). See MEMORY §3.3.
+            let key = required_entry_str(entry, "key", 256)?;
+            if !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                return Err(
+                    "memory.append: user 'key' must be a dotted config key [A-Za-z0-9._-] \
+                     (e.g. 'preferences.editor')"
+                        .to_string(),
+                );
+            }
+            let value = entry
+                .get("value")
+                .cloned()
+                .ok_or_else(|| "memory.append: missing 'value' field in user entry".to_string())?;
+            let source = validated_source(entry)?;
+            (
+                "user/updates.jsonl".to_string(),
+                json!({ "ts": ts, "key": key, "value": value, "source": source }),
+            )
+        }
+        "projects" => {
+            // Append-only project updates (projects/updates.jsonl); the current
+            // project index is the fold, last-write-wins per `path`. A whitelist
+            // of structured fields keeps the schema stable (unknown fields are
+            // dropped, not stored). See MEMORY §3.4.
+            let path = required_entry_str(entry, "path", 4096)?;
+            if !path.starts_with('/') {
+                return Err(
+                    "memory.append: projects 'path' must be an absolute path (fold key)"
+                        .to_string(),
+                );
+            }
+            let source = validated_source(entry)?;
+            let mut record = serde_json::Map::new();
+            record.insert("ts".to_string(), json!(ts));
+            record.insert("path".to_string(), json!(path));
+            record.insert("source".to_string(), json!(source));
+            for field in ["name", "languages", "vcs", "summary", "last_opened"] {
+                if let Some(v) = entry.get(field) {
+                    record.insert(field.to_string(), v.clone());
+                }
+            }
+            ("projects/updates.jsonl".to_string(), Value::Object(record))
         }
         other => {
             return Err(format!(
@@ -2876,9 +2923,10 @@ mod tests {
     }
 
     #[test]
-    fn memory_append_refuses_unimplemented_and_unknown_scopes() {
+    fn memory_append_rejects_readonly_and_unknown_scopes() {
         let root = memory_scratch("ascope");
-        for scope in ["user", "projects"] {
+        // identity/hardware are written by Genesis only — never via memory.append.
+        for scope in ["identity", "hardware"] {
             let err = memory_append_at(
                 &root,
                 &json!({"scope": scope, "entry": {"source": "x"}}),
@@ -2886,17 +2934,100 @@ mod tests {
             )
             .unwrap_err();
             assert!(
-                err.contains("not implemented"),
-                "scope '{scope}': unexpected error: {err}"
+                err.contains("unknown scope"),
+                "scope '{scope}' must be rejected (Genesis-only): {err}"
             );
         }
         let err = memory_append_at(
             &root,
-            &json!({"scope": "identity", "entry": {"source": "x"}}),
+            &json!({"scope": "bogus", "entry": {"source": "x"}}),
             T_2026_07_08,
         )
         .unwrap_err();
         assert!(err.contains("unknown scope"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_user_writes_append_only_kv_update() {
+        let root = memory_scratch("auser");
+        let payload = parse_result(memory_append_at(
+            &root,
+            &json!({"scope": "user",
+                    "entry": {"key": "preferences.editor", "value": "neovim",
+                              "source": "claude-code"}}),
+            T_2026_07_08,
+        ));
+        assert_eq!(payload["appended"], true);
+        assert_eq!(payload["file"], "user/updates.jsonl");
+        let written = std::fs::read_to_string(root.join("user").join("updates.jsonl")).unwrap();
+        let rec: Value = serde_json::from_str(written.trim()).unwrap();
+        assert_eq!(rec["key"], "preferences.editor");
+        assert_eq!(rec["value"], "neovim");
+        assert_eq!(rec["source"], "claude-code");
+        assert_eq!(rec["ts"], "2026-07-08T01:01:01Z");
+
+        // A second append is additive (two lines), never a rewrite (invariant §4).
+        memory_append_at(
+            &root,
+            &json!({"scope": "user",
+                    "entry": {"key": "preferences.editor", "value": "helix", "source": "x"}}),
+            T_2026_07_08,
+        )
+        .expect("second user append");
+        let lines = std::fs::read_to_string(root.join("user").join("updates.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 2, "append-only: both updates kept");
+
+        // Invalid key charset and missing value are rejected.
+        assert!(memory_append_at(
+            &root,
+            &json!({"scope": "user", "entry": {"key": "bad key!", "value": 1, "source": "x"}}),
+            T_2026_07_08,
+        )
+        .unwrap_err()
+        .contains("dotted config key"));
+        assert!(memory_append_at(
+            &root,
+            &json!({"scope": "user", "entry": {"key": "a.b", "source": "x"}}),
+            T_2026_07_08,
+        )
+        .unwrap_err()
+        .contains("value"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_projects_writes_whitelisted_record() {
+        let root = memory_scratch("aproj");
+        let payload = parse_result(memory_append_at(
+            &root,
+            &json!({"scope": "projects",
+                    "entry": {"path": "/var/home/dev/vibeos-ui", "name": "vibeos-ui",
+                              "languages": ["ts", "rust"], "vcs": "git",
+                              "summary": "front du HUD", "source": "claude-code",
+                              "ignored_field": "dropped"}}),
+            T_2026_07_08,
+        ));
+        assert_eq!(payload["file"], "projects/updates.jsonl");
+        let written = std::fs::read_to_string(root.join("projects").join("updates.jsonl")).unwrap();
+        let rec: Value = serde_json::from_str(written.trim()).unwrap();
+        assert_eq!(rec["path"], "/var/home/dev/vibeos-ui");
+        assert_eq!(rec["name"], "vibeos-ui");
+        assert_eq!(rec["vcs"], "git");
+        assert_eq!(rec["ts"], "2026-07-08T01:01:01Z");
+        assert!(
+            rec.get("ignored_field").is_none(),
+            "unknown fields are dropped"
+        );
+
+        // A relative path (bad fold key) is refused.
+        assert!(memory_append_at(
+            &root,
+            &json!({"scope": "projects", "entry": {"path": "rel/path", "source": "x"}}),
+            T_2026_07_08,
+        )
+        .unwrap_err()
+        .contains("absolute path"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

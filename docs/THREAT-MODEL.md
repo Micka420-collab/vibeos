@@ -157,6 +157,7 @@ Phases de la [../ROADMAP.md](../ROADMAP.md) (qui fait foi) : Phase 1 = v0.1 Prem
 | S2 | Politiques fs (deny audit/secrets, write confiné) + denylist en dur | Phase 2 |
 | S2 | `fs.list` (T0) : listing borné (500 entrées), même denylist que `fs.read`, symlinks signalés jamais suivis | Phase 2 ✅ |
 | S2 | Denylist étendue aux credentials des agents IA (`~/.claude/`, `~/.config/gh/`, `~/.gemini/`, `~/.codex/`, opencode, ollama, npmrc, git-credentials, SOPS) | Phase 2 ✅ |
+| S2 | `memory.append` scopes `user`/`projects` : écriture agent **append-only** (`updates.jsonl`), chemin dérivé du scope (aucun argument de chemin), `ts` posé par `vibed`, plafond 16 KiB, `O_APPEND`+`O_NOFOLLOW` — même discipline que `journal`/`knowledge`, pas de réécriture ni de fuite hors du store | Phase 2 ✅ |
 | S2 | Audit de tous les accès mémoire | Phase 2–3 |
 | S2 | Mode amnésique (tmpfs) | Phase 3 |
 | S2 | Contrôle d'egress réseau par agent | Phase 6+ |
