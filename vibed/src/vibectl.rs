@@ -2,10 +2,12 @@
 //! unit-testable without spawning the binary. The thin front-end lives in
 //! `src/bin/vibectl.rs`.
 //!
-//! v0.1 perimeter (ROADMAP Phase 3 "Ébauche de vibectl"): READ-ONLY memory
-//! status and audit-chain verification. Destructive actions (factory reset =
-//! T3) are deliberately NOT here yet — they require the human-approval flow
-//! (Phase 4) and must never be a bare CLI switch.
+//! v0.1 perimeter (ROADMAP Phase 3 "Ébauche de vibectl"): read-only memory
+//! status and audit-chain verification, plus the operator side of the approval
+//! flow (`approve`/`deny`, root-gated — the one place vibectl writes). Truly
+//! destructive actions (factory reset = T3) are deliberately NOT here yet — they
+//! require the full human-approval flow (Phase 4) and must never be a bare CLI
+//! switch.
 
 use std::path::Path;
 
@@ -40,23 +42,40 @@ pub fn approvals_list() -> Value {
     json!({ "pending": approval::list_pending(Path::new(approval::APPROVAL_DIR)) })
 }
 
-/// `vibectl approve <id>` — grant a pending request (operator action; the store
-/// is root-only, so the OS permissions restrict this to root). Returns
-/// `(report, ok)`.
+/// Only the operator (root) may grant or deny approvals. The approval store is
+/// already root-only at the filesystem level; this makes the trust boundary
+/// explicit and turns a would-be opaque "permission denied" into a clear
+/// message. Fail-closed: if the euid cannot be determined, refuse.
+fn require_root(euid: Option<u32>) -> Result<(), Value> {
+    match euid {
+        Some(0) => Ok(()),
+        Some(uid) => Err(json!({
+            "error": format!("must be root to approve/deny approvals (euid={uid}); use sudo")
+        })),
+        None => Err(json!({
+            "error": "cannot determine caller euid (/proc unavailable); refusing to approve/deny"
+        })),
+    }
+}
+
+/// `vibectl approve <id>` — grant a pending request (operator action, root only).
+/// Returns `(report, ok)`.
 pub fn approve(id: &str) -> (Value, bool) {
-    match approval::approve(
-        Path::new(approval::APPROVAL_DIR),
-        id,
-        current_euid(),
-        now_epoch_secs(),
-    ) {
+    let euid = current_euid();
+    if let Err(e) = require_root(euid) {
+        return (e, false);
+    }
+    match approval::approve(Path::new(approval::APPROVAL_DIR), id, euid, now_epoch_secs()) {
         Ok(grant) => (json!({"approved": id, "grant": grant}), true),
         Err(e) => (json!({"error": e.to_string(), "id": id}), false),
     }
 }
 
-/// `vibectl deny <id>` — reject and remove a pending request.
+/// `vibectl deny <id>` — reject and remove a pending request (root only).
 pub fn deny(id: &str) -> (Value, bool) {
+    if let Err(e) = require_root(current_euid()) {
+        return (e, false);
+    }
     match approval::deny(Path::new(approval::APPROVAL_DIR), id) {
         Ok(()) => (json!({"denied": id}), true),
         Err(e) => (json!({"error": e.to_string(), "id": id}), false),
@@ -338,5 +357,15 @@ mod tests {
         let (report, ok) = audit_verify(Path::new("/nonexistent-audit.jsonl"));
         assert!(ok);
         assert_eq!(report["records"], 0);
+    }
+
+    #[test]
+    fn only_root_may_approve_or_deny() {
+        assert!(require_root(Some(0)).is_ok(), "root is allowed");
+        // A non-root operator is refused with a clear message, not a file error.
+        let err = require_root(Some(1000)).unwrap_err();
+        assert!(err["error"].as_str().unwrap().contains("must be root"));
+        // Fail-closed when euid is unknown.
+        assert!(require_root(None).is_err(), "refuse when euid unknown");
     }
 }
