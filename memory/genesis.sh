@@ -78,16 +78,26 @@ toml_escape() {
     printf '%s' "$s"
 }
 
+# Read the current hostname, but NEVER bake a transient install-time default
+# (localhost/fedora before the installer or NetworkManager sets the real name)
+# as the machine's BIRTH name — the birth identity is a signature concept, and
+# the stable anchor is machine_id anyway. A transient default becomes "unknown"
+# (the persistent name is picked up on a later reboot / by vibectl).
 get_hostname() {
+    raw=""
     if command -v hostname >/dev/null 2>&1; then
-        hostname 2>/dev/null || printf 'unknown'
+        raw=$(hostname 2>/dev/null || true)
     elif [ -r /proc/sys/kernel/hostname ]; then
-        cat /proc/sys/kernel/hostname
+        raw=$(cat /proc/sys/kernel/hostname 2>/dev/null || true)
     elif [ -n "${HOSTNAME:-}" ]; then
-        printf '%s' "${HOSTNAME}"
-    else
-        printf 'unknown'
+        raw="${HOSTNAME}"
     fi
+    case "${raw}" in
+        '' | localhost | localhost.localdomain | fedora | localhost.* )
+            printf 'unknown' ;;
+        *)
+            printf '%s' "${raw}" ;;
+    esac
 }
 
 get_machine_id() {
