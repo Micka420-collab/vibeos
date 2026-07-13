@@ -55,6 +55,24 @@
 - **Hygiène PR** : PR #5 (branche→main) mergée à l'état du matin ; ~44 commits
   d'après-midi orphelins → nouvelle **PR draft #11 (branche → main)** pour les
   rapatrier. Sort de PR #4 (empilée) laissé à l'humain.
+
+**Nuit — nettoyage + vérifications réelles (8 points demandés)**, tout poussé sur PR #11 :
+1. **Traçabilité des 5 findings** : table finding→correctif→commit (`7e1f0c3`)→test
+   ci-dessous ; **test dédié C2 ajouté** (`agent_run_returns_even_when_a_grandchild_holds_the_pipe`).
+2. **Blocage Zed re-qualifié** (`BLOCKERS.md`) : l'extension (agent ACP stdio) se
+   valide **sans Zed** — `tsc` + boot ACP headless (`npm run smoke`) + 17 tests ;
+   seul le **E2E complet** reste bloqué (liste précise de ce qui manque).
+3. **Preuve de déterminisme** (`test/patch.test.ts`) : même entrée ×20 → décision
+   identique, 1 `policy.check`/appel, **zéro LLM**.
+4. **Kill-switch mesuré** : `agent stop` → **2,636 s** (< 5 s), dernier append
+   raisonnement = JSON complet. Critère Phase 2.5 atteint (mesuré).
+5. **policy.check anti-DoS confirmé par test** (rate-limité par uid, sortie bornée).
+6. **Plan supply-chain npm** (`ADR-015`) + **lockfile commité**.
+7. **Passe de cohérence** : 140 Rust + 17 vitest partout, statuts ADR/ROADMAP recalés.
+8. **PR #11 rendue vraiment mergeable** : la CI échouait (MSRV 1.75 + cargo audit)
+   car **main portait un bump Dependabot `toml 1.1.2`** (→ `serde_spanned 1.1.1`)
+   incompatible MSRV 1.75. Merge de main + **revert du bump toml** (garde `0.8`) +
+   règle Dependabot. **CI Rust re-verte** ; PR MERGEABLE.
 - **État** : **139 tests vibed verts** (132 unit + 5 e2e MCP + 2 politique) +
   outil T0 `policy.check` (groundwork Zed) + **12 tests vitest** de l'extension ;
   clippy `--locked` + fmt propres.
@@ -168,34 +186,46 @@ e2e + 2 politique) ; `clippy --all-targets --locked -D warnings` 0 warning ;
 Images `vibeos:dev-final`, `dev-final2` **et** `dev-final3` (arbre final complet)
 construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erreur).
 
-## 🔧 En cours / non terminé
+## 🔧 En cours / non terminé (checkpoint 2026-07-13 nuit)
 
-- **F6 (découpe de `mcp.rs`, ~3000 lignes)** en `tools/{fs,memory,svc,sectools}.rs`
-  — refactor mécanique **non fait** : risqué en fin de créneau, gain surtout
-  ergonomique. À faire dans une session dédiée (le protocole décourage le
-  refactor cosmétique sans gain mesuré ; celui-ci se justifie par la réduction
-  du risque de conflit pour les sessions autonomes futures).
-- **Durcissement systemd** (task 20) et **supply-chain CI SBOM/SLSA/scan**
-  (task 17) : identifiés, non commencés (hors liste de priorités du protocole).
+- **Zed — E2E complet** : le cœur du fork est livré et **vérifié sans Zed**
+  (`tsc` + 17 tests + boot ACP headless) ; il reste le test bout-en-bout en
+  session réelle → voir **`BLOCKERS.md`** (liste précise).
+- **Zed — câblage dans l'image** : délibérément **pas fait** tant que l'E2E n'est
+  pas validé (ne pas ship ~148 paquets npm non éprouvés). Plan : **ADR-015**.
+- **Phase 2.5 — reste** : unité `vibeos-agent@.service` (always-on par défaut),
+  **auth par abonnement scellée TPM2**, **allowlist d'egress par unité**.
+- **F6 (découpe de `mcp.rs`)** : toujours différé (refactor mécanique ; protocole
+  décourage le cosmétique sans gain mesuré).
+- **Backends T2 réels** (`pkg.install`/`svc.restart`) : encore des stubs — la
+  plomberie d'approbation est prête, l'exécution réelle est **Phase 4**.
 
-## 🚧 Blockers (rien de dur — travail humain requis)
+## 🚧 Blockers (précis)
 
-- **Merge** : les 4 draft PRs empilées attendent la revue et le merge dans
-  l'ordre **#1 → #2 → #3 → #4** (je ne merge jamais).
+- **Zed E2E** : nécessite (1) le **binaire natif du Claude Agent SDK**, (2) un
+  **`vibed` démarré** servant `policy.check` sur `/run/vibed/mcp.sock`, (3) un
+  **client ACP complet** (Zed — non installable headless ici — ou un harnais
+  maison). Détail dans `BLOCKERS.md`.
 - **Validation VM/matériel** (Phase 1) : boot ISO amd64+arm64, NVIDIA, `ollama
   run` hors-ligne, `bootc upgrade/rollback` — exigent une vraie machine.
-- Confirmation CI du `bootc container lint` (les rebuilds locaux ont été tués à
-  répétition ; correctifs d'hygiène en place, la CI fera foi).
+- **Merge des PR** : PR #11 (branche → main) est **MERGEABLE + CI Rust verte** ;
+  reste la revue humaine + le merge (je ne merge jamais). Le sort de PR #4
+  (empilée, cible `phase2-supply-chain`) est à trancher côté humain.
 
 ## ➡️ Prochaine étape recommandée
 
-1. **Merger la pile** (#1→#4), puis lancer la CI/une release `v*` pour valider
-   `bootc container lint` + les nouveaux jobs (cargo audit, smoke Genesis).
-2. **Backends T2 réels** derrière l'approbation : `svc.restart` via `systemctl`
-   (comme `svc.status`) — la plomberie d'approbation est prête, il manque
-   l'exécution réelle pour la démo « l'agent demande, l'humain approuve,
-   l'unité redémarre, l'audit le prouve ».
-3. **Branchement live du HUD** sur le socket (`Quickshell.Io`) + le dialogue
-   d'approbation Plasma (présentation de F3).
-4. **F6** : découper `mcp.rs`.
-5. Phase 3 : LUKS/TPM2 de la mémoire, sandbox par outil (seccomp/Landlock).
+1. **Merger PR #11 → main** (CI Rust verte ; laisser finir le build image ~15 min),
+   puis clore/retirer PR #4 (superseded).
+2. **Zed E2E** sur une machine avec Zed + un `vibed` local : lancer une session,
+   déclencher un `vibeos:fs.read` (T0, doit passer sans prompt) et un `pkg.install`
+   (T2, doit prompter) ; étendre `scripts/smoke-acp.mjs` en client ACP complet
+   pour automatiser sans éditeur.
+3. **Câbler l'extension dans l'image** selon **ADR-015** (étage npm dédié, `npm ci
+   --ignore-scripts --omit=dev`, seul `dist/` copié).
+4. **Phase 2.5 reste** : auth abonnement TPM2 (`systemd-creds`), allowlist egress,
+   unité always-on.
+5. **Backends T2 réels** derrière l'approbation (`svc.restart` via `systemctl`) —
+   la démo « l'agent demande, l'humain approuve, l'unité redémarre, l'audit le
+   prouve ».
+6. **Branchement live du HUD** (`Quickshell.Io`) + Phase 3 (LUKS/TPM2, sandbox
+   par outil).
