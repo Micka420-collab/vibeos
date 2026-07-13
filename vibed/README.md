@@ -61,8 +61,8 @@ sequenceDiagram
 | `fs.read` | T0 | Allow (confiné) | Lecture de fichier (UTF-8 lossy, tronqué à 256 KiB). **Confiné au home de l'appelant** (SO_PEERCRED) + arbres système non personnels (`/etc /usr /proc /sys /run /var/lib/vibeos`) — les fichiers d'un **autre utilisateur** sont refusés ; denylist codée en dur + `paths.denied` par-dessus ; re-vérification sur le chemin canonicalisé (symlinks) |
 | `fs.list` | T0 | Allow (confiné) | Listing **non récursif** d'un répertoire (nom, type, taille des fichiers réguliers ; plafond 500 entrées + `limit`). **Même confinement** que `fs.read` (home appelant + arbres système) et même denylist ; les symlinks sont signalés mais **jamais suivis** |
 | `fs.write` | T1 | Allow (périmètre restreint) | Écriture restreinte à `/home/**` et `/var/home/**` **uniquement** (sur Fedora, `/home` est un lien vers `/var/home`) ; la mémoire VibeOS n'est **pas** inscriptible par `fs.write` — son chemin d'écriture gouverné est `memory.append` |
-| `pkg.install` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucun paquet installé |
-| `svc.restart` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucune unité redémarrée |
+| `pkg.install` | T2 | **RequireApproval** | Crée une requête d'approbation (`vibectl approve <id>`) ; backend d'install = stub v0.1 (aucun paquet installé même après approbation) |
+| `svc.restart` | T2 | **RequireApproval** | Crée une requête d'approbation (`vibectl approve <id>`) ; backend systemd = stub v0.1 (aucune unité redémarrée même après approbation) |
 | `svc.status` | T0 | Allow | État d'une unité systemd en lecture seule (`systemctl show` : load/active/sub state, unit file state) ; validation stricte du nom d'unité en code (pas d'injection d'option ni de chemin), environnement vidé, chemin absolu |
 | `sectools.list` | T0 | Allow | Découverte **en lecture seule** de la trousse cybersécurité (`/usr/share/vibeos/security-tools.tsv`) : nom, catégorie, tier gouvernant l'invocation agent, présence — **n'exécute aucun outil** (lancer un outil T2/T3 = chemin séparé, approbation humaine ; voir [../docs/SECURITY-TOOLKIT.md](../docs/SECURITY-TOOLKIT.md)) |
 | `memory.query` | T0 | Allow | Recherche par sous-chaîne (nom **et contenu**) dans `/var/lib/vibeos/memory`, chaque match rendu **avec un extrait de contenu borné** (lecture de la mémoire en un seul appel, pas de `fs.read` de suivi) ; arguments `query`, `scope` (identity/hardware/user/projects/journal/knowledge) et `limit` (drapeau `truncated`) — voir `docs/MEMORY.md` §9 |
@@ -178,7 +178,7 @@ wsl -d Ubuntu
 cd "/mnt/f/je ne sais pas encore/vibed"   # attention aux espaces : garder les guillemets
 
 cargo build --locked      # Cargo.lock est commité (épinglage supply-chain, voir SECURITY.md)
-cargo test                 # 90 tests unitaires + 6 tests d'intégration
+cargo test                 # 94 tests unitaires + 6 tests d'intégration
                            # (2 politique réelle + 4 MCP bout-en-bout sur socketpair)
 # le crate produit deux binaires : vibed (démon) et vibectl (CLI admin)
 ```

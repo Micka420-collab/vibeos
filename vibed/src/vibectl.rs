@@ -11,7 +11,57 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::audit;
+use crate::{approval, audit};
+
+/// Current effective uid, parsed from `/proc/self/status` (no libc), for the
+/// `granted_by` field of an approval. `None` if it cannot be read.
+fn current_euid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            // Uid: <real> <effective> <saved> <fs>
+            let mut fields = rest.split_whitespace();
+            let _real = fields.next();
+            return fields.next().or(_real).and_then(|s| s.parse().ok());
+        }
+    }
+    None
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `vibectl approvals list` — pending human-approval requests.
+pub fn approvals_list() -> Value {
+    json!({ "pending": approval::list_pending(Path::new(approval::APPROVAL_DIR)) })
+}
+
+/// `vibectl approve <id>` — grant a pending request (operator action; the store
+/// is root-only, so the OS permissions restrict this to root). Returns
+/// `(report, ok)`.
+pub fn approve(id: &str) -> (Value, bool) {
+    match approval::approve(
+        Path::new(approval::APPROVAL_DIR),
+        id,
+        current_euid(),
+        now_epoch_secs(),
+    ) {
+        Ok(grant) => (json!({"approved": id, "grant": grant}), true),
+        Err(e) => (json!({"error": e.to_string(), "id": id}), false),
+    }
+}
+
+/// `vibectl deny <id>` — reject and remove a pending request.
+pub fn deny(id: &str) -> (Value, bool) {
+    match approval::deny(Path::new(approval::APPROVAL_DIR), id) {
+        Ok(()) => (json!({"denied": id}), true),
+        Err(e) => (json!({"error": e.to_string(), "id": id}), false),
+    }
+}
 
 /// Default runtime marker written by the amnesic generator
 /// (`/run/vibeos/memory-mode`): `amnesic` | `persistent`.

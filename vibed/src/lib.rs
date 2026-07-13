@@ -3,6 +3,7 @@
 //! against the real repository policy files. The daemon entry point lives
 //! in `main.rs`.
 
+pub mod approval;
 pub mod audit;
 pub mod glob;
 pub mod mcp;

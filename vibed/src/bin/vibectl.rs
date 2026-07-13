@@ -17,12 +17,15 @@ use vibed::vibectl;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "vibectl — VibeOS operator CLI (read-only in v0.1)\n\
+        "vibectl — VibeOS operator CLI\n\
          \n\
          USAGE:\n\
          \x20 vibectl memory status         memory store summary (JSON)\n\
          \x20 vibectl memory mode           current memory mode (amnesic|persistent)\n\
-         \x20 vibectl audit verify [PATH]   verify the tamper-evident audit chain\n"
+         \x20 vibectl audit verify [DIR]    verify the tamper-evident audit chain\n\
+         \x20 vibectl approvals list        pending T2/T3 human-approval requests\n\
+         \x20 vibectl approve <ID>          grant a pending request (root)\n\
+         \x20 vibectl deny <ID>             reject a pending request (root)\n"
     );
     ExitCode::from(2)
 }
@@ -59,6 +62,37 @@ fn main() -> ExitCode {
         ["audit", "verify"] | ["audit", "verify", _] => {
             let dir = parts.get(2).copied().unwrap_or(DEFAULT_AUDIT_DIR);
             let (report, ok) = vibectl::audit_verify(Path::new(dir));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_default()
+            );
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        ["approvals", "list"] => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&vibectl::approvals_list()).unwrap_or_default()
+            );
+            ExitCode::SUCCESS
+        }
+        ["approve", id] => {
+            let (report, ok) = vibectl::approve(id);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_default()
+            );
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        ["deny", id] => {
+            let (report, ok) = vibectl::deny(id);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).unwrap_or_default()

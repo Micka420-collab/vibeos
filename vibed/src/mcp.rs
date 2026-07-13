@@ -118,6 +118,7 @@ const SYSTEM_READ_PREFIXES: [&str; 6] = [
 /// `/proc/<pid>/task/<tid>/environ` sibling-thread bypass).
 const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "/var/lib/vibeos/audit/**", // audit trail: agents must never see or probe it
+    "/var/lib/vibeos/approvals/**", // approval store: agents must not read or forge grants
     "/etc/shadow*",             // /etc/shadow and /etc/shadow- (password hashes)
     "/etc/gshadow*",            // group password hashes
     "**/.ssh/**",               // SSH key material, wherever it lives
@@ -423,6 +424,32 @@ async fn handle_tools_call(
     };
     let decision = policy.evaluate(&name, tier, ctx);
 
+    // Human-in-the-loop: a T2/T3 RequireApproval becomes Allow ONLY if the
+    // operator has already granted this exact (tool, target, uid) call. The
+    // grant is one-shot and short-lived — consumed here so it can never be
+    // replayed. An agent cannot reach the approval store (root-only + denylist),
+    // so it can never approve its own request.
+    let mut approved = false;
+    let decision = if matches!(decision, Decision::RequireApproval)
+        && crate::approval::check_and_consume_grant(
+            std::path::Path::new(crate::approval::APPROVAL_DIR),
+            &name,
+            target.as_deref(),
+            caller.uid,
+            now_epoch_secs(),
+        ) {
+        approved = true;
+        Decision::Allow
+    } else {
+        decision
+    };
+    let started_outcome = if approved {
+        "started_approved"
+    } else {
+        "started"
+    };
+    let ok_outcome = if approved { "ok_approved" } else { "ok" };
+
     match decision {
         Decision::Deny => {
             try_audit(
@@ -437,6 +464,17 @@ async fn handle_tools_call(
             tool_result(id, format!("policy: tool '{name}' is denied"), true)
         }
         Decision::RequireApproval => {
+            // No fresh grant: record a pending request the operator can act on
+            // with `vibectl approve <id>`, and tell the agent to wait.
+            let request_id = crate::approval::request_approval(
+                std::path::Path::new(crate::approval::APPROVAL_DIR),
+                &name,
+                target.as_deref(),
+                tier.map(Tier::as_str).unwrap_or("?"),
+                caller.uid,
+                now_epoch_secs(),
+            )
+            .ok();
             try_audit(
                 audit,
                 &name,
@@ -447,12 +485,16 @@ async fn handle_tools_call(
                 caller,
             );
             let tier_str = tier.map(Tier::as_str).unwrap_or("?");
+            let how = match &request_id {
+                Some(rid) => format!(
+                    "a human approval was requested (id {rid}); the operator runs \
+                     `vibectl approve {rid}`, then re-issue this call"
+                ),
+                None => "the request was recorded in the audit log".to_string(),
+            };
             tool_result(
                 id,
-                format!(
-                    "policy: tool '{name}' (tier {tier_str}) requires human approval; \
-                     the request was recorded in the audit log (approval workflow: see ROADMAP.md)"
-                ),
+                format!("policy: tool '{name}' (tier {tier_str}) requires human approval; {how}"),
                 true,
             )
         }
@@ -464,7 +506,7 @@ async fn handle_tools_call(
                 &args,
                 target.as_deref(),
                 decision,
-                "started",
+                started_outcome,
                 caller,
             ) {
                 return tool_result(
@@ -490,7 +532,7 @@ async fn handle_tools_call(
                         &args,
                         target.as_deref(),
                         decision,
-                        "ok",
+                        ok_outcome,
                         caller,
                     );
                     // Feed the machine's own memory: record executed,
@@ -579,6 +621,15 @@ fn try_journal_tool_call(name: &str, tier: Option<Tier>, target: Option<&str>, c
     ) {
         warn!("memory journal (tool_call) write failed for '{name}': {e}");
     }
+}
+
+/// Current unix time in whole seconds (0 on a clock error — the approval store
+/// then treats any grant as effectively immediate/expired, fail-safe).
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn try_audit(
@@ -1986,6 +2037,7 @@ mod tests {
     fn builtin_denylist_blocks_reads_of_sensitive_paths() {
         for path in [
             "/var/lib/vibeos/audit/vibed.jsonl",
+            "/var/lib/vibeos/approvals/granted/x.json",
             "/etc/shadow",
             "/etc/shadow-",
             "/home/dev/.ssh/id_ed25519",

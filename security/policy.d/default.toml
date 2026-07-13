@@ -16,7 +16,9 @@
 #     it logs the error and exits non-zero (refuses to serve).
 #
 # BUILT-IN HARD DENYLIST: independently of this file, the engine denies in
-# code, for reads AND writes: /var/lib/vibeos/audit/**, /etc/shadow*,
+# code, for reads AND writes: /var/lib/vibeos/audit/**,
+# /var/lib/vibeos/approvals/** (agents must not read or forge approval grants),
+# /etc/shadow*,
 # /etc/gshadow*, **/.ssh/**, **/.gnupg/**, /etc/ssh/* (+ /etc/ssh/ssh_host_*),
 # **/.aws/**, **/.config/gcloud/**,
 # /etc/NetworkManager/system-connections/**, **/.docker/config.json,
