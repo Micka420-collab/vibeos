@@ -109,13 +109,14 @@ pub fn memory_status_at(root: &Path, marker_path: &Path) -> Value {
     })
 }
 
-/// `vibectl audit verify [path]` — verify the tamper-evident audit chain.
-/// Returns `(json_report, ok)`; the caller maps `ok` to the process exit code.
-pub fn audit_verify(path: &Path) -> (Value, bool) {
-    match audit::verify_chain(path) {
+/// `vibectl audit verify [dir]` — verify the tamper-evident audit chain across
+/// all daily files in `dir`. Returns `(json_report, ok)`; the caller maps `ok`
+/// to the process exit code.
+pub fn audit_verify(dir: &Path) -> (Value, bool) {
+    match audit::verify_chain(dir) {
         Ok(report) => (
             json!({
-                "path": path.to_string_lossy(),
+                "dir": dir.to_string_lossy(),
                 "records": report.records,
                 "ok": report.ok,
                 "broken_at": report.broken_at,
@@ -124,7 +125,7 @@ pub fn audit_verify(path: &Path) -> (Value, bool) {
             report.ok,
         ),
         Err(e) => (
-            json!({"path": path.to_string_lossy(), "ok": false, "error": e.to_string()}),
+            json!({"dir": dir.to_string_lossy(), "ok": false, "error": e.to_string()}),
             false,
         ),
     }

@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use vibed::audit::DEFAULT_AUDIT_PATH;
+use vibed::audit::DEFAULT_AUDIT_DIR;
 use vibed::mcp::MEMORY_DIR;
 use vibed::vibectl;
 
@@ -57,8 +57,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["audit", "verify"] | ["audit", "verify", _] => {
-            let path = parts.get(2).copied().unwrap_or(DEFAULT_AUDIT_PATH);
-            let (report, ok) = vibectl::audit_verify(Path::new(path));
+            let dir = parts.get(2).copied().unwrap_or(DEFAULT_AUDIT_DIR);
+            let (report, ok) = vibectl::audit_verify(Path::new(dir));
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).unwrap_or_default()

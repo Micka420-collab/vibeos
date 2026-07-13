@@ -5,7 +5,7 @@
 - Binaire installé : `/usr/bin/vibed`
 - Unité systemd : `vibed.service`
 - Politique : `/etc/vibeos/policy.d/*.toml` (chargement **fail-closed**)
-- Audit : `/var/lib/vibeos/audit/vibed.jsonl` (append-only, JSON Lines, identité de l'appelant incluse)
+- Audit : `/var/lib/vibeos/audit/vibed-<AAAA-MM-JJ UTC>.jsonl` (append-only, JSON Lines, **un fichier par jour**, chaîne de hachés **continue** entre les jours, identité de l'appelant incluse)
 - Mémoire interrogée : `/var/lib/vibeos/memory` (créée par `vibeos-genesis.service`, source : `memory/genesis.sh`)
 - Socket : `/run/vibed/mcp.sock`, `root:vibeos-agents`, mode `0660`
 
@@ -148,7 +148,10 @@ Le rechargement de la politique se fait par redémarrage du démon (`systemctl r
 
 ## Audit
 
-Chaque appel produit au moins une ligne JSON dans `/var/lib/vibeos/audit/vibed.jsonl` :
+Chaque appel produit au moins une ligne JSON dans le **répertoire** d'audit
+`/var/lib/vibeos/audit/`, **rotation par jour UTC** (`vibed-AAAA-MM-JJ.jsonl`) —
+aucun fichier ne croît sans borne (sinon, disque plein + fail-closed finiraient
+par bloquer tout appel d'outil) :
 
 ```json
 {"seq":42,"prev":"9f2c…","ts_unix_ms":1751500000000,"tool":"fs.write","target":"/var/home/dev/notes.md","args_fnv1a64":"a1b2c3d4e5f60718","decision":"allow","outcome":"ok","caller_uid":1000,"caller_gid":1002,"caller_pid":4242,"hash":"3ab7…"}
@@ -156,11 +159,12 @@ Chaque appel produit au moins une ligne JSON dans `/var/lib/vibeos/audit/vibed.j
 
 - Les arguments ne sont **jamais** journalisés en clair : digest FNV-1a 64 **non cryptographique** (corrélation, pas intégrité). Le champ `target` porte le sujet **non secret** de l'action (chemin, unité, paquet) pour la forensique — jamais de contenu de fichier.
 - L'identité de l'appelant (uid/gid/pid) provient des **peer credentials** du socket unix (`SO_PEERCRED`), capturées à l'accept et estampillées sur chaque enregistrement de la connexion.
-- **Chaînage par hachage (tamper evidence) — livré** : chaque enregistrement porte `seq` (compteur monotone), `prev` (SHA-256 de l'enregistrement précédent) et `hash` (SHA-256 de l'enregistrement lui-même, hors champ `hash`). Toute altération/suppression/réordonnancement casse la chaîne. Vérification :
+- **Chaînage par hachage (tamper evidence) — livré** : chaque enregistrement porte `seq` (compteur monotone), `prev` (SHA-256 de l'enregistrement précédent) et `hash` (SHA-256 de l'enregistrement lui-même, hors champ `hash`). La chaîne est **continue à travers les fichiers datés** (`seq`/`prev` ne se réinitialisent pas au changement de jour — un jour entier ne peut pas être supprimé sans détection). Toute altération/suppression/réordonnancement casse la chaîne. Vérification (parcourt tous les fichiers datés) :
 
   ```bash
-  vibed --verify-audit                 # /var/lib/vibeos/audit/vibed.jsonl
-  vibed --verify-audit /chemin.jsonl   # {"ok":true,"records":N,...}, exit 0/1
+  vibed --verify-audit                 # /var/lib/vibeos/audit/ (défaut)
+  vibed --verify-audit /chemin/audit   # {"ok":true,"records":N,...}, exit 0/1
+  # ou l'équivalent opérateur : vibectl audit verify [répertoire]
   ```
 
   Le SHA-256 est l'implémentation maison **sans dépendance** (`src/sha256.rs`, vecteurs NIST testés), fidèle à la doctrine TCB sans dépendance (glob/FNV faits main). La chaîne est reprise au redémarrage. `fsync` par enregistrement (durabilité). **Reste Phase 4** : ancrage externe de la tête (TPM/Rekor — ferme la troncature du dernier enregistrement) + réplication journald (`docs/SECURITY-ARCHITECTURE.md` §8).
@@ -174,7 +178,7 @@ wsl -d Ubuntu
 cd "/mnt/f/je ne sais pas encore/vibed"   # attention aux espaces : garder les guillemets
 
 cargo build --locked      # Cargo.lock est commité (épinglage supply-chain, voir SECURITY.md)
-cargo test                 # 89 tests unitaires + 6 tests d'intégration
+cargo test                 # 90 tests unitaires + 6 tests d'intégration
                            # (2 politique réelle + 4 MCP bout-en-bout sur socketpair)
 # le crate produit deux binaires : vibed (démon) et vibectl (CLI admin)
 ```

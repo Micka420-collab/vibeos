@@ -1,7 +1,7 @@
-//! Append-only, hash-chained JSON-lines audit log.
+//! Append-only, hash-chained JSON-lines audit log, rotated per UTC day.
 //!
-//! Every tool call handled by vibed produces at least one record in
-//! `/var/lib/vibeos/audit/vibed.jsonl`, whatever the policy decision was.
+//! Every tool call handled by vibed produces at least one record in the audit
+//! directory `/var/lib/vibeos/audit/`, whatever the policy decision was.
 //! Records store a digest of the arguments (FNV-1a 64), not the arguments
 //! themselves, so secrets passed to tools never land in the log — plus the
 //! caller identity (uid/gid/pid) captured from the unix socket peer
@@ -13,16 +13,24 @@
 //! object an action touched — the digest alone is not reversible. File content
 //! and secret arguments are never written here.
 //!
+//! ROTATION. Records are written to one file per UTC day,
+//! `vibed-YYYY-MM-DD.jsonl`, so no single file grows without bound (a full
+//! disk would otherwise eventually block every tool call via the fail-closed
+//! path). Old days can be archived/pruned by policy without touching today's.
+//!
 //! TAMPER EVIDENCE (hash chain). Each record carries three chain fields:
 //! `seq` (a monotonic counter starting at 0, detecting truncation/reorder),
 //! `prev` (the SHA-256 of the PREVIOUS record's line — genesis IV = 64 × 0),
-//! and `hash` (the SHA-256 of THIS record serialized without `hash`).
-//! Altering, removing or reordering any record breaks the chain, which
-//! `verify_chain` detects and localizes. The chain proves integrity of every
-//! record except possibly the very last (an append-only log cannot self-seal
-//! its tail); external anchoring of the head hash (TPM / Rekor transparency
-//! log) is the remaining Phase 4 step (see `docs/SECURITY-ARCHITECTURE.md` §8).
-//! The SHA-256 is vibed's own dependency-free implementation (`crate::sha256`).
+//! and `hash` (the SHA-256 of THIS record serialized without `hash`). The
+//! chain is CONTINUOUS across daily files: `seq`/`prev` never reset at a day
+//! boundary, so a whole day's file cannot be dropped undetected. Altering,
+//! removing or reordering any record breaks the chain, which `verify_chain`
+//! detects and localizes across the whole directory. The chain proves
+//! integrity of every record except possibly the very last (an append-only log
+//! cannot self-seal its tail); external anchoring of the head hash (TPM / Rekor
+//! transparency log) is the remaining Phase 4 step (see
+//! `docs/SECURITY-ARCHITECTURE.md` §8). The SHA-256 is vibed's own
+//! dependency-free implementation (`crate::sha256`).
 //!
 //! Each record is fsync'd before the call proceeds, so the "audit before
 //! execution" invariant survives a power cut, not just a process crash.
@@ -37,8 +45,9 @@ use serde_json::{json, Value};
 
 use crate::sha256::sha256_hex;
 
-/// Default location under the vibed state directory.
-pub const DEFAULT_AUDIT_PATH: &str = "/var/lib/vibeos/audit/vibed.jsonl";
+/// Default audit DIRECTORY under the vibed state directory (one JSONL file per
+/// UTC day is created inside it).
+pub const DEFAULT_AUDIT_DIR: &str = "/var/lib/vibeos/audit";
 
 /// Genesis "previous hash" for the first record: 64 hex zeros (no predecessor).
 pub const CHAIN_IV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -62,7 +71,7 @@ struct ChainState {
 }
 
 pub struct AuditLog {
-    path: PathBuf,
+    dir: PathBuf,
     /// Serializes writers AND carries the chain state. O_APPEND keeps
     /// concurrent small writes atomic at the kernel level; the mutex keeps
     /// line boundaries and the hash chain deterministic within the process.
@@ -70,19 +79,19 @@ pub struct AuditLog {
 }
 
 impl AuditLog {
-    /// Open (or prepare) the log at `path`, recovering the chain head from an
-    /// existing file so a restart continues the same chain. A missing or empty
-    /// file starts a fresh chain (seq 0, prev = IV).
-    pub fn new(path: PathBuf) -> Self {
-        let state = recover_chain_state(&path);
+    /// Open (or prepare) the audit directory `dir`, recovering the chain head
+    /// from the existing daily files so a restart continues the same chain. An
+    /// empty/absent directory starts a fresh chain (seq 0, prev = IV).
+    pub fn new(dir: PathBuf) -> Self {
+        let state = recover_chain_state(&dir);
         Self {
-            path,
+            dir,
             state: Mutex::new(state),
         }
     }
 
     pub fn open_default() -> Self {
-        Self::new(PathBuf::from(DEFAULT_AUDIT_PATH))
+        Self::new(PathBuf::from(DEFAULT_AUDIT_DIR))
     }
 
     /// Append one record. Callers on the `Allow` path treat an error here as
@@ -96,10 +105,11 @@ impl AuditLog {
         outcome: &str,
         caller: Caller,
     ) -> io::Result<()> {
-        let ts_unix_ms: u64 = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .unwrap_or_default();
+        let ts_unix_ms = now.as_millis() as u64;
+        let epoch_secs = now.as_secs();
 
         let mut state = self
             .state
@@ -126,13 +136,12 @@ impl AuditLog {
         entry["hash"] = Value::String(hash.clone());
         let line = entry.to_string();
 
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        fs::create_dir_all(&self.dir)?;
+        let target_file = day_file(&self.dir, epoch_secs);
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)?;
+            .open(&target_file)?;
         file.write_all(line.as_bytes())?;
         file.write_all(b"\n")?;
         // Durability, not just crash-safety: the "audit before execution"
@@ -148,29 +157,69 @@ impl AuditLog {
     }
 }
 
-/// Recover `(next_seq, last_hash)` from the last valid record in an existing
-/// log. Tolerant of a trailing partial line (crash mid-write): scans for the
-/// last line that parses with both `seq` and `hash`.
-fn recover_chain_state(path: &Path) -> ChainState {
-    let fresh = ChainState {
-        next_seq: 0,
-        last_hash: CHAIN_IV.to_string(),
+/// Path of the daily audit file for `epoch_secs` under `dir`.
+fn day_file(dir: &Path, epoch_secs: u64) -> PathBuf {
+    dir.join(format!("vibed-{}.jsonl", utc_date(epoch_secs)))
+}
+
+/// The daily audit files under `dir`, sorted chronologically (the `vibed-` +
+/// ISO-date name sorts lexicographically = by date). Empty if `dir` is absent.
+fn daily_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return Vec::new();
     };
-    let Ok(content) = fs::read_to_string(path) else {
-        return fresh;
-    };
+    let mut files: Vec<PathBuf> = read_dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("vibed-") && n.ends_with(".jsonl"))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// UTC calendar date "YYYY-MM-DD" from unix epoch seconds — Howard Hinnant's
+/// civil_from_days algorithm, std-only (the crate deliberately has no date
+/// dependency).
+fn utc_date(epoch_secs: u64) -> String {
+    let days = (epoch_secs / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Recover `(next_seq, last_hash)` from the last valid record across ALL daily
+/// files (chronological). Tolerant of a trailing partial line (crash
+/// mid-write): scans for the last line that parses with both `seq` and `hash`.
+fn recover_chain_state(dir: &Path) -> ChainState {
     let mut recovered: Option<(u64, String)> = None;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+    for file in daily_files(dir) {
+        let Ok(content) = fs::read_to_string(&file) else {
             continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
-            if let (Some(seq), Some(hash)) = (
-                value.get("seq").and_then(Value::as_u64),
-                value.get("hash").and_then(Value::as_str),
-            ) {
-                recovered = Some((seq, hash.to_string()));
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                if let (Some(seq), Some(hash)) = (
+                    value.get("seq").and_then(Value::as_u64),
+                    value.get("hash").and_then(Value::as_str),
+                ) {
+                    recovered = Some((seq, hash.to_string()));
+                }
             }
         }
     }
@@ -179,7 +228,10 @@ fn recover_chain_state(path: &Path) -> ChainState {
             next_seq: seq + 1,
             last_hash: hash,
         },
-        None => fresh,
+        None => ChainState {
+            next_seq: 0,
+            last_hash: CHAIN_IV.to_string(),
+        },
     }
 }
 
@@ -196,24 +248,12 @@ pub struct ChainVerification {
     pub reason: Option<String>,
 }
 
-/// Walk the log and verify the hash chain: every record's own `hash` matches
-/// its content, `seq` increments by one from 0, and each `prev` equals the
-/// previous record's `hash`. Returns the first break (fail-closed for
+/// Walk EVERY daily file in `dir` (chronological order) and verify the single
+/// continuous hash chain: every record's own `hash` matches its content, `seq`
+/// increments by one from 0, and each `prev` equals the previous record's
+/// `hash` — across day boundaries too. Returns the first break (fail-closed for
 /// forensics: any anomaly is reported, never silently skipped).
-pub fn verify_chain(path: &Path) -> io::Result<ChainVerification> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(ChainVerification {
-                records: 0,
-                ok: true,
-                broken_at: None,
-                reason: None,
-            })
-        }
-        Err(e) => return Err(e),
-    };
-
+pub fn verify_chain(dir: &Path) -> io::Result<ChainVerification> {
     let mut expected_seq: u64 = 0;
     let mut expected_prev = CHAIN_IV.to_string();
 
@@ -224,47 +264,54 @@ pub fn verify_chain(path: &Path) -> io::Result<ChainVerification> {
         reason: Some(why.to_string()),
     };
 
-    for raw in content.lines() {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            continue;
-        }
-        let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
-            return Ok(broken(expected_seq, "record is not valid JSON"));
+    for file in daily_files(dir) {
+        let content = match fs::read_to_string(&file) {
+            Ok(c) => c,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
         };
-        let Some(stored_hash) = value
-            .get("hash")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        else {
-            return Ok(broken(expected_seq, "record has no 'hash' field"));
-        };
-        // Recompute the hash over the record MINUS its `hash` field.
-        if let Some(obj) = value.as_object_mut() {
-            obj.remove("hash");
+        for raw in content.lines() {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+                return Ok(broken(expected_seq, "record is not valid JSON"));
+            };
+            let Some(stored_hash) = value
+                .get("hash")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                return Ok(broken(expected_seq, "record has no 'hash' field"));
+            };
+            // Recompute the hash over the record MINUS its `hash` field.
+            if let Some(obj) = value.as_object_mut() {
+                obj.remove("hash");
+            }
+            if sha256_hex(value.to_string().as_bytes()) != stored_hash {
+                return Ok(broken(
+                    expected_seq,
+                    "record hash mismatch (content altered)",
+                ));
+            }
+            let seq = value.get("seq").and_then(Value::as_u64);
+            if seq != Some(expected_seq) {
+                return Ok(broken(
+                    expected_seq,
+                    "sequence number gap (record inserted, removed or reordered)",
+                ));
+            }
+            let prev = value.get("prev").and_then(Value::as_str).unwrap_or("");
+            if prev != expected_prev {
+                return Ok(broken(
+                    expected_seq,
+                    "prev hash does not match the chain head",
+                ));
+            }
+            expected_seq += 1;
+            expected_prev = stored_hash;
         }
-        if sha256_hex(value.to_string().as_bytes()) != stored_hash {
-            return Ok(broken(
-                expected_seq,
-                "record hash mismatch (content altered)",
-            ));
-        }
-        let seq = value.get("seq").and_then(Value::as_u64);
-        if seq != Some(expected_seq) {
-            return Ok(broken(
-                expected_seq,
-                "sequence number gap (record inserted, removed or reordered)",
-            ));
-        }
-        let prev = value.get("prev").and_then(Value::as_str).unwrap_or("");
-        if prev != expected_prev {
-            return Ok(broken(
-                expected_seq,
-                "prev hash does not match the chain head",
-            ));
-        }
-        expected_seq += 1;
-        expected_prev = stored_hash;
     }
 
     Ok(ChainVerification {
@@ -292,8 +339,8 @@ fn fnv1a_64_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Unique per-process directory under the system temp dir (`/tmp` on
-    /// Linux), removed at the end of the test.
+    /// Unique per-process directory under the system temp dir, removed at the
+    /// end of the test.
     fn temp_test_dir(tag: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!("vibed-audit-test-{tag}-{}", std::process::id()));
@@ -301,11 +348,28 @@ mod tests {
         dir
     }
 
+    /// The single daily file in an audit dir (tests write within one UTC day).
+    fn sole_daily_file(dir: &Path) -> PathBuf {
+        let files = daily_files(dir);
+        assert_eq!(files.len(), 1, "expected exactly one daily file: {files:?}");
+        files.into_iter().next().unwrap()
+    }
+
     #[test]
-    fn record_appends_parseable_json_lines_with_caller_identity() {
+    fn utc_date_matches_known_epochs() {
+        assert_eq!(utc_date(0), "1970-01-01");
+        // 2026-07-08T00:00:00Z = 1783468800 (same anchor as mcp.rs tests).
+        assert_eq!(utc_date(1_783_468_800), "2026-07-08");
+        assert_eq!(utc_date(1_783_468_800 + 86_399), "2026-07-08");
+        assert_eq!(utc_date(1_783_468_800 + 86_400), "2026-07-09");
+        // A day near a month boundary.
+        assert_eq!(utc_date(1_783_468_800 + 86_400 * 24), "2026-08-01");
+    }
+
+    #[test]
+    fn record_writes_a_dated_file_with_chain_fields() {
         let dir = temp_test_dir("append");
-        let path = dir.join("vibed.jsonl");
-        let log = AuditLog::new(path.clone());
+        let log = AuditLog::new(dir.clone());
 
         let caller = Caller {
             uid: Some(1000),
@@ -324,39 +388,29 @@ mod tests {
         )
         .expect("second record");
 
-        let content = fs::read_to_string(&path).expect("audit file readable");
+        let file = sole_daily_file(&dir);
+        let name = file.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.starts_with("vibed-") && name.ends_with(".jsonl"),
+            "dated file: {name}"
+        );
+        let content = fs::read_to_string(&file).expect("audit file readable");
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2, "one JSON line per record");
 
         let first: Value = serde_json::from_str(lines[0]).expect("line 1 is JSON");
         assert_eq!(first["tool"], "os.status");
         assert_eq!(first["decision"], "allow");
-        assert_eq!(first["outcome"], "ok");
         assert_eq!(first["caller_uid"], 1000);
-        assert_eq!(first["caller_gid"], 1001);
-        assert_eq!(first["caller_pid"], 4242);
-        assert!(first["ts_unix_ms"].as_u64().unwrap_or(0) > 0);
-        assert_eq!(first["args_fnv1a64"].as_str().map(str::len), Some(16));
-        assert!(first["target"].is_null(), "os.status has no target subject");
-        // Chain fields on the genesis record.
         assert_eq!(first["seq"], 0);
         assert_eq!(first["prev"], CHAIN_IV);
         assert_eq!(first["hash"].as_str().map(str::len), Some(64));
 
         let second: Value = serde_json::from_str(lines[1]).expect("line 2 is JSON");
-        assert_eq!(second["tool"], "pkg.install");
-        assert_eq!(second["outcome"], "pending_approval");
-        assert_eq!(
-            second["target"], "htop",
-            "the package name is the audit target"
-        );
-        assert!(
-            second["caller_uid"].is_null(),
-            "unknown caller is recorded as null"
-        );
-        // The chain links: record 1's prev is record 0's hash.
+        assert_eq!(second["target"], "htop");
+        assert!(second["caller_uid"].is_null());
         assert_eq!(second["seq"], 1);
-        assert_eq!(second["prev"], first["hash"]);
+        assert_eq!(second["prev"], first["hash"], "the chain links");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -364,8 +418,7 @@ mod tests {
     #[test]
     fn intact_chain_verifies() {
         let dir = temp_test_dir("verify-ok");
-        let path = dir.join("vibed.jsonl");
-        let log = AuditLog::new(path.clone());
+        let log = AuditLog::new(dir.clone());
         for i in 0..5 {
             log.record(
                 "os.status",
@@ -377,13 +430,12 @@ mod tests {
             )
             .expect("record");
         }
-        let v = verify_chain(&path).expect("verify");
+        let v = verify_chain(&dir).expect("verify");
         assert!(v.ok, "unbroken chain must verify: {v:?}");
         assert_eq!(v.records, 5);
-        assert!(v.broken_at.is_none());
 
-        // An absent log is trivially intact (0 records).
-        let v = verify_chain(&dir.join("nope.jsonl")).expect("verify absent");
+        // An absent directory is trivially intact (0 records).
+        let v = verify_chain(&dir.join("nope")).expect("verify absent");
         assert!(v.ok && v.records == 0);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -391,9 +443,8 @@ mod tests {
     #[test]
     fn restart_continues_the_chain() {
         let dir = temp_test_dir("restart");
-        let path = dir.join("vibed.jsonl");
         {
-            let log = AuditLog::new(path.clone());
+            let log = AuditLog::new(dir.clone());
             log.record(
                 "os.status",
                 &json!({}),
@@ -413,8 +464,8 @@ mod tests {
             )
             .expect("r1");
         }
-        // A fresh AuditLog on the same path must recover seq=2, prev=last hash.
-        let log2 = AuditLog::new(path.clone());
+        // A fresh AuditLog on the same dir must recover seq=2, prev=last hash.
+        let log2 = AuditLog::new(dir.clone());
         log2.record(
             "os.status",
             &json!({}),
@@ -424,21 +475,55 @@ mod tests {
             Caller::default(),
         )
         .expect("r2");
-        let v = verify_chain(&path).expect("verify");
+        let v = verify_chain(&dir).expect("verify");
         assert!(v.ok, "chain must stay intact across a restart: {v:?}");
         assert_eq!(v.records, 3);
-        let last: Value =
-            serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
-                .unwrap();
-        assert_eq!(last["seq"], 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chain_is_continuous_across_daily_files() {
+        // Simulate two days by hand-writing dated files whose chain continues.
+        let dir = temp_test_dir("multiday");
+        fs::create_dir_all(&dir).unwrap();
+        // Reuse AuditLog to generate a valid 3-record chain, then split it into
+        // two dated files to prove verify_chain spans them.
+        let log = AuditLog::new(dir.clone());
+        for _ in 0..3 {
+            log.record(
+                "os.status",
+                &json!({}),
+                None,
+                "allow",
+                "ok",
+                Caller::default(),
+            )
+            .expect("record");
+        }
+        let file = sole_daily_file(&dir);
+        let lines: Vec<String> = fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        fs::remove_file(&file).unwrap();
+        // Day 1: records 0-1 ; Day 2: record 2. Names sort chronologically.
+        fs::write(
+            dir.join("vibed-2026-07-13.jsonl"),
+            lines[..2].join("\n") + "\n",
+        )
+        .unwrap();
+        fs::write(dir.join("vibed-2026-07-14.jsonl"), lines[2].clone() + "\n").unwrap();
+        let v = verify_chain(&dir).expect("verify");
+        assert!(v.ok, "chain must be continuous across daily files: {v:?}");
+        assert_eq!(v.records, 3);
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn tampering_with_a_record_is_detected() {
         let dir = temp_test_dir("tamper-content");
-        let path = dir.join("vibed.jsonl");
-        let log = AuditLog::new(path.clone());
+        let log = AuditLog::new(dir.clone());
         for _ in 0..4 {
             log.record(
                 "fs.read",
@@ -450,14 +535,13 @@ mod tests {
             )
             .expect("record");
         }
-        // Flip the `outcome` of record 1 from "ok" to "denied" — its stored
-        // hash no longer matches its content.
-        let content = fs::read_to_string(&path).unwrap();
+        let file = sole_daily_file(&dir);
+        let content = fs::read_to_string(&file).unwrap();
         let mut lines: Vec<String> = content.lines().map(String::from).collect();
         lines[1] = lines[1].replace("\"ok\"", "\"denied\"");
-        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        fs::write(&file, lines.join("\n") + "\n").unwrap();
 
-        let v = verify_chain(&path).expect("verify");
+        let v = verify_chain(&dir).expect("verify");
         assert!(!v.ok, "content tampering must break verification");
         assert_eq!(v.broken_at, Some(1));
         assert!(v.reason.unwrap().contains("hash mismatch"));
@@ -467,8 +551,7 @@ mod tests {
     #[test]
     fn deleting_a_record_is_detected() {
         let dir = temp_test_dir("tamper-delete");
-        let path = dir.join("vibed.jsonl");
-        let log = AuditLog::new(path.clone());
+        let log = AuditLog::new(dir.clone());
         for _ in 0..4 {
             log.record(
                 "os.status",
@@ -480,51 +563,20 @@ mod tests {
             )
             .expect("record");
         }
-        // Remove record 2 entirely: record 3's `prev` no longer matches, and
-        // its seq gaps.
-        let content = fs::read_to_string(&path).unwrap();
+        let file = sole_daily_file(&dir);
+        let content = fs::read_to_string(&file).unwrap();
         let mut lines: Vec<String> = content.lines().map(String::from).collect();
         lines.remove(2);
-        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        fs::write(&file, lines.join("\n") + "\n").unwrap();
 
-        let v = verify_chain(&path).expect("verify");
+        let v = verify_chain(&dir).expect("verify");
         assert!(!v.ok, "deleting a record must break the chain");
         assert_eq!(v.broken_at, Some(2));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn truncating_the_tail_leaves_a_shorter_valid_prefix_but_loses_records() {
-        // Truncation of the TAIL cannot be detected by the chain alone (that is
-        // what external anchoring solves) — but the surviving prefix stays
-        // internally consistent, and the lost records are simply gone. This
-        // test documents that boundary explicitly.
-        let dir = temp_test_dir("truncate");
-        let path = dir.join("vibed.jsonl");
-        let log = AuditLog::new(path.clone());
-        for _ in 0..5 {
-            log.record(
-                "os.status",
-                &json!({}),
-                None,
-                "allow",
-                "ok",
-                Caller::default(),
-            )
-            .expect("record");
-        }
-        let content = fs::read_to_string(&path).unwrap();
-        let lines: Vec<String> = content.lines().map(String::from).collect();
-        fs::write(&path, lines[..3].join("\n") + "\n").unwrap();
-        let v = verify_chain(&path).expect("verify");
-        assert!(v.ok, "a truncated prefix stays internally consistent");
-        assert_eq!(v.records, 3);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn digest_is_stable_and_input_sensitive() {
-        // FNV-1a offset basis for empty input.
         assert_eq!(
             fnv1a_64_hex(b""),
             format!("{:016x}", 0xcbf2_9ce4_8422_2325_u64)

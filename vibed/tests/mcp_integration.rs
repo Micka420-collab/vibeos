@@ -37,7 +37,7 @@ fn repo_policy_dir() -> PathBuf {
 struct Server {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
-    audit_path: PathBuf,
+    audit_dir: PathBuf,
     scratch: PathBuf,
 }
 
@@ -50,11 +50,11 @@ impl Server {
             std::env::temp_dir().join(format!("vibed-mcp-e2e-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch).expect("create scratch dir");
-        let audit_path = scratch.join("audit.jsonl");
+        let audit_dir = scratch.join("audit");
 
         let policy =
             Arc::new(PolicyEngine::load_dir(&repo_policy_dir()).expect("shipped policy must load"));
-        let audit = Arc::new(AuditLog::new(audit_path.clone()));
+        let audit = Arc::new(AuditLog::new(audit_dir.clone()));
         let caller = Caller {
             uid: Some(TEST_UID),
             gid: Some(TEST_UID),
@@ -68,7 +68,7 @@ impl Server {
         Self {
             reader: BufReader::new(read_half),
             writer: write_half,
-            audit_path,
+            audit_dir,
             scratch,
         }
     }
@@ -127,15 +127,31 @@ impl Server {
         (is_error, text)
     }
 
-    /// Parsed audit records written so far. handle_connection audits before
-    /// responding, so once a response was read the records are on disk.
+    /// Parsed audit records written so far, across the daily files in the audit
+    /// directory (chronological). handle_connection audits before responding,
+    /// so once a response was read the records are on disk.
     fn audit_records(&self) -> Vec<Value> {
-        let Ok(content) = std::fs::read_to_string(&self.audit_path) else {
+        let Ok(read_dir) = std::fs::read_dir(&self.audit_dir) else {
             return Vec::new();
         };
-        content
-            .lines()
-            .map(|l| serde_json::from_str(l).expect("audit line is valid JSON"))
+        let mut files: Vec<PathBuf> = read_dir
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("vibed-") && n.ends_with(".jsonl"))
+            })
+            .collect();
+        files.sort();
+        files
+            .iter()
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+            .flat_map(|c| {
+                c.lines()
+                    .map(|l| serde_json::from_str(l).expect("audit line is valid JSON"))
+                    .collect::<Vec<Value>>()
+            })
             .collect()
     }
 

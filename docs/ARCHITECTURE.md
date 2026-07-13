@@ -22,7 +22,7 @@ flowchart TB
     subgraph L4["Couche Contrôle IA — vibed"]
         MCP["Serveur MCP (JSON-RPC 2.0)<br/>/run/vibed/mcp.sock"]
         POL["Moteur de politiques<br/>/etc/vibeos/policy.d/*.toml<br/>Tiers T0 → T3"]
-        AUD["Journal d'audit JSONL<br/>/var/lib/vibeos/audit/vibed.jsonl"]
+        AUD["Journal d'audit JSONL<br/>/var/lib/vibeos/audit/ (par jour)"]
         SBX["Exécution des outils<br/>v0.1 : in-process —<br/>sandbox systemd-run/seccomp/landlock : Phase 3"]
     end
 
@@ -121,7 +121,7 @@ Chaque outil MCP exposé par `vibed` est classé dans un tier. Le moteur lit `/e
 | **T2** | modify-system | Paquets, services, configuration système | **ask** — approbation humaine requise |
 | **T3** | destructive | Disques, credentials, identité réseau | **ask** — approbation humaine requise + confirmation renforcée |
 
-Toute décision (y compris les refus) est écrite dans le **journal d'audit** `/var/lib/vibeos/audit/vibed.jsonl` : horodatage, identité de l'appelant (uid/gid/pid — peer credentials), outil appelé, digest FNV-1a des arguments (non cryptographique, pour corrélation), tier, décision, résultat d'exécution. En v0.1 le journal est un JSONL **append-only** simple ; le chaînage par hachage, la réplication dans le journal systemd et le scellement TPM sont prévus en **Phase 4** (voir [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) §8).
+Toute décision (y compris les refus) est écrite dans le **journal d'audit** `/var/lib/vibeos/audit/` (un fichier `vibed-AAAA-MM-JJ.jsonl` par jour UTC) : horodatage, identité de l'appelant (uid/gid/pid — peer credentials), outil appelé, digest FNV-1a des arguments (non cryptographique, pour corrélation), tier, décision, résultat d'exécution. Le journal est **append-only et chaîné par hachage SHA-256** (`seq`/`prev`/`hash`, continu entre les jours ; vérifiable par `vibed --verify-audit`) ; l'**ancrage externe** de la tête (TPM/Rekor) et la réplication journald sont prévus en **Phase 4** (voir [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) §8).
 
 ### 4.3 Exécution des outils — v0.1 (in-process) et cible sandbox (Phase 3)
 
@@ -149,7 +149,7 @@ sequenceDiagram
     participant M as vibed — serveur MCP<br/>/run/vibed/mcp.sock
     participant P as Moteur de politiques<br/>/etc/vibeos/policy.d/*.toml
     participant H as Humain<br/>(dialogue Plasma)
-    participant J as Journal d'audit<br/>/var/lib/vibeos/audit/vibed.jsonl
+    participant J as Journal d'audit<br/>/var/lib/vibeos/audit/ (par jour)
 
     A->>M: tools/call (JSON-RPC 2.0)<br/>ex. pkg.install("ripgrep")
     M->>M: Identité du pair (SO_PEERCRED :<br/>uid/gid/pid → audit)
@@ -257,7 +257,7 @@ flowchart LR
 | Boot vérifié | Secure Boot + composefs/fs-verity (v0.1) ; UKI + mesures TPM2 : **Phase 4** | UEFI Secure Boot ; TPM2 (PCR) en Phase 4 | ESP (`/boot/efi`) |
 | `vibed` | Démon système IA (Rust/tokio) — binaire embarqué dans l'image, démarre au boot | MCP JSON-RPC 2.0 sur socket Unix (`root:vibeos-agents` 0660) | `/usr/bin/vibed`, `vibed.service`, `/run/vibed/mcp.sock`, `usr/lib/sysusers.d/vibeos.conf` |
 | Moteur de politiques | Décision allow/deny/ask par tier T0–T3 — première règle qui matche, default-deny, fail-closed | Fichiers TOML, évalué in-process par vibed | `/etc/vibeos/policy.d/*.toml` |
-| Journal d'audit | Trace de chaque appel d'outil | JSONL append-only (chaînage de hachés + réplication journald : **Phase 4**) | `/var/lib/vibeos/audit/vibed.jsonl` |
+| Journal d'audit | Trace de chaque appel d'outil | JSONL append-only, chaîné SHA-256 (ancrage TPM/Rekor + journald : **Phase 4**) | `/var/lib/vibeos/audit/ (par jour)` |
 | Sandbox d'exécution (**Phase 3**) | Isolation des outils approuvés — v0.1 : exécution in-process | Unités systemd transitoires (seccomp, landlock) — Phase 3 | Profils par tier (Phase 3) |
 | Genesis | Création de la mémoire au premier boot (arborescence, identité, journal — pas de cryptsetup/mkfs/montage) | Unité systemd one-shot (condition sur `.initialized`), env `VIBEOS_MEMORY_MODE` | `vibeos-genesis.service`, `/usr/libexec/vibeos/genesis.sh` (source : `memory/genesis.sh`) |
 | Mémoire | État persistant de la machine | v0.1 : répertoire en clair `root:root` 0700 ; **Phase 3** : volume LUKS2 (ou tmpfs en amnésique) | `/var/lib/vibeos/memory`, marqueur `.initialized` |
