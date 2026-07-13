@@ -424,7 +424,7 @@ Phase 3+** : la matérialisation du *fold* (vue courante profil/index) côté
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
-| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`) | ✅ **livré** (scope/limit depuis v0.2) |
+| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** | ✅ **livré** (scope/limit + extraits depuis v0.2) |
 | `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`, `knowledge`, `user`, `projects` (tous append-only) |
 
 Points durs :
@@ -466,9 +466,12 @@ Trois arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
 sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` | `user` |
 `projects` | `journal` | `knowledge` (restreint la marche à une entrée du
 layout §3 ; un scope inconnu est une erreur explicite) et `limit` (entier ≥ 1,
-plafond de résultats — la réponse porte un drapeau `truncated`). Réponse :
-contenu MCP standard (`result.content`) portant les entrées trouvées en JSON.
-La marche reste bornée en dur (200 fichiers, 64 KiB scannés par fichier).
+plafond de résultats — la réponse porte un drapeau `truncated`). Chaque match
+est rendu `{ "file": <chemin relatif>, "snippet": <extrait de contenu borné,
+≤ 1024 caractères>, "snippet_truncated": <bool> }` : l'agent **lit la mémoire
+en un seul appel**, sans enchaîner un `fs.read` sur le chemin absolu — la lecture
+est le rôle de `memory.query`, conformément à cette spec. La marche reste bornée
+en dur (200 fichiers, 64 KiB scannés par fichier, extrait ≤ 1024 caractères).
 
 **Cible ultérieure** : la recherche sémantique via `knowledge/embeddings/`.
 

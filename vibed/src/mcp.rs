@@ -51,6 +51,9 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const O_NOFOLLOW: i32 = 0x20000;
 /// Per-file cap when scanning memory content in memory.query.
 const MAX_MEMORY_SCAN_BYTES: usize = 64 * 1024;
+/// Chars of content returned per match by memory.query (so an agent can read
+/// the memory in ONE call, not query + fs.read). Bounded to keep responses small.
+const MEMORY_SNIPPET_CHARS: usize = 1024;
 /// Hard cap on entries returned by one fs.list call.
 const MAX_LIST_ENTRIES: usize = 500;
 /// Upper bound on files walked by memory.query.
@@ -675,8 +678,10 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
         (
             "memory.query",
             Tier::T0,
-            "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match \
-             files, optionally restricted to one scope and capped by limit (docs/MEMORY.md §9)",
+            "Query the VibeOS memory store (/var/lib/vibeos/memory): substring-match files by \
+             name and content, returning each match WITH a bounded content snippet (read the \
+             memory in one call, no follow-up fs.read). Optional 'scope' \
+             (identity/hardware/user/projects/journal/knowledge) and 'limit' (docs/MEMORY.md §9)",
             json!({"type": "object",
             "properties": {
                 "query": {"type": "string"},
@@ -1444,11 +1449,30 @@ fn memory_query(args: &Value) -> Result<String, String> {
     memory_query_at(std::path::Path::new(MEMORY_DIR), args)
 }
 
+/// Read up to MAX_MEMORY_SCAN_BYTES of `path` (bounded, O_NOFOLLOW) and return
+/// the UTF-8-lossy text plus whether the file exceeded the scan window. The
+/// bound caps the allocation; O_NOFOLLOW refuses a final component swapped for
+/// a symlink (TOCTOU) instead of following it out of the store.
+fn read_memory_scan(path: &std::path::Path) -> Option<(String, bool)> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.take((MAX_MEMORY_SCAN_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let longer = bytes.len() > MAX_MEMORY_SCAN_BYTES;
+    let end = bytes.len().min(MAX_MEMORY_SCAN_BYTES);
+    Some((String::from_utf8_lossy(&bytes[..end]).into_owned(), longer))
+}
+
 /// Body of memory.query with the store root as a parameter, so the tests can
 /// run it against a scratch layout without touching /var/lib/vibeos/memory.
 fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -1554,36 +1578,31 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        if query.is_empty() {
-            matches.push(json!({ "file": relative }));
+        // Read a bounded window ONCE and reuse it for both the content match
+        // test and the returned snippet.
+        let scanned = read_memory_scan(path);
+        let name_hit = !query.is_empty() && relative.to_lowercase().contains(&query);
+        let content_hit = !query.is_empty()
+            && scanned
+                .as_ref()
+                .is_some_and(|(text, _)| text.to_lowercase().contains(&query));
+        if !(query.is_empty() || name_hit || content_hit) {
             continue;
         }
-        let name_hit = relative.to_lowercase().contains(&query);
-        // Bounded scan: never pull more than MAX_MEMORY_SCAN_BYTES of one file
-        // into memory (same take() discipline as fs.read) — a huge file in the
-        // store must not translate into an unbounded allocation. O_NOFOLLOW:
-        // the file was a regular file when the walk collected it; if it was
-        // swapped for a symlink before this open (TOCTOU), open() fails with
-        // ELOOP instead of following it out of the store.
-        let content_hit = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(O_NOFOLLOW)
-            .open(path)
-            .ok()
-            .is_some_and(|file| {
-                use std::io::Read;
-                let mut bytes = Vec::new();
-                let ok = file
-                    .take(MAX_MEMORY_SCAN_BYTES as u64)
-                    .read_to_end(&mut bytes)
-                    .is_ok();
-                ok && String::from_utf8_lossy(&bytes)
-                    .to_lowercase()
-                    .contains(&query)
-            });
-        if name_hit || content_hit {
-            matches.push(json!({ "file": relative }));
-        }
+        // Bounded snippet so the agent can read the memory in this single call.
+        let (snippet, snippet_truncated) = match &scanned {
+            Some((text, longer)) => {
+                let snippet: String = text.chars().take(MEMORY_SNIPPET_CHARS).collect();
+                let trunc = *longer || snippet.chars().count() < text.chars().count();
+                (snippet, trunc)
+            }
+            None => (String::new(), false),
+        };
+        matches.push(json!({
+            "file": relative,
+            "snippet": snippet,
+            "snippet_truncated": snippet_truncated
+        }));
     }
 
     Ok(json!({
@@ -2914,6 +2933,39 @@ mod tests {
         // a scope never leaks files from another scope.
         let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
         assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_returns_bounded_content_snippets() {
+        // The agent must be able to READ the memory in one call, not just learn
+        // filenames (F2). Each match carries a bounded snippet.
+        let root = memory_scratch("qsnippet");
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "identity"})));
+        let m = &payload["matches"][0];
+        assert_eq!(m["file"], "identity.toml");
+        assert!(
+            m["snippet"].as_str().unwrap().contains("testhost"),
+            "snippet must carry the file content, got: {}",
+            m["snippet"]
+        );
+        assert_eq!(m["snippet_truncated"], false);
+
+        // A file larger than the snippet window is flagged truncated and capped.
+        std::fs::write(
+            root.join("knowledge").join("big.md"),
+            "x".repeat(MEMORY_SNIPPET_CHARS * 4),
+        )
+        .unwrap();
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
+        let big = payload["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["file"] == "knowledge/big.md")
+            .expect("big.md listed");
+        assert!(big["snippet"].as_str().unwrap().chars().count() <= MEMORY_SNIPPET_CHARS);
+        assert_eq!(big["snippet_truncated"], true);
         let _ = std::fs::remove_dir_all(&root);
     }
 
