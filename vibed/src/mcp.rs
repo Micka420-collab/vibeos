@@ -86,6 +86,24 @@ const MEMORY_SCOPES: [(&str, &str, bool); 6] = [
 /// (rule fs-write-user) and vibed.service (`ReadWritePaths=/var/home`).
 const USER_WRITE_PREFIXES: [&str; 2] = ["/home/", "/var/home/"];
 
+/// System locations fs.read / fs.list may reach OUTSIDE the caller's own home.
+/// vibed runs as root, so without confinement a T0 read would expose every
+/// user's personal files (docs, photos…) to any agent. Reads are therefore
+/// restricted to the caller's own home (resolved from SO_PEERCRED) OR these
+/// non-personal system trees. The built-in denylist still applies on top (it
+/// carves the secrets — /etc/shadow, ~/.ssh, /proc/**/environ… — back out).
+/// Deliberately EXCLUDED: /home and /var/home at large (other users), /root,
+/// /tmp and /var (other users' state), /boot (denylisted). /var/lib/vibeos is
+/// the machine's own state (memory readable here too; audit stays denylisted).
+const SYSTEM_READ_PREFIXES: [&str; 6] = [
+    "/etc/",
+    "/usr/",
+    "/proc/",
+    "/sys/",
+    "/run/",
+    "/var/lib/vibeos/",
+];
+
 /// BUILT-IN hard denylist, enforced in code regardless of what the loaded
 /// policy says (defense in depth: a mistaken or tampered policy drop-in can
 /// never expose these). Applies to reads AND writes.
@@ -594,8 +612,10 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
         (
             "fs.read",
             Tier::T0,
-            "Read a file as UTF-8 (lossy), truncated at 256 KiB; audit trail, \
-             secret stores and key material are denied by the built-in denylist",
+            "Read a file as UTF-8 (lossy), truncated at 256 KiB. Confined to the CALLER's own \
+             home (SO_PEERCRED) plus non-personal system trees (/etc /usr /proc /sys /run \
+             /var/lib/vibeos); cross-user personal files are refused. Secret stores and key \
+             material are denied by the built-in denylist on top",
             json!({"type": "object", "required": ["path"],
                    "properties": {"path": {"type": "string"}}}),
         ),
@@ -604,7 +624,8 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             Tier::T0,
             "List one directory (non-recursive, capped at 500 entries): name, type \
              (file/dir/symlink/other) and size for regular files. Symlinks are reported, \
-             never followed; the same denylist as fs.read applies",
+             never followed. Same confinement as fs.read (caller's own home + system trees) \
+             and the same built-in denylist",
             json!({"type": "object", "required": ["path"],
                    "properties": {"path": {"type": "string"},
                                   "limit": {"type": "integer", "minimum": 1}}}),
@@ -715,7 +736,7 @@ fn execute_tool(
 ) -> Result<String, String> {
     match name {
         "os.status" => os_status(),
-        "fs.read" => fs_read(args, policy),
+        "fs.read" => fs_read(args, policy, caller),
         "fs.write" => fs_write(args, policy, caller),
         "pkg.install" => Ok(json!({
             "status": "requires_approval",
@@ -732,7 +753,7 @@ fn execute_tool(
         .to_string()),
         "svc.status" => svc_status(args),
         "sectools.list" => sectools_list(args),
-        "fs.list" => fs_list(args, policy),
+        "fs.list" => fs_list(args, policy, caller),
         "memory.query" => memory_query(args),
         "memory.append" => memory_append(args),
         _ => Err(format!("unknown tool: {name}")),
@@ -994,7 +1015,7 @@ fn read_mounts() -> Vec<Value> {
         .collect()
 }
 
-fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+fn fs_read(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String, String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -1027,6 +1048,8 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
         }
     }
     recheck_policy_canonical(policy, "fs.read", &canonical_str)?;
+    // Cross-user confinement: a system tree or the caller's OWN home only.
+    confine_read("fs.read", caller, &canonical_str)?;
 
     // Reject anything that is not a regular file: character/block devices
     // (e.g. /dev/urandom) would exhaust memory, and FIFOs would block the
@@ -1080,7 +1103,7 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
 /// policy re-checked on BOTH the lexical and canonical form. Symlinks inside
 /// the directory are REPORTED (type "symlink") but never followed — neither
 /// their target type nor size is disclosed.
-fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+fn fs_list(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String, String> {
     let raw = args
         .get("path")
         .and_then(Value::as_str)
@@ -1103,6 +1126,8 @@ fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
         }
     }
     recheck_policy_canonical(policy, "fs.list", &canonical_str)?;
+    // Cross-user confinement: a system tree or the caller's OWN home only.
+    confine_read("fs.list", caller, &canonical_str)?;
 
     // Anti-TOCTOU (same discipline as fs.read; vibed runs as root): capture the
     // directory's identity right before the read and re-check it right after.
@@ -1335,6 +1360,39 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// Read confinement for fs.read / fs.list. `canonical` is allowed iff it is a
+/// system-read tree (SYSTEM_READ_PREFIXES) OR inside the calling uid's own home
+/// (resolved from SO_PEERCRED). Fail-closed: an unknown/unresolvable caller may
+/// still read the system trees, but NEVER a home — so a missing peer cred
+/// cannot be leveraged to read personal data. The built-in denylist is applied
+/// separately (before this) and always wins.
+fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<(), String> {
+    if SYSTEM_READ_PREFIXES
+        .iter()
+        .any(|p| canonical == p.trim_end_matches('/') || canonical.starts_with(p))
+    {
+        return Ok(());
+    }
+    // Otherwise it must be within the caller's OWN home.
+    let uid = caller.uid.ok_or_else(|| {
+        format!(
+            "{tool}: '{canonical}' is outside the readable system trees and the caller uid is \
+             unavailable (SO_PEERCRED); refusing (fail-closed)"
+        )
+    })?;
+    let home = home_dir_for_uid(uid)
+        .ok_or_else(|| format!("{tool}: no home for uid {uid} in /etc/passwd; refusing"))?;
+    let canonical_home = std::fs::canonicalize(&home)
+        .map_err(|e| format!("{tool}: cannot resolve home '{home}' for uid {uid}: {e}"))?;
+    if is_within(canonical, &canonical_home.to_string_lossy()) {
+        return Ok(());
+    }
+    Err(format!(
+        "{tool}: '{canonical}' is neither a readable system path nor inside uid {uid}'s own home; \
+         cross-user reads are refused"
+    ))
 }
 
 /// True when `path` is `base` itself or a descendant of it, comparing whole
@@ -2324,42 +2382,53 @@ mod tests {
 
     #[test]
     fn fs_read_rejects_non_regular_files() {
-        let policy = permissive_policy();
-        // Character device: reading to the end would exhaust memory.
-        if std::path::Path::new("/dev/zero").exists() {
-            let err = fs_read(&json!({"path": "/dev/zero"}), &policy).unwrap_err();
-            assert!(
-                err.contains("not a regular file"),
-                "char device must be refused: {err}"
-            );
+        let uid = current_uid();
+        if uid == 0 {
+            return; // root's home is /root, denylisted
         }
-        // A directory is not a regular file either.
-        let dir = std::env::temp_dir().join(format!("vibed-read-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let err = fs_read(&json!({"path": dir.to_string_lossy()}), &policy).unwrap_err();
+        let policy = permissive_policy();
+        let caller = caller_uid(uid);
+        // A directory is not a regular file — created in the caller's OWN home
+        // so confinement lets the attempt reach the regular-file check.
+        let base = home_scratch(uid, "read-nonreg");
+        let subdir = base.join("adir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let err = fs_read(&json!({"path": subdir.to_string_lossy()}), &policy, caller).unwrap_err();
         assert!(
             err.contains("not a regular file"),
             "directory must be refused: {err}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // A char device outside the readable trees is refused by confinement.
+        if std::path::Path::new("/dev/zero").exists() {
+            let err = fs_read(&json!({"path": "/dev/zero"}), &policy, caller).unwrap_err();
+            assert!(
+                !err.is_empty(),
+                "char device outside the trees must be refused"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn fs_read_reads_regular_file_and_bounds_large_one() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = permissive_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-read-ok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "read-ok");
 
         let small = dir.join("small.txt");
         std::fs::write(&small, "hello vibed").unwrap();
-        let out = fs_read(&json!({"path": small.to_string_lossy()}), &policy).expect("read small");
+        let out = fs_read(&json!({"path": small.to_string_lossy()}), &policy, caller)
+            .expect("read small");
         assert_eq!(out, "hello vibed");
 
         let big = dir.join("big.bin");
         std::fs::write(&big, vec![b'a'; MAX_READ_BYTES + 4096]).unwrap();
-        let out = fs_read(&json!({"path": big.to_string_lossy()}), &policy).expect("read big");
+        let out =
+            fs_read(&json!({"path": big.to_string_lossy()}), &policy, caller).expect("read big");
         assert!(
             out.contains("truncated"),
             "oversized read must be truncated"
@@ -2373,23 +2442,78 @@ mod tests {
     }
 
     #[test]
+    fn fs_read_reads_a_system_tree_regardless_of_caller() {
+        // /etc is a readable system tree — even an unknown caller (no peer cred)
+        // may read it, but NEVER personal data (see confine_read test).
+        let policy = permissive_policy();
+        if std::path::Path::new("/etc/os-release").is_file() {
+            let out = fs_read(
+                &json!({"path": "/etc/os-release"}),
+                &policy,
+                Caller::default(),
+            )
+            .expect("system read of /etc/os-release");
+            assert!(!out.is_empty());
+        }
+    }
+
+    #[test]
     fn fs_read_still_reads_through_symlinks_via_canonicalization() {
         // O_NOFOLLOW + the dev/ino recheck guard against TOCTOU swaps, but a
         // legitimate read THROUGH a symlink keeps working: canonicalize
         // resolves the link before open, so the final component of the opened
         // path is the real file.
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = permissive_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-read-link-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "read-link");
         let real = dir.join("real.txt");
         std::fs::write(&real, "via symlink").unwrap();
         let link = dir.join("link.txt");
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
-        let out = fs_read(&json!({"path": link.to_string_lossy()}), &policy)
+        let out = fs_read(&json!({"path": link.to_string_lossy()}), &policy, caller)
             .expect("reading through a symlink must still work");
         assert_eq!(out, "via symlink");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confine_read_allows_system_and_own_home_refuses_others() {
+        let uid = current_uid();
+        let caller = caller_uid(uid);
+        // System trees are always readable.
+        for p in [
+            "/etc/os-release",
+            "/usr/bin",
+            "/proc/uptime",
+            "/var/lib/vibeos/x",
+            "/etc",
+        ] {
+            assert!(
+                confine_read("fs.read", caller, p).is_ok(),
+                "{p} must be readable"
+            );
+        }
+        // A non-system path outside the caller's home is refused (cross-user).
+        assert!(confine_read("fs.read", caller, "/tmp/elsewhere").is_err());
+        assert!(confine_read("fs.read", caller, "/var/home/someoneelse/secret").is_err());
+        // Unknown caller: system OK, home refused (fail-closed — a missing peer
+        // cred can never be used to read personal data).
+        assert!(confine_read("fs.read", Caller::default(), "/etc/x").is_ok());
+        assert!(confine_read("fs.read", Caller::default(), "/tmp/x").is_err());
+        // The caller's OWN home is readable.
+        if uid != 0 {
+            let home = home_dir_for_uid(uid).expect("caller has a home");
+            let canon = std::fs::canonicalize(&home).expect("home resolves");
+            let inhome = format!("{}/somefile", canon.to_string_lossy());
+            assert!(
+                confine_read("fs.read", caller, &inhome).is_ok(),
+                "own home must be readable"
+            );
+        }
     }
 
     // -- Fix 4: bounded JSON-RPC line reader ---------------------------------
@@ -2531,15 +2655,19 @@ mod tests {
 
     #[test]
     fn fs_list_lists_names_types_sizes_sorted() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = list_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-list-ok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "list-ok");
         std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
         std::fs::write(dir.join("b.txt"), "12345").unwrap();
         std::fs::write(dir.join("a.txt"), "1").unwrap();
         std::os::unix::fs::symlink("/etc/os-release", dir.join("link")).expect("symlink");
         let payload: Value = serde_json::from_str(
-            &fs_list(&json!({"path": dir.to_string_lossy()}), &policy).unwrap(),
+            &fs_list(&json!({"path": dir.to_string_lossy()}), &policy, caller).unwrap(),
         )
         .unwrap();
         let entries = payload["entries"].as_array().unwrap();
@@ -2563,16 +2691,24 @@ mod tests {
 
     #[test]
     fn fs_list_respects_limit_and_returns_stable_lexicographic_prefix() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = list_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-list-lim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "list-lim");
         // Create in a shuffled order so a readdir-order bug would surface.
         for name in ["e", "b", "d", "a", "c"] {
             std::fs::write(dir.join(name), "x").unwrap();
         }
         let payload: Value = serde_json::from_str(
-            &fs_list(&json!({"path": dir.to_string_lossy(), "limit": 3}), &policy).unwrap(),
+            &fs_list(
+                &json!({"path": dir.to_string_lossy(), "limit": 3}),
+                &policy,
+                caller,
+            )
+            .unwrap(),
         )
         .unwrap();
         let entries = payload["entries"].as_array().unwrap();
@@ -2588,8 +2724,12 @@ mod tests {
             "truncation must keep the lexicographic prefix"
         );
         assert_eq!(payload["truncated"], true);
-        let err =
-            fs_list(&json!({"path": dir.to_string_lossy(), "limit": 0}), &policy).unwrap_err();
+        let err = fs_list(
+            &json!({"path": dir.to_string_lossy(), "limit": 0}),
+            &policy,
+            caller,
+        )
+        .unwrap_err();
         assert!(err.contains("integer >= 1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2598,15 +2738,18 @@ mod tests {
     fn fs_list_refuses_when_target_is_not_a_directory() {
         // canonicalize follows a symlink to its real target; that target must
         // itself be a real directory. A symlink to a regular file is refused.
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = list_policy();
-        let base = std::env::temp_dir().join(format!("vibed-list-sym-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("mkdir");
+        let caller = caller_uid(uid);
+        let base = home_scratch(uid, "list-sym");
         let file = base.join("regular.txt");
         std::fs::write(&file, "x").unwrap();
         let link = base.join("link-to-file");
         std::os::unix::fs::symlink(&file, &link).expect("symlink");
-        let err = fs_list(&json!({"path": link.to_string_lossy()}), &policy).unwrap_err();
+        let err = fs_list(&json!({"path": link.to_string_lossy()}), &policy, caller).unwrap_err();
         assert!(err.contains("not a directory"), "unexpected error: {err}");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2622,7 +2765,7 @@ mod tests {
         }
         // End-to-end through fs_list for a path that exists on every test box.
         if std::path::Path::new("/root").exists() {
-            let err = fs_list(&json!({"path": "/root"}), &policy).unwrap_err();
+            let err = fs_list(&json!({"path": "/root"}), &policy, Caller::default()).unwrap_err();
             assert!(err.contains("denylist"), "unexpected error: {err}");
         }
     }

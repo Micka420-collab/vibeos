@@ -58,8 +58,8 @@ sequenceDiagram
 | Outil | Tier | Décision (politique par défaut) | Description |
 |---|---|---|---|
 | `os.status` | T0 | Allow | Uptime, charge, mémoire, points de montage (via `/proc`) |
-| `fs.read` | T0 | Allow (hors chemins refusés) | Lecture de fichier (UTF-8 lossy, tronqué à 256 KiB) ; denylist codée en dur + `paths.denied` de la politique ; re-vérification sur le chemin canonicalisé (symlinks) |
-| `fs.list` | T0 | Allow (hors chemins refusés) | Listing **non récursif** d'un répertoire (nom, type, taille des fichiers réguliers ; plafond 500 entrées + `limit`) ; même denylist que `fs.read` ; les symlinks sont signalés mais **jamais suivis** |
+| `fs.read` | T0 | Allow (confiné) | Lecture de fichier (UTF-8 lossy, tronqué à 256 KiB). **Confiné au home de l'appelant** (SO_PEERCRED) + arbres système non personnels (`/etc /usr /proc /sys /run /var/lib/vibeos`) — les fichiers d'un **autre utilisateur** sont refusés ; denylist codée en dur + `paths.denied` par-dessus ; re-vérification sur le chemin canonicalisé (symlinks) |
+| `fs.list` | T0 | Allow (confiné) | Listing **non récursif** d'un répertoire (nom, type, taille des fichiers réguliers ; plafond 500 entrées + `limit`). **Même confinement** que `fs.read` (home appelant + arbres système) et même denylist ; les symlinks sont signalés mais **jamais suivis** |
 | `fs.write` | T1 | Allow (périmètre restreint) | Écriture restreinte à `/home/**` et `/var/home/**` **uniquement** (sur Fedora, `/home` est un lien vers `/var/home`) ; la mémoire VibeOS n'est **pas** inscriptible par `fs.write` — son chemin d'écriture gouverné est `memory.append` |
 | `pkg.install` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucun paquet installé |
 | `svc.restart` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucune unité redémarrée |
@@ -174,7 +174,7 @@ wsl -d Ubuntu
 cd "/mnt/f/je ne sais pas encore/vibed"   # attention aux espaces : garder les guillemets
 
 cargo build --locked      # Cargo.lock est commité (épinglage supply-chain, voir SECURITY.md)
-cargo test                 # 86 tests unitaires + 6 tests d'intégration
+cargo test                 # 88 tests unitaires + 6 tests d'intégration
                            # (2 politique réelle + 4 MCP bout-en-bout sur socketpair)
 # le crate produit deux binaires : vibed (démon) et vibectl (CLI admin)
 ```
