@@ -90,6 +90,14 @@
   - **Docs** : F6 inscrit en dette explicite (ROADMAP) ; THREAT-MODEL à jour (svc.restart, egress, TPM2) ; ADR-014/015 recalés.
   - **145 tests vibed verts** (136 unit + 7 e2e MCP + 2 politique) + **17 tests vitest** + smoke ACP + Tier A live, clippy/fmt propres.
 
+- **2026-07-14 (nuit, session autonome)** — Durcissement sécurité + agents.list + F6 3/4, tout poussé sur [PR #11](https://github.com/Micka420-collab/vibeos/pull/11) (MERGEABLE, CI Rust verte) :
+  - **Allowlist de cibles `svc.restart`** : existait déjà (`[rule.services].denied`, refus avant le floor T2) mais **une revue adversariale a trouvé un bypass HIGH** — en omettant `.service`, la deny-list était contournée (la policy voyait le nom brut, canonicalisation seulement après la décision). **Corrigé** (canonicalisation dans `handle_tools_call` avant l'évaluation) + test e2e socket (nom nu → `Deny`). Deny-list complétée (accès/approbation/bus + `user@*`/`dbus.socket`).
+  - **`agents.list` (T0)** : roster HUD dérivé de l'audit, **confiné à l'uid appelant** (jamais l'activité d'un autre user), + règle allow (sinon inerte). **HUD roster + jauge ollama live** (probe local) — plus de « hors-ligne ».
+  - **F6 : 3/4 familles** (svc, sectools, memory) extraites dans `tools/*.rs` (impl+tests) — **mcp.rs 4257 → 2777 lignes (−35 %)** ; `fs` reste (entrelacé, session dédiée).
+  - **ADR-016** : `pkg.install` backend **reporté** (allowlist non tranchée sur OS immuable) ; **agent.sessions** documenté (ADR-012) ; **WITH_ZED_AGENT=0** verrouillé (ADR-015).
+  - **Revue adversariale** (sous-agent) → 1 HIGH + 2 MED corrigés ; durcissement des helpers agent-runner (validation d'instance).
+  - **148 tests vibed verts** (137 unit + 8 e2e MCP + 3 politique) + **17 vitest** + smoke ACP + bundle Zed ; clippy/fmt/shellcheck propres.
+
 ## 📋 Reste à faire (court terme)
 
 1. **Merger [PR #11 → main](https://github.com/Micka420-collab/vibeos/pull/11)** (côté utilisateur) : **MERGEABLE, CI Rust verte** ; laisser finir le build image (~15 min). Ensuite **fermer manuellement [PR #4](https://github.com/Micka420-collab/vibeos/pull/4)** (même branche source, base `phase2-supply-chain` ≠ `main` → GitHub ne la ferme pas automatiquement, et `deleteBranchOnMerge=false`).
