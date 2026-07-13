@@ -566,3 +566,43 @@ s'appliquerait via les settings Claude Code **partagés** — il désactiverait 
 natifs aussi pour **Claude Code en terminal**, pas seulement dans Zed. Gouvernance
 globale cohérente (tout passe par `vibed`) **ou** portée limitée à l'éditeur ? Ce choix,
 et la spec des fonctionnalités innovantes, conditionnent l'écriture de la couche 1/2.
+
+## ADR-015 — Chaîne d'approvisionnement npm de l'extension Zed (`vibeos-claude-acp`) — *plan, cible couche 1/2*
+
+**Statut** : plan (2026-07-13). L'extension existe (source + tests) mais n'est
+**pas encore câblée dans l'image** ; ce plan fixe la discipline avant de l'y
+mettre — « plus tard » sans plan écrit devient « jamais ».
+
+**Contexte.** L'extension `zed/vibeos-claude-acp` dépend de l'amont npm
+`@agentclientprotocol/claude-agent-acp` (≈ 148 dépendances transitives). npm est
+une surface supply-chain (typosquatting, scripts `postinstall` malveillants,
+dépendance compromise en amont). Le **TCB de VibeOS (`vibed`) reste Rust à
+dépendances minimales** ; l'extension vit **hors du TCB** (`zed/`), mais finira
+par être livrée dans l'image — elle doit donc suivre la même hygiène que les
+autres installs npm du `Containerfile`.
+
+**Décision (même discipline que le `Containerfile`).**
+1. **Lockfile commité** (`package-lock.json`, épinglé) : versions exactes de
+   **toute** la chaîne transitive + **hash d'intégrité SHA-512** par paquet
+   (amont épinglé `0.58.1`). Déjà fait (retiré du `.gitignore`).
+2. **`npm ci --ignore-scripts`** au build : install **reproductible depuis le
+   lockfile** (échoue si le lockfile diverge de `package.json`) et **sans
+   scripts de cycle de vie** — exactement le `--ignore-scripts` déjà utilisé par
+   le `Containerfile` pour les CLIs IA.
+3. **Vérification d'intégrité** : `npm ci` compare le champ `integrity` (SHA-512)
+   du lockfile aux tarballs du registre — toute altération fait échouer l'install.
+4. **Build isolé + rebuild ciblé** : étage multi-stage dédié (comme
+   `quickshell-builder`/`vibed-builder`) — `npm ci --omit=dev --ignore-scripts`
+   puis `tsc` → `dist/` ; **seuls `dist/` + les deps de production élaguées** sont
+   copiés dans l'image finale (jamais les devDeps ni le cache de build).
+5. **Bumps revus** : monter la version amont = un commit revu (rebase du fork, la
+   surface de fork étant volontairement minimale — un patch de prototype, ADR-014) ;
+   `npm audit` sur la chaîne à chaque bump.
+6. **Pas livré tant que non validé** : l'extension n'entre dans l'image **qu'après**
+   la validation E2E (voir `BLOCKERS.md`) — on ne ship pas ~148 paquets non
+   éprouvés dans l'image immuable. Décision assumée, pas un oubli.
+
+**Conséquences.** Chaîne npm **reproductible et vérifiable**, alignée sur la
+discipline de l'OS ; l'extension reste hors TCB mais sous la même hygiène ; le
+coût est un lockfile à maintenir et un étage de build supplémentaire le jour du
+câblage.
