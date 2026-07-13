@@ -346,6 +346,37 @@ async fn per_uid_rate_limit_refuses_a_flood_and_audits_it() {
 }
 
 #[tokio::test]
+async fn policy_check_is_rate_limited_like_any_tool() {
+    // Explicit confirmation (not assumption): the T0 dry-run policy.check goes
+    // through the SAME per-uid rate limiter as every other tool — the limiter is
+    // applied before dispatch, tool-agnostically. Capacity 1: the 2nd call is
+    // refused.
+    let mut srv =
+        Server::start_with_limiter("rl-policy", vibed::ratelimit::RateLimiter::new(1.0, 0.0));
+    let _ = srv.request(1, "initialize", json!({})).await;
+
+    let (e1, t1) = srv
+        .tool_call(2, "policy.check", json!({"tool": "os.status"}))
+        .await;
+    assert!(!e1, "first policy.check within the burst: {t1}");
+
+    let (e2, t2) = srv
+        .tool_call(3, "policy.check", json!({"tool": "os.status"}))
+        .await;
+    assert!(e2, "second policy.check must be rate-limited");
+    assert!(t2.contains("rate limit exceeded"), "unexpected: {t2}");
+
+    let limited = srv
+        .audit_records()
+        .into_iter()
+        .filter(|r| r["outcome"] == "rate_limited" && r["tool"] == "policy.check")
+        .count();
+    assert_eq!(limited, 1, "the rate-limited policy.check is audited");
+
+    srv.cleanup();
+}
+
+#[tokio::test]
 async fn protocol_errors_are_json_rpc_errors() {
     let mut srv = Server::start("protocol");
 

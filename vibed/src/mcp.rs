@@ -948,6 +948,14 @@ fn execute_tool(
 /// confinement, T2/T3 approval floor) always happens at execution in vibed, so a
 /// wrong hint can never let a T2/T3 call through without approval — at worst the
 /// editor shows or omits a prompt in error, and the real call is still gated.
+///
+/// Anti-DoS disciplines (same as every other tool, not weaker for being a
+/// dry-run): it is reached through `handle_tools_call`, so the **per-uid rate
+/// limiter runs first** (that check is tool-agnostic, before dispatch — see the
+/// `limiter.check` gate) and the call is audited; its output is a **small, fixed
+/// JSON** (echoes the bounded `target`, no content amplification) and it does no
+/// unbounded work (a lexical path normalize + the fixed denylist + one policy
+/// evaluation).
 fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     let tool = args
         .get("tool")

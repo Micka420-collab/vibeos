@@ -191,7 +191,7 @@ gantt
 - [ ] Jeton `setup-token` scellé via `systemd-creds` survit à un reboot ; `fs.read` du fichier credential échoue **même pour root** sans le TPM de la machine (testé).
 - [ ] Un agent lancé par le superviseur ne peut atteindre, en sortant, **que** les hôtes de son fournisseur déclaré — test négatif : connexion à un hôte hors-liste échoue et est journalisée.
 - [ ] `ANTHROPIC_API_KEY` positionnée globalement dans l'environnement système **ne prend pas** le pas silencieusement sur l'auth abonnement du superviseur (piège documenté des CLI elles-mêmes — vérifié explicitement).
-- [ ] Kill-switch : `vibectl agent stop` interrompt une session en **< 5 s**, dernier append mémoire cohérent (pas de ligne JSONL tronquée).
+- [x] Kill-switch : `vibectl agent stop` interrompt une session en **< 5 s**, dernier append mémoire cohérent (pas de ligne JSONL tronquée). **Mesuré 2026-07-13 : 2,636 s** (stop → arrêt), `reason: operator_stop`, dernière ligne raisonnement = JSON complet. Sous WSL le chiffre est dominé par le drain borné (2 s) car le group-kill externe ne stoppe pas le petit-fils ; sur Linux natif, plus court.
 - [ ] Toute tentative T2/T3 pendant une session autonome reste refusée **exactement comme aujourd'hui** — zéro régression du contrat existant.
 
 **Mode always-on.**
