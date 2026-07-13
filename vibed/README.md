@@ -24,8 +24,12 @@ Le groupe `vibeos-agents` et l'utilisateur `vibed` (cible Phase 4) sont créés 
 | `mcp.rs` | Serveur JSON-RPC 2.0 délimité par lignes : `initialize`, `tools/list`, `tools/call` ; registre des outils et leurs tiers ; denylist codée en dur ; exécution sous `spawn_blocking` |
 | `policy.rs` | Moteur de règles TOML (schéma canonique) : tiers T0..T3, première règle qui matche gagne, default-deny absolu, plancher d'approbation T2/T3, contraintes de chemins/services |
 | `glob.rs` | Matcher glob minimal maison (aucune dépendance) : `*` = à l'intérieur d'un segment, `**` = à travers les segments ; normalisation lexicale des chemins |
-| `audit.rs` | Journal d'audit append-only (horodatage, outil, digest FNV-1a des arguments, décision, issue, uid/gid/pid de l'appelant) |
-| `tests/policy_integration.rs` | Test d'intégration : charge le **vrai** `security/policy.d/default.toml` du dépôt et verrouille les décisions canoniques |
+| `audit.rs` | Journal d'audit append-only chaîné SHA-256, rotation par jour UTC (horodatage, outil, digest FNV-1a des arguments, décision, issue, uid/gid/pid de l'appelant) |
+| `sha256.rs` | SHA-256 (FIPS 180-4) **sans dépendance** pour le chaînage de l'audit ; vecteurs NIST testés |
+| `ratelimit.rs` | Rate-limiting par uid (token bucket, `SO_PEERCRED`) partagé entre connexions — borne un agent emballé/compromis |
+| `approval.rs` | Flux d'approbation humaine T2/T3 : requête → grant à usage unique borné `(outil, cible, uid)` + expiration ; store `pending/` borné (purge/dedup/plafond) |
+| `vibectl.rs` + `bin/vibectl.rs` | CLI opérateur : `memory status/mode/profile/projects`, `audit verify`, `approvals list`, `approve/deny` (root) |
+| `tests/policy_integration.rs`, `tests/mcp_integration.rs` | Tests d'intégration : chargent le **vrai** `security/policy.d/default.toml` ; le second pilote `handle_connection` sur une vraie socketpair (handshake, refus, rate-limit, audit) |
 
 ```mermaid
 sequenceDiagram
@@ -39,7 +43,7 @@ sequenceDiagram
     A->>S: {"method":"tools/call","params":{"name":"fs.write",...}}
     Note over S: SO_PEERCRED capturé à l'accept (uid/gid/pid)
     S->>M: ligne JSON
-    M->>M: normalisation du chemin + denylist codée en dur
+    M->>M: rate-limit par uid + normalisation du chemin + denylist codée en dur
     M->>P: evaluate("fs.write", T1, contexte chemin/service)
     P-->>M: Allow / Deny / RequireApproval
     M->>L: record(outil, digest(args), décision, uid/gid/pid, ...)
@@ -168,6 +172,16 @@ par bloquer tout appel d'outil) :
   ```
 
   Le SHA-256 est l'implémentation maison **sans dépendance** (`src/sha256.rs`, vecteurs NIST testés), fidèle à la doctrine TCB sans dépendance (glob/FNV faits main). La chaîne est reprise au redémarrage. `fsync` par enregistrement (durabilité). **Reste Phase 4** : ancrage externe de la tête (TPM/Rekor — ferme la troncature du dernier enregistrement) + réplication journald (`docs/SECURITY-ARCHITECTURE.md` §8).
+  - Un appel **approuvé** (T2/T3) porte l'uid de l'opérateur dans son `outcome` : `ok_approved(by_uid=0)`. Le grant étant supprimé au ré-appel, cette ligne est la **seule trace durable** de qui a autorisé le changement système.
+  - Un appel refusé par le rate-limiter porte `decision=deny`, `outcome=rate_limited`.
+
+## Bornes de résilience (anti-DoS)
+
+Un agent est un *insider non fiable* : le daemon se protège d'un agent emballé ou compromis qui le noierait d'appels.
+
+- **Rate-limiting par uid** (`src/ratelimit.rs`) : token bucket par identité `SO_PEERCRED`, **partagé entre connexions** (ouvrir plusieurs sockets ne multiplie pas le budget). Défaut : burst 60, refill 10/s. Un appel au-delà de la limite est **refusé fail-closed et audité** (`rate_limited`) — la mémoire, le store d'approbation et le corps de l'outil ne s'exécutent jamais. Vérifié tôt dans le pipeline (après normalisation du chemin, avant denylist/politique).
+- **Store d'approbation borné** (`src/approval.rs`) : `pending/` purge les requêtes périmées (> 1 h), **déduplique** les requêtes identiques `(outil, cible, uid)` (le ré-appel en attente réutilise l'id, pas de nouveau fichier) et applique un **plafond dur** (64 requêtes). Un agent ne peut donc pas remplir le volume mémoire en spammant des demandes T2/T3 non approuvables.
+- **Journal d'audit** : rotation par jour (ci-dessus) ; la rétention/purge des vieux fichiers est une **politique opérateur** (une purge = T3, approbation humaine — jamais une action d'agent).
 
 ## Builder et tester (WSL2 Ubuntu)
 
