@@ -273,6 +273,28 @@ Les dictionnaires (**SecLists**, rockyou) se clonent dans `~/wordlists`.
 
 ---
 
+## Hygiène bootc (lint)
+
+Ajouter des paquets qui créent des utilisateurs/groupes système ou de l'état
+sous `/var` déclenche des **avertissements** (non bloquants) de `bootc
+container lint`. La trousse en gère la source :
+
+- **`sysusers`** (groupe `rtlsdr` créé via `/etc/group`) → déclaré dans
+  `os/rootfs/usr/lib/sysusers.d/vibeos-sectools.conf`. **Vérifié** : le build
+  local est passé de 3 à 2 avertissements, `Checks passed` de 10 à 11.
+- **`var-tmpfiles`** (`/var/lib/{aide,clamav,rkhunter,suricata,tor}`,
+  `/var/spool/anacron`) → déclaré dans
+  `os/rootfs/usr/lib/tmpfiles.d/vibeos-sectools.conf` (recréation au boot ; sur
+  bootc/OSTree `/var` est un état machine-local). Le mécanisme est vérifié
+  (aide/clamav/rkhunter ont quitté la liste du lint une fois déclarés) ; le
+  reste applique le même schéma.
+- **`nonempty-run-tmp`** (`/run/suricata`, `/run/tor`) → purgés en fin de
+  couche `1d-bis` (`/run` est un tmpfs recréé au boot). Reste le seul
+  avertissement `/run` **préexistant** (`akmods.lock`, couche NVIDIA).
+
+La **CI** (`build-os.yml`) exécute `bootc container lint` à chaque build et
+fait foi pour la confirmation finale.
+
 ## Étendre la trousse embarquée
 
 1. Ajouter le paquet à la couche **`1d-bis`** de [`os/Containerfile`](../os/Containerfile) (RPM Fedora/RPM Fusion **uniquement** — supply chain).
