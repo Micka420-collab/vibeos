@@ -123,7 +123,8 @@ mkdir -p \
     "${MEMORY_DIR}/user" \
     "${MEMORY_DIR}/projects" \
     "${MEMORY_DIR}/journal" \
-    "${MEMORY_DIR}/knowledge"
+    "${MEMORY_DIR}/knowledge" \
+    "${MEMORY_DIR}/reasoning"
 chmod 700 "${MEMORY_DIR}"
 log "directory skeleton created"
 
@@ -260,6 +261,8 @@ write_placeholder journal \
     "Événements append-only : un fichier JSONL par jour UTC (AAAA-MM-JJ.jsonl), une ligne JSON par événement. Ne jamais réécrire une ligne existante ; une correction est un nouvel événement."
 write_placeholder knowledge \
     "Faits appris, consolidés depuis le journal (facts.jsonl). Le sous-répertoire embeddings/ est réservé au futur index vectoriel local."
+write_placeholder reasoning \
+    "Raisonnement des agents capté par le superviseur (un JSONL par session, <session-id>.jsonl). Écrit par le superviseur d'agent (tap sur le flux du CLI, ADR-012), lu via l'outil T0 agent.thinking. Rétention plus courte que le journal (cible Phase 2.5)."
 log "placeholders written"
 
 # --- 5. First journal entry --------------------------------------------------------

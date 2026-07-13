@@ -843,6 +843,22 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                 "entry": {"type": "object"}
             }}),
         ),
+        (
+            "agent.thinking",
+            Tier::T0,
+            "Read a bounded tail of an autonomous session's captured reasoning \
+             (/var/lib/vibeos/memory/reasoning/<session-id>.jsonl), written by the agent \
+             supervisor by tapping the CLI stream (ADR-012) — NOT the CLI's own transcript. \
+             Required 'session_id' (charset [A-Za-z0-9._-], no path); optional 'tail' \
+             (default 100, max 500 lines) and 'since' (unix seconds). Observability, not a \
+             learned fact — distinct from memory.query. Absent session -> empty result.",
+            json!({"type": "object", "required": ["session_id"],
+            "properties": {
+                "session_id": {"type": "string"},
+                "tail": {"type": "integer", "minimum": 1},
+                "since": {"type": "integer", "minimum": 0}
+            }}),
+        ),
     ]
 }
 
@@ -896,8 +912,25 @@ fn execute_tool(
         "fs.list" => fs_list(args, policy, caller),
         "memory.query" => memory_query(args),
         "memory.append" => memory_append(args),
+        "agent.thinking" => agent_thinking(args),
         _ => Err(format!("unknown tool: {name}")),
     }
+}
+
+/// agent.thinking (T0): read a bounded tail of a session's captured reasoning
+/// from the store written by the supervisor (ADR-012). Read-only; the session_id
+/// is charset-validated by `reasoning::read_thinking` so it can never traverse
+/// out of `/var/lib/vibeos/memory/reasoning/`.
+fn agent_thinking(args: &Value) -> Result<String, String> {
+    let session_id = args
+        .get("session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "agent.thinking: missing 'session_id' argument".to_string())?;
+    let tail = args.get("tail").and_then(Value::as_u64).map(|n| n as usize);
+    let since = args.get("since").and_then(Value::as_u64);
+    let out =
+        crate::reasoning::read_thinking(std::path::Path::new(MEMORY_DIR), session_id, tail, since)?;
+    serde_json::to_string(&out).map_err(|e| format!("agent.thinking: serialization failed: {e}"))
 }
 
 /// sectools.list (T0): read-only discovery of the shipped security toolkit.
@@ -3541,5 +3574,16 @@ mod tests {
         assert_eq!(approver_suffix(Some(0)), "(by_uid=0)");
         assert_eq!(approver_suffix(Some(1000)), "(by_uid=1000)");
         assert_eq!(approver_suffix(None), "(by_uid=?)");
+    }
+
+    #[test]
+    fn agent_thinking_validates_args() {
+        // Missing session_id -> error.
+        assert!(agent_thinking(&json!({})).is_err());
+        // Traversal session_id -> rejected by reasoning::read_thinking before any I/O.
+        let err = agent_thinking(&json!({"session_id": "../etc/passwd"})).unwrap_err();
+        assert!(err.contains("session_id"), "unexpected error: {err}");
+        // agent.thinking is T0 in the catalog.
+        assert_eq!(tool_tier("agent.thinking"), Some(Tier::T0));
     }
 }

@@ -154,6 +154,13 @@ action = "allow"
 reason = "Read-only query against the VibeOS memory store."
 
 [[rule]]
+id = "agent-thinking"
+tools = ["agent.thinking"]
+tier = "T0"
+action = "allow"
+reason = "Read-only, bounded tail of an autonomous session's captured reasoning (memory/reasoning/, written by the supervisor). session_id is charset-validated; no path argument."
+
+[[rule]]
 id = "memory-append"
 tools = ["memory.append"]
 tier = "T1"
