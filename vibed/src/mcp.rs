@@ -108,6 +108,20 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "/proc/**/cmdline",         // command lines may carry secrets/tokens
     "/run/credentials/**",      // decrypted systemd credentials
     "/boot/**",                 // boot chain is none of the agent's business
+    // Credentials of the AI agents themselves and of the developer tooling
+    // shipped in the image. fs.read is NOT confined to the caller's home
+    // (vibed runs as root), so without these entries any agent could read
+    // every user's agent tokens — including other users'.
+    "**/.claude/**",               // Claude Code state: OAuth token, transcripts
+    "**/.claude.json",             // Claude Code top-level config may carry keys
+    "**/.config/gh/**",            // GitHub CLI hosts.yml (oauth_token)
+    "**/.gemini/**",               // gemini-cli oauth_creds.json
+    "**/.codex/**",                // codex auth.json
+    "**/.local/share/opencode/**", // opencode auth.json + agent-internal state
+    "**/.ollama/**",               // ollama keypair (id_ed25519)
+    "**/.npmrc",                   // npm registry authTokens
+    "**/.git-credentials",         // plaintext git credentials store
+    "**/.config/sops/**",          // SOPS/age private keys (keys.txt)
 ];
 
 /// Additional BUILT-IN denylist for WRITES only: agents may query the memory
@@ -711,6 +725,7 @@ fn read_mounts() -> Vec<Value> {
 
 fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
 
     let raw = args
         .get("path")
@@ -722,6 +737,14 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     // checked the lexical form before the policy decision.
     let canonical = std::fs::canonicalize(&path).map_err(|e| format!("fs.read {path}: {e}"))?;
     let canonical_str = canonical.to_string_lossy();
+    // Bind the validated file's identity (device, inode) as close to
+    // canonicalization as possible: the open() below re-verifies against it,
+    // so a path component swapped for a symlink between the checks and the
+    // open (TOCTOU, vibed runs as root) is detected and refused. Residual
+    // window: canonicalize -> this lstat (a few µs); full closure comes with
+    // openat2(RESOLVE_NO_SYMLINKS)/per-tool sandboxing in Phase 3.
+    let validated =
+        std::fs::symlink_metadata(&canonical).map_err(|e| format!("fs.read {path}: {e}"))?;
     // Built-in denylist AND the operator's policy (paths.denied / allowed) are
     // re-checked against BOTH the lexical and the canonical path, so neither a
     // symlink nor a policy blind spot can be used to escape into denied ground.
@@ -736,14 +759,30 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
 
     // Reject anything that is not a regular file: character/block devices
     // (e.g. /dev/urandom) would exhaust memory, and FIFOs would block the
-    // worker thread forever.
-    let mut file = std::fs::File::open(&canonical).map_err(|e| format!("fs.read {path}: {e}"))?;
-    let is_file = file
+    // worker thread forever. O_NOFOLLOW: canonicalize already resolved every
+    // symlink, so the final component of `canonical` must not be one anymore —
+    // if it is (post-canonicalization swap), open() fails with ELOOP.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(&canonical)
+        .map_err(|e| format!("fs.read {path}: {e}"))?;
+    let opened = file
         .metadata()
-        .map_err(|e| format!("fs.read {path}: {e}"))?
-        .is_file();
-    if !is_file {
+        .map_err(|e| format!("fs.read {path}: {e}"))?;
+    if !opened.is_file() {
         return Err(format!("fs.read: '{canonical_str}' is not a regular file"));
+    }
+    // The file actually opened must be the very inode that passed the
+    // denylist/policy checks above (fstat on the open fd is authoritative).
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != validated.dev() || opened.ino() != validated.ino() {
+            return Err(format!(
+                "fs.read: '{canonical_str}' changed between validation and open \
+                 (possible symlink race); refusing (fail-closed)"
+            ));
+        }
     }
     // Bounded read: never pull more than MAX_READ_BYTES + 1 into memory (one
     // extra byte only to detect truncation). This caps the allocation well
@@ -992,7 +1031,11 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
         .to_string());
     }
 
-    // Bounded iterative walk: no recursion, hard cap on visited files.
+    // Bounded iterative walk: no recursion, hard cap on visited files, and
+    // NEVER follows symlinks (entry.file_type() / symlink_metadata do not
+    // traverse) — a link planted inside the store cannot route the walk (or
+    // the content scan) outside /var/lib/vibeos/memory, e.g. into the audit
+    // trail.
     let mut files = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = Vec::new();
     match scope {
@@ -1001,7 +1044,10 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
             let start = root.join(relative);
             if is_dir {
                 stack.push(start);
-            } else if start.is_file() {
+            } else if start
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_file())
+            {
                 files.push(start);
             }
         }
@@ -1014,12 +1060,15 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
             if files.len() >= MAX_MEMORY_FILES {
                 break;
             }
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.is_file() {
-                files.push(path);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
             }
+            // Symlinks (and any other special type) are deliberately skipped.
         }
         if files.len() >= MAX_MEMORY_FILES {
             break;
@@ -1043,9 +1092,17 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
             continue;
         }
         let name_hit = relative.to_lowercase().contains(&query);
-        let content_hit = std::fs::read(path).ok().is_some_and(|bytes| {
-            let end = bytes.len().min(MAX_MEMORY_SCAN_BYTES);
-            String::from_utf8_lossy(&bytes[..end])
+        // Bounded scan: never pull more than MAX_MEMORY_SCAN_BYTES of one file
+        // into memory (same take() discipline as fs.read) — a huge file in the
+        // store must not translate into an unbounded allocation.
+        let content_hit = std::fs::File::open(path).ok().is_some_and(|file| {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            let ok = file
+                .take(MAX_MEMORY_SCAN_BYTES as u64)
+                .read_to_end(&mut bytes)
+                .is_ok();
+            ok && String::from_utf8_lossy(&bytes)
                 .to_lowercase()
                 .contains(&query)
         });
@@ -1721,6 +1778,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn builtin_denylist_covers_ai_agent_credentials() {
+        // fs.read is not confined to the caller's home (vibed runs as root):
+        // the tokens of the AI agents and dev tooling shipped in the image
+        // must be unreadable for EVERY user's home.
+        for path in [
+            "/home/dev/.claude/.credentials.json",
+            "/home/dev/.claude/history.jsonl",
+            "/var/home/dev/.claude.json",
+            "/home/dev/.config/gh/hosts.yml",
+            "/home/dev/.gemini/oauth_creds.json",
+            "/home/dev/.codex/auth.json",
+            "/home/dev/.local/share/opencode/auth.json",
+            "/home/dev/.ollama/id_ed25519",
+            "/home/dev/.npmrc",
+            "/home/dev/.git-credentials",
+            "/home/dev/.config/sops/age/keys.txt",
+        ] {
+            assert!(
+                builtin_denied(path, false).is_some(),
+                "{path} must be read-denied by the built-in denylist"
+            );
+        }
+        // But ordinary dotfiles stay readable: the denylist targets secrets,
+        // not the whole home.
+        for path in ["/home/dev/.bashrc", "/home/dev/.config/fish/config.fish"] {
+            assert!(
+                builtin_denied(path, false).is_none(),
+                "{path} must stay readable"
+            );
+        }
+    }
+
     // -- Fix 4: fs.read special files and bounded reads ----------------------
 
     #[test]
@@ -1770,6 +1860,26 @@ mod tests {
             "returned content must stay within the cap (+ notice), got {}",
             out.len()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_read_still_reads_through_symlinks_via_canonicalization() {
+        // O_NOFOLLOW + the dev/ino recheck guard against TOCTOU swaps, but a
+        // legitimate read THROUGH a symlink keeps working: canonicalize
+        // resolves the link before open, so the final component of the opened
+        // path is the real file.
+        let policy = permissive_policy();
+        let dir = std::env::temp_dir().join(format!("vibed-read-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let real = dir.join("real.txt");
+        std::fs::write(&real, "via symlink").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let out = fs_read(&json!({"path": link.to_string_lossy()}), &policy)
+            .expect("reading through a symlink must still work");
+        assert_eq!(out, "via symlink");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1928,6 +2038,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let payload = parse_result(memory_query_at(&root, &json!({})));
         assert_eq!(payload["initialized"], false);
+    }
+
+    #[test]
+    fn memory_query_content_scan_is_bounded_per_file() {
+        let root = memory_scratch("qbound");
+        // The needle sits AFTER the 64 KiB scan cap: a bounded scan must not
+        // see it (and must not have loaded the whole file to find out).
+        let mut big = vec![b'a'; MAX_MEMORY_SCAN_BYTES + 1024];
+        big.extend_from_slice(b"needle-beyond-cap");
+        std::fs::write(root.join("knowledge").join("big.md"), &big).expect("write big");
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"query": "needle-beyond-cap"}),
+        ));
+        assert_eq!(
+            payload["matches"].as_array().unwrap().len(),
+            0,
+            "content beyond MAX_MEMORY_SCAN_BYTES must not be scanned"
+        );
+        // Same needle before the cap: found.
+        std::fs::write(
+            root.join("knowledge").join("small.md"),
+            b"needle-before-cap",
+        )
+        .expect("write small");
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"query": "needle-before-cap"}),
+        ));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_walk_never_follows_symlinks() {
+        let root = memory_scratch("qsymlink");
+        // An out-of-store area holding a "secret" the walk must never reach.
+        let outside =
+            std::env::temp_dir().join(format!("vibed-mem-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        std::fs::write(outside.join("secret.txt"), "outside-secret-content").expect("write secret");
+        // A symlinked DIRECTORY and a symlinked FILE planted inside the store.
+        std::os::unix::fs::symlink(&outside, root.join("knowledge").join("linkdir"))
+            .expect("dir symlink");
+        std::os::unix::fs::symlink(
+            outside.join("secret.txt"),
+            root.join("knowledge").join("linkfile.txt"),
+        )
+        .expect("file symlink");
+        // Neither shows up in a listing...
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
+        assert_eq!(
+            payload["matches"].as_array().unwrap().len(),
+            0,
+            "symlinks inside the store must be invisible to the walk"
+        );
+        // ...nor can their content be matched.
+        let payload = parse_result(memory_query_at(&root, &json!({"query": "outside-secret"})));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     // 2026-07-08T01:01:01Z (see the utc_helpers test for the constant's proof).

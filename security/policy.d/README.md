@@ -69,9 +69,9 @@ Si un fichier `*.toml` de `/etc/vibeos/policy.d/` est illisible ou invalide (TOM
 
 ## Denylist codée en dur
 
-Indépendamment de tout fichier de politique, le moteur refuse dans le code :
+Indépendamment de tout fichier de politique, le moteur refuse dans le code (source de vérité : `BUILTIN_DENY_ALWAYS` / `BUILTIN_DENY_WRITE` dans `vibed/src/mcp.rs`, ~30 motifs) :
 
-- en **lecture et écriture** : `/var/lib/vibeos/audit/**`, `/etc/shadow*`, `**/.ssh/**`, `**/.gnupg/**`, `/proc/*/environ`, `/run/credentials/**`, `/boot/**` ;
+- en **lecture et écriture** : le journal d'audit (`/var/lib/vibeos/audit/**`), les bases de comptes (`/etc/shadow*`, `/etc/gshadow*`), le matériel de clés (`**/.ssh/**`, `**/.gnupg/**`, `/etc/ssh/*`), les magasins de credentials cloud et conteneurs (`**/.aws/*`, `**/.config/gcloud/**`, `**/.docker/config.json`, `**/.kube/config`, `**/.netrc`, `/etc/NetworkManager/system-connections/**`), les credentials des agents IA et de l'outillage dev livrés dans l'image (`**/.claude/**`, `**/.claude.json`, `**/.config/gh/**`, `**/.gemini/**`, `**/.codex/**`, `**/.local/share/opencode/**`, `**/.ollama/**`, `**/.npmrc`, `**/.git-credentials`, `**/.config/sops/**`), le home de root (`/root/**`), les fuites procfs (`/proc/**/environ`, `/proc/**/cmdline`), les secrets systemd (`/run/credentials/**`) et la chaîne de boot (`/boot/**`) ;
 - en **écriture uniquement** : `/etc/vibeos/policy.d/**` et `/var/lib/vibeos/memory/**`.
 
 Les entrées `paths.denied` de `default.toml` reprennent cette liste par défense en profondeur : les retirer du TOML ne rouvre **pas** l'accès. Le volume mémoire n'est pas inscriptible via `fs.write` ; les écritures mémoire passent par `memory.append` (T1, additif, sans argument de chemin — règle `memory-append`).

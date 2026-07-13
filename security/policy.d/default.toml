@@ -21,7 +21,11 @@
 # **/.aws/credentials, **/.aws/config, **/.config/gcloud/**,
 # /etc/NetworkManager/system-connections/**, **/.docker/config.json,
 # **/.kube/config, **/.netrc, /root/**, /proc/*/environ, /proc/**/environ,
-# /proc/**/cmdline, /run/credentials/**, /boot/** ; and for WRITES only:
+# /proc/**/cmdline, /run/credentials/**, /boot/**, plus the credentials of
+# the AI agents / dev tooling shipped in the image: **/.claude/**,
+# **/.claude.json, **/.config/gh/**, **/.gemini/**, **/.codex/**,
+# **/.local/share/opencode/**, **/.ollama/**, **/.npmrc, **/.git-credentials,
+# **/.config/sops/** ; and for WRITES only:
 # /etc/vibeos/policy.d/** and /var/lib/vibeos/memory/**.
 # fs.write is ADDITIONALLY confined to the calling user's own home directory
 # (resolved from /etc/passwd via SO_PEERCRED) and is symlink-safe (the parent
@@ -87,6 +91,19 @@ denied = [
   "/proc/**/cmdline",          # command lines may carry secrets/tokens
   "/run/credentials/**",       # decrypted systemd-creds exposed to services
   "/boot/**",                  # boot chain is none of the agent's business
+  # Credentials of the AI agents / dev tooling shipped in the image — vibed
+  # runs as root and fs.read is not confined to the caller's home, so these
+  # must be unreadable across ALL homes.
+  "**/.claude/**",             # Claude Code state: OAuth token, transcripts
+  "**/.claude.json",           # Claude Code top-level config may carry keys
+  "**/.config/gh/**",          # GitHub CLI hosts.yml (oauth_token)
+  "**/.gemini/**",             # gemini-cli oauth_creds.json
+  "**/.codex/**",              # codex auth.json
+  "**/.local/share/opencode/**", # opencode auth.json + agent-internal state
+  "**/.ollama/**",             # ollama keypair (id_ed25519)
+  "**/.npmrc",                 # npm registry authTokens
+  "**/.git-credentials",       # plaintext git credentials store
+  "**/.config/sops/**",        # SOPS/age private keys (keys.txt)
 ]
 
 # --- T1: user-scope mutation ------------------------------------------------
