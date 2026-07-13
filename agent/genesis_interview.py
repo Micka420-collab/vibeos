@@ -315,14 +315,21 @@ def main(argv=None):
                     "(prototype Phase 3 — non câblé dans genesis.sh en v0.1)")
     parser.add_argument("memory_dir",
                         help="Répertoire mémoire cible, ex: /tmp/vibeos-memory-test")
-    parser.add_argument("--offline", action="store_true", default=True,
-                        help="Mode hors-ligne (défaut ; seul --with-claude sort du mode)")
+    # Offline is the DEFAULT behavior (no flag needed): only --with-claude
+    # opts into the network path. The historical --offline flag was dead code
+    # (store_true with default=True can never be False) and was removed.
     parser.add_argument("--with-claude", dest="with_claude", action="store_true",
                         help="Enrichit l'interview via l'API Anthropic si le paquet "
-                             "'anthropic' est importable (repli propre sinon)")
+                             "'anthropic' est importable (repli propre sinon ; "
+                             "sans ce flag, tout est hors-ligne)")
     parser.add_argument("--non-interactive", action="store_true",
                         help="Aucune question : réutilise l'état précédent ou les défauts")
     args = parser.parse_args(argv)
+
+    # Memory spec (docs/MEMORY.md §3.7): directories 0700, files 0600 — same
+    # umask discipline as memory/genesis.sh. Applied before ANY makedirs or
+    # tempfile so nothing is ever created world-readable.
+    os.umask(0o077)
 
     memory_dir = os.path.abspath(args.memory_dir)
     try:
