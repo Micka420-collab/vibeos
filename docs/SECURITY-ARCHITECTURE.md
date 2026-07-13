@@ -119,15 +119,15 @@ En v0.1, les outils s'exécutent **in-process** dans `vibed` (cf. §3.1 et [ARCH
 
 Règle absolue : **aucun secret en clair sur disque, et jamais dans la mémoire VibeOS** (`/var/lib/vibeos/memory` stocke du contexte, pas des credentials — une clé API qui y transite est un bug de sévérité critique, cf. [../SECURITY.md](../SECURITY.md) §2).
 
-- **Au repos** : clés API (Anthropic, GitHub…) stockées via `systemd-creds encrypt` — chiffrées avec la clé locale et, dès la Phase 4, **scellées TPM2 + PCR** (indéchiffrables hors de la machine et hors d'un état de boot conforme). Injection dans `vibed` par `LoadCredentialEncrypted=`, exposées uniquement dans `/run/credentials/vibed.service/` (ramfs, non swappable, visible du seul service).
-- **À l'exécution** : secrets promus dans le **kernel keyring** de session `vibed` (`keyctl`), jamais dans des variables d'environnement transmises aux outils, jamais en arguments de processus (visibles dans `/proc`).
+- **Au repos (mécanisme cible — non câblé à ce jour, aucune unité ne charge encore de credential)** : clés API (Anthropic, GitHub…) seront stockées via `systemd-creds encrypt` — chiffrées avec la clé locale et, dès la Phase 4, **scellées TPM2 + PCR** (indéchiffrables hors de la machine et hors d'un état de boot conforme). Injection prévue dans `vibed` par `LoadCredentialEncrypted=`, exposition uniquement dans `/run/credentials/vibed.service/` (ramfs, non swappable, visible du seul service).
+- **À l'exécution (cible également)** : secrets promus dans le **kernel keyring** de session `vibed` (`keyctl`), jamais dans des variables d'environnement transmises aux outils, jamais en arguments de processus (visibles dans `/proc`).
 - **Vis-à-vis des agents** : les agents n'obtiennent jamais un secret ; ils obtiennent un *usage*. Exemple : l'outil qui appelle une API s'exécute côté `vibed` qui attache le credential ; le chemin `/run/credentials/**` et les magasins de secrets figurent dans les chemins refusés de `fs.read` de la politique par défaut.
 - Rotation : `vibectl secrets rotate` (CLI future) ; les credentials compromis sont révocables sans reconstruction d'image.
 
 ## 5. Signature et vérification des images (cosign)
 
 - **Signature (Phase 1 — livrée en v0.1)** : le workflow GitHub Actions (`build-os.yml`) signe chaque image poussée sur `ghcr.io/micka420-collab/vibeos` avec **cosign en mode keyless** (OIDC du workflow, certificat Fulcio, journal de transparence Rekor). Pas de clé privée à protéger ; l'identité de signature est « ce dépôt, ce workflow, cette branche ».
-- **Vérification côté client (Phase 2)** : la politique des conteneurs de l'hôte (`/etc/containers/policy.json` + `registries.d`) exigera `sigstoreSigned` pour `ghcr.io/micka420-collab/vibeos` — `bootc upgrade` refusera toute image non signée ou signée par une autre identité. Tant que cette vérification n'est pas active, la signature existe mais ne protège pas : c'est explicitement un trou connu de la v0.1, fermé en Phase 2.
+- **Vérification côté client (Phase 4 — [ROADMAP.md](../ROADMAP.md) fait foi)** : la politique des conteneurs de l'hôte (`/etc/containers/policy.json` + `registries.d`) exigera `sigstoreSigned` pour `ghcr.io/micka420-collab/vibeos` — `bootc upgrade` refusera toute image non signée ou signée par une autre identité. Tant que cette vérification n'est pas active, la signature existe mais ne protège pas : c'est explicitement un trou connu, fermé en Phase 4 avec le reste du durcissement de la chaîne de mise à jour.
 - **Provenance (Phase 5)** : attestations SLSA (commit, workflow, matériaux) attachées à l'image et vérifiées en plus de la signature.
 - Les ISO produites par bootc-image-builder sont publiées avec sommes SHA-256 signées.
 
@@ -174,12 +174,12 @@ La création de la mémoire au premier boot est décrite dans [MEMORY.md](MEMORY
 | Root immuable + composefs/fs-verity | ✅ (hérité bootc) | | | | |
 | Secure Boot (chaîne Fedora) | ✅ | | | UKI + TPM | clés propres |
 | SELinux enforcing | ✅ (targeted) | | | politique `vibed_t` | |
-| Signature cosign des images | ✅ (CI) | vérif. client | | | provenance SLSA |
+| Signature cosign des images | ✅ (CI) | | | vérif. client | provenance SLSA |
 | Moteur de politiques + tiers + approbation T2+ | politique par défaut installée (`/etc/vibeos/policy.d`) | ✅ (servi par `vibed`) | | | |
 | Audit JSONL append-only (`vibed.jsonl`, identité appelant, digest FNV-1a) | | ✅ | | hash chain + journald/FSS + TPM | export distant |
 | Genesis + mémoire | ✅ (répertoire en clair) | | LUKS + amnésique | scellement TPM | |
 | Sandbox par outil (systemd-run + seccomp + Landlock) | durcissement `vibed.service` (root, deny-list) | | ✅ | `User=vibed`, caps allow-list vide | |
-| Secrets systemd-creds / keyring | | ✅ (local) | | scellés TPM2 | |
+| Secrets systemd-creds / keyring | | cible (local — non câblé) | | scellés TPM2 | |
 | ISO chiffrée par défaut | | | | | ✅ |
 
 *Le détail calendaire des phases est maintenu dans [../ROADMAP.md](../ROADMAP.md) ; en cas de divergence, la roadmap fait foi sur le « quand », ce document fait foi sur le « quoi » et le « comment ».*

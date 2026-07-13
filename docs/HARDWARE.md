@@ -34,7 +34,7 @@ Pas encore de machine de référence physique. Cibles visées :
 
 Contraintes arm64 :
 - Pas de driver NVIDIA : la couche `akmod-nvidia` est **conditionnée à l'architecture** dans le Containerfile (amd64 uniquement).
-- Builds arm64 en CI via qemu-user-static (émulation) — plus lents, mais sans infrastructure dédiée.
+- Builds arm64 en CI sur runners natifs `ubuntu-24.04-arm` — pas d'émulation qemu (voir [BUILD.md](BUILD.md) §1).
 - ollama fonctionne en CPU sur arm64 ; accélération GPU hors périmètre pour l'instant.
 
 ## Matrice de build

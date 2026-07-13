@@ -12,9 +12,11 @@
 // ---------------------------------------------------------------------------
 // DATA SOURCE — read this before touching anything (honesty rule)
 // ---------------------------------------------------------------------------
-// v0.1 (this file, shipped): every value comes from the MOCK functions in
-// vibed_client.js. `vibedOnline` is hardwired false — in Phase 1 /usr/bin/vibed
-// is not in the image yet. The HUD MUST render a clean "daemon offline" state:
+// Current state (this file, shipped): every value comes from the MOCK functions
+// in vibed_client.js. `vibedOnline` is hardwired false — /usr/bin/vibed IS
+// shipped in the image and runs at boot (Phase 2), but this QML does not open
+// the socket yet: the live wiring below is the remaining Phase 2 work. The HUD
+// MUST render a clean "daemon offline" state:
 // never crash, never show fake "live" data (DESKTOP.md §6, graceful degradation).
 //
 // TODO(Phase 2): replace the mocks with a real client on the vibed MCP socket
@@ -57,8 +59,9 @@ import "vibed_client.js" as Vibed
 ShellRoot {
     id: root
 
-    // ----- HUD state (v0.1: MOCK — see header for Phase 2) -----
-    // Hardwired offline in v0.1: honest about Phase 1 (no /usr/bin/vibed).
+    // ----- HUD state (MOCK — see header for the Phase 2 socket wiring) -----
+    // Hardwired offline: vibed ships and runs in the image, but this shell
+    // does not open the socket yet — honest about the missing live wiring.
     // DESIGN PREVIEW ONLY: flip to true to see the mocked "online" layout
     // (agent chips, tier pills, gauges). Never ship it as true.
     property bool vibedOnline: false

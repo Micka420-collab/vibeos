@@ -107,8 +107,8 @@ Tout ce qui traverse la frontière `AGENT → VIBED` est traité comme une entr�
 **Scénario.** Trois variantes : (a) une crate Rust de `vibed` est compromise (typosquat ou mainteneur piraté) et introduit une porte dérobée dans la TCB ; (b) l'image de base Fedora ou un RPM embarqué est altéré ; (c) le pipeline CI est compromis et publie une image `ghcr.io/micka420-collab/vibeos` malveillante que les machines installeraient à la prochaine mise à jour.
 
 **Mitigations :**
-1. **Images signées cosign** : signature en CI (keyless, OIDC GitHub Actions — livrée v0.1). La **vérification obligatoire côté client** avant staging d'un déploiement bootc (rejet de toute image non signée ou mal signée) est la cible Phase 2.
-2. **Lockfiles et épinglage** (livré v0.1) : `Cargo.lock` commité, image de base référencée par digest (pas par tag), CLIs IA npm/pip installés en versions épinglées, tarball ollama vérifié par somme de contrôle. `cargo audit`/`cargo deny` en CI : cible Phase 2.
+1. **Images signées cosign** : signature en CI (keyless, OIDC GitHub Actions — livrée v0.1). La **vérification obligatoire côté client** avant staging d'un déploiement bootc (rejet de toute image non signée ou mal signée) est la cible **Phase 4** ([ROADMAP.md](../ROADMAP.md) fait foi).
+2. **Lockfiles et épinglage** (livré v0.1) : `Cargo.lock` commité (et imposé par `--locked` en CI), image de base référencée par digest (pas par tag), CLIs IA npm installés en versions épinglées, tarball ollama vérifié par somme de contrôle. `cargo audit` en CI : **livré** (job dédié) ; `cargo deny` : cible.
 3. **Provenance** (Phase 5) : attestations de build (SLSA) attachées à l'image — quel commit, quel workflow, quel runner ; vérifiables indépendamment de la signature.
 4. **Immuabilité + rollback** : une image compromise ne peut pas modifier les déploiements précédents ; le retour arrière est atomique.
 5. **Surface minimale** : l'image ne contient que le nécessaire ; chaque ajout de paquet est revu.
@@ -149,16 +149,19 @@ Phases de la [../ROADMAP.md](../ROADMAP.md) (qui fait foi) : Phase 1 = v0.1 Prem
 |---|---|---|
 | S1 Injection → action système | Tiers T0–T3, défaut = refus (politique installée dès la v0.1) | Phase 2 |
 | S1 | Approbation humaine T2+ hors bande | Phase 2 |
+| S1 | `svc.status` (T0) : lecture seule d'état d'unité — validation stricte du nom (anti-injection d'option/chemin), `systemctl` par chemin absolu, environnement vidé | Phase 2 ✅ |
 | S1 | Sandbox par outil (systemd-run, seccomp, Landlock) | Phase 3 |
 | S1 | Taint tracking de provenance du contexte | Phase 6+ |
 | S2 Exfiltration mémoire | LUKS sur `/var/lib/vibeos/memory` | Phase 3 |
 | S2 | Politiques fs (deny audit/secrets, write confiné) + denylist en dur | Phase 2 |
+| S2 | `fs.list` (T0) : listing borné (500 entrées), même denylist que `fs.read`, symlinks signalés jamais suivis | Phase 2 ✅ |
+| S2 | Denylist étendue aux credentials des agents IA (`~/.claude/`, `~/.config/gh/`, `~/.gemini/`, `~/.codex/`, opencode, ollama, npmrc, git-credentials, SOPS) | Phase 2 ✅ |
 | S2 | Audit de tous les accès mémoire | Phase 2–3 |
 | S2 | Mode amnésique (tmpfs) | Phase 3 |
 | S2 | Contrôle d'egress réseau par agent | Phase 6+ |
-| S3 Supply chain | Signature cosign (livrée, CI) / vérification client | Phase 1 ✅ / Phase 2 |
+| S3 Supply chain | Signature cosign (livrée, CI) / vérification client | Phase 1 ✅ / Phase 4 |
 | S3 | Lockfiles, digests épinglés (base + CLIs) | Phase 1 ✅ |
-| S3 | cargo audit / cargo deny en CI | Phase 2 |
+| S3 | cargo audit en CI (job dédié, RustSec) / cargo deny | Phase 2 ✅ / cible |
 | S3 | Provenance SLSA des images | Phase 5 |
 | S3 | Rollback atomique bootc | Phase 1 ✅ |
 | S4 Modèle local empoisonné | Confinement structurel par `vibed` (tiers) | Phase 2 |
@@ -177,5 +180,5 @@ Phases de la [../ROADMAP.md](../ROADMAP.md) (qui fait foi) : Phase 1 = v0.1 Prem
 1. **Pas de défense au niveau du modèle** : on ne « patche » pas l'injection de prompt, on la contient. Toute affirmation contraire dans une PR est une erreur.
 2. **L'humain est un point faible** : la fatigue d'approbation (cliquer « oui » machinalement sur les demandes T2) est réelle. Mitigations UX prévues : présentation du diff exact de l'action, friction croissante avec le risque, budget d'approbations.
 3. **T0/T1 restent puissants** : lire `/home` et écrire du code suffit à un attaquant patient. Le périmètre v0.x protège le *système* et les *secrets* d'abord, les *projets* ensuite.
-4. **La v0.1 est une fondation, pas un système durci** : la mémoire est **en clair au repos** jusqu'à la Phase 3 (LUKS) ; `vibed` s'exécute en **root** et les outils en **in-process** jusqu'aux Phases 3/4 (sandbox par outil, `User=vibed`) ; la signature cosign existe mais n'est **pas encore vérifiée côté client** (Phase 2). Ces écarts sont suivis dans le tableau §6 et dans [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) §9.
+4. **La v0.1 est une fondation, pas un système durci** : la mémoire est **en clair au repos** jusqu'à la Phase 3 (LUKS) ; `vibed` s'exécute en **root** et les outils en **in-process** jusqu'aux Phases 3/4 (sandbox par outil, `User=vibed`) ; la signature cosign existe mais n'est **pas encore vérifiée côté client** (Phase 4). Ces écarts sont suivis dans le tableau §6 et dans [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) §9.
 5. Ce modèle est un document vivant : chaque nouvel outil MCP exposé par `vibed` doit ajouter sa ligne au tableau §6 avant merge (règle CI, voir [../SECURITY.md](../SECURITY.md) §4).

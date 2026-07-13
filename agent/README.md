@@ -62,7 +62,7 @@ En mode hors-ligne, `opencode` pointé sur `ollama` reste la voie de vibecoding 
 | `OPENAI_API_KEY` | `codex`, `opencode` (mode OpenAI) | |
 | `OLLAMA_HOST` | `opencode`, clients ollama | Local, aucune clé — défaut `http://127.0.0.1:11434` |
 
-**Où vivent ces clés** — le mécanisme de référence est celui de [docs/SECURITY-ARCHITECTURE.md](../docs/SECURITY-ARCHITECTURE.md), §4, qui fait foi :
+**Où vivent ces clés** — le mécanisme **cible** est celui de [docs/SECURITY-ARCHITECTURE.md](../docs/SECURITY-ARCHITECTURE.md), §4, qui fait foi (**non câblé à ce stade** : aujourd'hui chaque CLI gère ses credentials elle-même — `claude` via `~/.claude/`, `gh` via `~/.config/gh/`, etc. — et la denylist codée en dur de `vibed` interdit aux agents de lire ces magasins) :
 
 - via **`systemd-creds`** : credentials chiffrés (scellés TPM2 quand le matériel le permet), exposés aux services uniquement sous `/run/credentials/` ;
 - ou via le **kernel keyring** pour les usages de session.
@@ -74,7 +74,7 @@ Interdits absolus :
 - **jamais dans `environment.d`** ni aucune variable d'environnement persistée : l'environnement d'un processus fuit via `/proc/<pid>/environ` ;
 - **jamais sur le volume mémoire de VibeOS** (`/var/lib/vibeos/memory`) : la mémoire n'est pas un coffre à secrets.
 
-Les variables du tableau ci-dessus sont peuplées au lancement des CLIs depuis ces credentials — elles ne sont jamais stockées telles quelles.
+Cible : les variables du tableau ci-dessus seront peuplées au lancement des CLIs depuis ces credentials — jamais stockées telles quelles.
 
 ## Interview Genesis (`genesis_interview.py`) — prototype Phase 3
 

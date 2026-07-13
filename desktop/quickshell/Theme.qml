@@ -165,7 +165,7 @@ Singleton {
     readonly property color tierT2: peach     // modify-system (approval)
     readonly property color tierT3: red       // destructive (approval+)
     readonly property color tierWait:    yellow    // indeterminate / paused
-    readonly property color tierOffline: overlay1   // vibed offline (Phase 1)
+    readonly property color tierOffline: overlay1   // vibed offline / unreachable
 
     // Companion tones for the conic tier gradients (DESIGN-SYSTEM §7).
     readonly property var _tierBase: [tierT0, tierT1, tierT2, tierT3]

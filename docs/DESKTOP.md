@@ -3,7 +3,7 @@
 > Version : v0.1 (fondation) — Date : 2026-07-03
 > Statut : document de référence du chantier bureau. Sources amont : [ECOSYSTEM.md](ECOSYSTEM.md) (stack curée), [ARCHITECTURE.md](ARCHITECTURE.md) (vibed, tiers T0–T3), [MEMORY.md](MEMORY.md) (mémoire, mode amnésique). Fichiers du chantier : [`desktop/`](../desktop/README.md).
 >
-> **Convention de lecture (règle d'honnêteté du projet)** : tout ce qui n'est pas livré en v0.1 est marqué **Phase N** (numérotation de [ROADMAP.md](../ROADMAP.md)). En v0.1, la couche bureau réellement embarquée dans l'image se limite au **schéma de couleurs `VibeOSDark.colors`**, aux **dotfiles terminal `/etc/skel`** (fish/Starship/Ghostty/Zellij/nvim) et aux **polices** (JetBrains Mono / Fira Code). Le **HUD Quickshell** (rendu comme liaison à `vibed`), le **Global Theme / layout**, le **preset Panel Colorizer**, les **activités** et les **raccourcis** sont des livrables **Phase 2** ; les **wallpapers** et le branding relèvent de la **Phase 5**. Aucun mécanisme non implémenté n'est décrit au présent.
+> **Convention de lecture (règle d'honnêteté du projet)** : tout ce qui n'est pas livré en v0.1 est marqué **Phase N** (numérotation de [ROADMAP.md](../ROADMAP.md)). En v0.1, la couche bureau réellement embarquée dans l'image se limite au **schéma de couleurs `VibeOSDark.colors`**, aux **dotfiles terminal `/etc/skel`** (fish/Starship/Ghostty/Zellij/nvim) et aux **polices** (JetBrains Mono / Fira Code). Le **HUD Quickshell** (rendu + autostart, données mockées) et le **Global Theme / layout** sont **livrés** (Phase 2) ; le **branchement live du HUD sur `vibed`**, le **preset Panel Colorizer**, les **activités** et les **raccourcis** restent des livrables **Phase 2** ; les **wallpapers** sont livrés dans l'image (« VibeOS » posé en défaut par le Global Theme, « Genesis »/« Void » sélectionnables) ; le branding complet (logo, activation SDDM/Plymouth) relève de la **Phase 5**. Aucun mécanisme non implémenté n'est décrit au présent.
 
 ---
 
@@ -97,7 +97,7 @@ Tout est posé **au build** (jamais à l'exécution). La colonne « Statut » di
 | Défauts utilisateur **bureau** (raccourcis, activités) | `/etc/skel/.config/…` | 🛣️ Phase 2 |
 | HUD Quickshell | Runtime compilé dans l'image (étage `quickshell-builder`) ; QML sous `/usr/share/vibeos/quickshell/` ; autostart `/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud` | ✅ livré (Phase 2) — données mockées (§2.4) |
 | Config MCP Claude Code → `vibed` | `/etc/skel/.claude.json` (pont `socat` vers `/run/vibed/mcp.sock`) | ✅ livré (Phase 2) |
-| Wallpapers | `/usr/share/wallpapers/VibeOSDark/` | 🛣️ Phase 5 (branding) |
+| Wallpapers (« VibeOS » défaut, « Genesis », « Void ») | `/usr/share/wallpapers/{VibeOS,VibeOSDark,VibeOSVoid}/` — défaut posé par le Global Theme (`[Wallpaper] Image=VibeOS`) | ✅ livré (Phase 2) — série de branding complète : Phase 5 |
 
 Le `Containerfile` livre désormais toute la chaîne : couche terminal (Ghostty, polices), assets du thème, **runtime Quickshell compilé** (étage `quickshell-builder` — aucun paquet Fedora 42 n'existe, voir `desktop/quickshell/README.md`), **moteur Kvantum** (couche 1g), **pointeur de thème par défaut** (`/etc/xdg/kdeglobals`) et **autostart du HUD** (`/etc/skel`). Reste **Phase 2** : le preset **Panel Colorizer** (verre panneau/dock) et le **branchement live du HUD** sur le socket `vibed`. Ce document ne fait que **référencer** ces éléments — le Containerfile est un chantier distinct.
 
@@ -121,8 +121,8 @@ Les activités Plasma (mécanisme natif, stable) incarnent le pilier **Contexte*
 
 ## 4. La session par défaut
 
-1. **SDDM** (thème Breeze en v0.1 ; thème VibeOS en **Phase 5**, base SDDM Astronaut — voir ECOSYSTEM niveau 3) ouvre une **session Plasma 6 Wayland** (X11 non installé, héritage Kinoite).
-2. La session s'ouvre en **Global Theme VibeOS Dark par défaut** (pointeur `/etc/xdg/kdeglobals`, layout panneau + dock du paquet `org.vibeos.dark` appliqué aux nouvelles sessions ; surchargeable par utilisateur). Le wallpaper par défaut reste Breeze (branding **Phase 5**).
+1. **SDDM** (greeter par défaut : Breeze ; le thème SDDM VibeOS original est **copié dans l'image**, sélectionnable — activation par défaut en **Phase 5**, voir `desktop/sddm/`) ouvre une **session Plasma 6 Wayland** (X11 non installé, héritage Kinoite).
+2. La session s'ouvre en **Global Theme VibeOS Dark par défaut** (pointeur `/etc/xdg/kdeglobals`, layout panneau + dock du paquet `org.vibeos.dark` appliqué aux nouvelles sessions ; surchargeable par utilisateur). Le wallpaper par défaut est **« VibeOS »**, posé par le Global Theme (« Genesis » et « Void » restent sélectionnables).
 3. L'**autostart utilisateur** livré dans l'image (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`, `$HOME` — pas de service système) **lance le HUD Quickshell** en session Plasma. Le supprimer de son `$HOME` désactive le HUD.
 4. **Reste Phase 2** : le HUD tentera `connect()` sur `/run/vibed/mcp.sock` (aujourd'hui le QML n'ouvre aucun socket — données mockées, pastille « hors ligne ») :
    - `vibed` étant désormais embarqué et démarré au boot, le socket existe → handshake MCP, abonnement aux événements, données vives (§6) ;
@@ -172,9 +172,9 @@ v0.1 : **Breeze** (défaut Plasma, LGPL) — aucun fork d'icônes tant que le br
 
 ### 5.4 Wallpapers et branding
 
-- v0.1 : **deux wallpapers originaux** (créés pour le projet, licence du dépôt — aucun asset tiers non redistribuable) : « Genesis » (dégradé Base→Crust avec halo Mauve, pour Vibe/Review) et « Void » (Crust quasi uni, pour Focus). Livrés dans `/usr/share/wallpapers/VibeOSDark/`.
+- **Trois wallpapers originaux livrés dans l'image** (créés pour le projet, licence du dépôt — aucun asset tiers non redistribuable) : « VibeOS » (fond officiel, **défaut** posé par le Global Theme), « Genesis » (dégradé Base→Crust avec halo Mauve, pour Vibe/Review) et « Void » (Crust quasi uni, pour Focus). Copiés sous `/usr/share/wallpapers/` (paquets `VibeOS`, `VibeOSDark`, `VibeOSVoid` — sources : `desktop/wallpapers/`).
 - Logo : glyphe provisoire en v0.1 (le nom lui-même est un nom de code — voir ROADMAP Phase 5).
-- **Phase 5** : identité complète — logo définitif, SDDM (base Astronaut), **Plymouth original** (l'existant adi1090x est rejeté pour provenance d'assets floue, cf. ECOSYSTEM), GRUB, lignes directrices de marque.
+- **Phase 5** : identité complète — logo définitif, **activation par défaut** des thèmes SDDM et Plymouth VibeOS (originaux, déjà copiés dans l'image sous `/usr/share/sddm/themes/vibeos/` et `/usr/share/plymouth/themes/vibeos/` — l'existant adi1090x reste rejeté pour provenance d'assets floue, cf. ECOSYSTEM), GRUB, lignes directrices de marque.
 
 ---
 
@@ -251,13 +251,13 @@ Le bureau réussit si, à chaque étape, les trois questions du triptyque ont un
 | Preset Panel Colorizer | ❌ | 🛣️ **Phase 2** | — | — |
 | Activités Vibe / Focus / Review pré-configurées | ❌ | 🛣️ **Phase 2** (`/etc/skel`) + couplage agents (piste) | — | — |
 | Raccourcis globaux (§7) | ❌ | 🛣️ **Phase 2** (`/etc/skel/kglobalshortcutsrc`, actions branchées sur vibed) | — | — |
-| Wallpapers originaux (Genesis, Void) | ❌ | — | — | 🛣️ **Phase 5** (série complète + logo) |
+| Wallpapers originaux (VibeOS, Genesis, Void) | ❌ | ✅ **livré** (copiés dans l'image ; « VibeOS » défaut via le Global Theme) | — | 🛣️ Phase 5 (série complète + logo) |
 | HUD Quickshell — rendu, panneaux, état « vibed hors ligne » | ❌ | ✅ **livré** (runtime compilé + autostart ; données mockées) | — | — |
 | HUD ↔ vibed : agents, tiers, décisions **en direct** | ❌ | 🛣️ **Phase 2** (socket MCP `/run/vibed/mcp.sock`) | — | — |
 | Panneau Mémoire du HUD (`memory.query`) | ❌ (état « non accessible ») | 🛣️ Phase 2 | enrichi (mémoire v2) | — |
 | Dialogues d'approbation T2/T3 dans Plasma | ❌ (T2/T3 = refus fail-closed, cf. [ARCHITECTURE.md](ARCHITECTURE.md) §4.5) | 🛣️ Phase 2 | — | — |
 | Indicateur de mode amnésique dans la zone système | ❌ | — | 🛣️ **Phase 3** (avec le mode lui-même) | — |
-| Thème SDDM (base Astronaut), Plymouth original, GRUB, icônes | ❌ (Breeze) | — | — | 🛣️ **Phase 5** |
+| Thèmes SDDM et Plymouth VibeOS (originaux) | ❌ (Breeze / défaut distro) | ✅ **copiés dans l'image** (sélectionnables, non actifs par défaut ; PNG Plymouth à générer) | — | 🛣️ **Phase 5** (activation par défaut, GRUB, icônes) |
 | Session « focus » distincte au login | ❌ | — | — | 🛣️ Phase 5 (optionnelle) |
 
 ---

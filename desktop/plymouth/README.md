@@ -2,7 +2,7 @@
 
 Ce dossier contient le **thème Plymouth « VibeOS »** : l'écran de boot affiché pendant le démarrage du noyau et de l'initramfs, avant le greeter SDDM. C'est **le premier accord de la partition** : minimal, mais déjà dans la tonalité VibeOS — fond Crust, marque qui respire, anneau signature mauve→blue.
 
-> **Statut : 🛣️ Phase 5 (branding).** En v0.1, le boot utilise le thème Plymouth par défaut de la distribution. Ce thème est **conçu et écrit en entier maintenant** ; il ne devient le splash par défaut qu'une fois **activé en Phase 5** (voir plus bas — étape spécifique à un OS immuable). Rien ici ne modifie le boot v0.1.
+> **Statut : copié dans l'image, non actif par défaut — activation 🛣️ Phase 5 (branding).** Le thème est **copié au build** sous `/usr/share/plymouth/themes/vibeos/`, mais le boot utilise toujours le thème Plymouth par défaut de la distribution tant qu'il n'est pas **activé en Phase 5** (voir plus bas — étape spécifique à un OS immuable, régénération de l'initramfs). Les trois PNG (`mark`, `ring`, `wordmark`) restent **à générer** : en leur absence, le splash retombe sur le simple fond dégradé (dégradation gracieuse réelle). Rien ici ne modifie le splash par défaut.
 
 Référence de design : [docs/DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md) **§11.1 (Boot)**. Palette : [desktop/theme/palette.md](../theme/palette.md).
 
@@ -79,7 +79,7 @@ plymouthd --debug --tty=/dev/tty1 ; plymouth --show-splash   # puis plymouth qui
 
 ## Honnêteté (invariant projet)
 
-- **Ce n'est pas dans l'image v0.1.** Le boot v0.1 utilise le thème par défaut ; ce dossier est la **cible** Phase 5.
+- **Copié dans l'image, non actif par défaut.** Le splash par défaut reste celui de la distribution tant que la Phase 5 n'active pas le thème (régénération initramfs au build) ; les trois PNG restent à générer — le script se dégrade proprement sans eux.
 - **Œuvre originale.** Marque, anneau et mouvement sont dessinés pour VibeOS. Le pack adi1090x est **explicitement écarté** pour provenance d'assets floue ([docs/DESKTOP.md](../../docs/DESKTOP.md) §5.4) : aucun asset tiers non redistribuable n'entre ici.
 - **Cohérence de tonalité** : le Crust et le dégradé signature du splash sont **identiques** à ceux de l'écran SDDM (§11.2) et du HUD — boot → login → bureau racontent la même histoire.
 - **Dégradation gracieuse** : assets manquants ⇒ fond seul, jamais d'erreur.

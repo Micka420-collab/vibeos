@@ -44,7 +44,7 @@ Un OS qui donne de vrais pouvoirs à des agents autonomes n'a pas le droit d'êt
 
 VibeOS assume ses emprunts : Fedora Kinoite comme base, des modèles cloud comme cerveaux, des outils tiers comme membres. C'est le prix d'un départ honnête. Mais la trajectoire est explicite : **année après année, remplacer les briques empruntées par les nôtres**.
 
-Les modèles locaux via ollama sont la première marche — coder hors ligne est déjà possible dès la v0.1. Suivront nos propres composants système (`vibectl` et au-delà), nos propres politiques de référence, et à mesure que le projet mûrit, une base de plus en plus détenue en propre. La dépendance est un état de départ, jamais une destination. La feuille de route de cette émancipation est dans [ROADMAP.md](ROADMAP.md).
+Les modèles locaux via ollama sont la première marche — l'image v0.1 embarque tout pour coder hors ligne (la validation formelle « `ollama run` sans réseau » est un critère de sortie de la Phase 1). Suivront nos propres composants système (`vibectl` et au-delà), nos propres politiques de référence, et à mesure que le projet mûrit, une base de plus en plus détenue en propre. La dépendance est un état de départ, jamais une destination. La feuille de route de cette émancipation est dans [ROADMAP.md](ROADMAP.md).
 
 ### 5. L'OS se construit lui-même
 

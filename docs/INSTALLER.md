@@ -154,8 +154,8 @@ dans [MEMORY.md](MEMORY.md) §4.1) :
    avec ses placeholders, sans interaction.
 4. `vibed.service` démarre : le binaire `/usr/bin/vibed` est **embarqué dans
    l'image** (la garde `ConditionPathExists=/usr/bin/vibed` reste en place et
-   sauterait proprement l'unité si le binaire manquait). Le HUD Quickshell
-   affiche encore **« daemon offline »** (données mockées) tant que son
+   sauterait proprement l'unité si le binaire manquait). Le HUD Quickshell est
+   **livré et auto-démarré**, mais ses données restent **mockées** tant que son
    branchement live sur le socket n'est pas codé — reste du chantier Phase 2.
 5. SDDM → session KDE Plasma 6.
 
@@ -194,7 +194,7 @@ flowchart TD
     COND -- "non (premier boot)" --> GEN["vibeos-genesis.service →<br/>genesis.sh crée /var/lib/vibeos/memory<br/>(identité, matériel, journal, .initialized)"]
     COND -- oui --> VIBED
     GEN --> ITV["[Phase 3] Interview de naissance<br/>(v0.1 : aucune interaction)"]
-    ITV --> VIBED["vibed.service<br/>Phase 1 : sauté (pas de /usr/bin/vibed)<br/>→ HUD « daemon offline »"]
+    ITV --> VIBED["vibed.service<br/>démarre (binaire embarqué dans l'image)<br/>→ HUD auto-démarré (données mockées)"]
     VIBED --> PLASMA["SDDM → KDE Plasma 6"]
 ```
 
@@ -209,7 +209,7 @@ flowchart TD
 | Layout disque par défaut Btrfs LUKS-ready | ✅ Livré v0.1 (kickstart) |
 | Création d'utilisateur (config.toml / interactif) | ✅ Livré v0.1 |
 | Genesis au premier boot (mémoire créée, `.initialized`) | ✅ Livré v0.1 |
-| Dégradation propre sans `vibed` (unité sautée, HUD « daemon offline ») | ✅ Livré v0.1 |
+| `vibed.service` actif au boot (binaire embarqué ; garde `ConditionPathExists` conservée en dégradation propre) + HUD Quickshell auto-démarré (données mockées) | ✅ Livré (Phase 2) |
 | Branding Anaconda (logo minimal) | 🟡 v0.1 si trivial, sinon stock — complet en Phase 5 |
 | Volume LUKS2 `vibeos-memory` + entrée de boot amnésique (`vibeos.amnesic=1`) | 🛣️ Phase 3 |
 | Interview de naissance au premier boot | 🛣️ Phase 3 |

@@ -15,7 +15,7 @@
         "Version": "0.1.0",
         "Website": "https://github.com/vibeos"
     },
-    "X-VibeOS-Phase": "Phase 2 — Global Theme is authored now, wired into the image in Phase 2 (DESKTOP.md §2.6). Only the color scheme ships in the v0.1 image.",
+    "X-VibeOS-Phase": "Phase 2 — DELIVERED: this package ships in the image AND is the system default via /etc/xdg/kdeglobals (LookAndFeelPackage=org.vibeos.dark, KConfig cascade, user-overridable). See DESKTOP.md §2.6, §9.",
     "X-VibeOS-Note": "KDE reads the authoritative component wiring from contents/defaults, NOT from this file. The map below is documentation only, mirroring contents/defaults so the package is self-describing.",
     "X-VibeOS-Components": {
         "colorScheme": "VibeOSDark — desktop/theme/vibeos-dark.colors → /usr/share/color-schemes/VibeOSDark.colors (accent Mauve #cba6f7)",

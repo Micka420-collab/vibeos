@@ -17,7 +17,7 @@ Toute contribution, toute décision d'architecture et toute revue de code doiven
 - Aucun composant de VibeOS ne doit écrire dans `/usr`. L'état mutable est confiné à `/etc` (géré) et `/var`.
 
 ### 1.2 Vérifié
-- **Livré en v0.1** : les images OS sont signées avec sigstore/cosign (keyless) en CI, à chaque push sur la branche principale.
+- **Livré en v0.1** : les images OS publiées sont signées avec sigstore/cosign (keyless) en CI — la signature accompagne chaque **release** (tag `v*`, ou dispatch manuel explicitement confirmé). Les push ordinaires sur la branche principale déclenchent un build de vérification **non publié et non signé** : il n'existe donc pas d'image officielle non signée.
 - **Livré en v0.1** : les dépendances sont réellement épinglées — `vibed/Cargo.lock` commité, CLIs npm installées en versions exactes, image de base référencée par digest (`fedora-kinoite:42@sha256:…`), archives binaires (ollama) et sources compilées (quickshell) vérifiées par sha256 avant usage.
 - **Livré (2026-07-08, suites de l'audit)** :
   - les **GitHub Actions sont épinglées par SHA de commit** (le tag lisible reste en commentaire ; un tag ne peut plus être déplacé sous la CI) ;
@@ -28,7 +28,7 @@ Toute contribution, toute décision d'architecture et toute revue de code doiven
 
 ### 1.3 Chiffré
 - La mémoire de la machine (`/var/lib/vibeos/memory`) est créée au premier démarrage par `vibeos-genesis.service` (source : [memory/genesis.sh](memory/genesis.sh)). **En v0.1 elle est écrite en clair** : le chiffrement **LUKS** (déverrouillage TPM2 en option) est un livrable de la **Phase 3**, tout comme le mode amnésique qui la reconstruira en tmpfs à chaque boot (generator systemd). Documenté honnêtement — voir [docs/MEMORY.md](docs/MEMORY.md) et [ROADMAP.md](ROADMAP.md).
-- Règle invariable : les secrets (clés API des fournisseurs IA, jetons) ne sont **jamais stockés en clair**, jamais dans `environment.d`, et jamais dans la mémoire VibeOS : ils passent par `systemd-creds` (scellés TPM2 quand disponible) et le kernel keyring — voir [docs/SECURITY-ARCHITECTURE.md](docs/SECURITY-ARCHITECTURE.md), §4.
+- Règle invariable (de conception) : les secrets (clés API des fournisseurs IA, jetons) ne doivent **jamais être stockés en clair**, jamais dans `environment.d`, et jamais dans la mémoire VibeOS. Le mécanisme cible est `systemd-creds` (scellés TPM2 quand disponible) + kernel keyring — voir [docs/SECURITY-ARCHITECTURE.md](docs/SECURITY-ARCHITECTURE.md), §4 — **non câblé à ce stade** : aucun composant VibeOS ne collecte ni ne stocke encore ces secrets (les CLIs IA gèrent les leurs). En attendant, la denylist codée en dur de `vibed` interdit aux agents de lire les magasins de credentials, y compris ceux des agents IA eux-mêmes (`~/.claude/`, `~/.config/gh/`, `~/.gemini/`, `~/.codex/`, opencode, ollama…), pour tous les utilisateurs.
 - Le chiffrement intégral du disque à l'installation est l'objectif par défaut de l'ISO (installateur : Phase 5).
 
 ### 1.4 Audité
@@ -48,8 +48,10 @@ Toute contribution, toute décision d'architecture et toute revue de code doiven
 **Ne créez jamais d'issue GitHub publique pour une vulnérabilité.**
 
 ### Canal de signalement
+> **État présent (dépôt privé)** : tant que le dépôt n'est pas public, seuls ses collaborateurs peuvent le voir — une issue du dépôt (privée de fait) est acceptable pour eux. Les deux canaux ci-dessous décrivent le dispositif à l'ouverture publique ; l'adresse e-mail de contact et la clé PGP seront publiées **dans ce fichier avant** la première release publique (bloquant de la Phase 6).
+
 1. **Préféré** : GitHub Security Advisories — onglet *Security → Report a vulnerability* du dépôt (signalement privé), dès que le dépôt public existe.
-2. **Alternative** : e-mail au mainteneur avec le préfixe de sujet `[VIBEOS-SEC]`. Une clé PGP de contact sera publiée dans ce fichier avant la première release publique.
+2. **Alternative** : e-mail au mainteneur avec le préfixe de sujet `[VIBEOS-SEC]` (adresse et clé PGP publiées ici avant la première release publique).
 
 ### Contenu attendu
 - Description de la vulnérabilité et composant affecté (`vibed`, moteur de politiques, genesis, image, CI…).
@@ -94,7 +96,7 @@ Le projet étant pré-1.0 et maintenu bénévolement, ces délais sont des objec
 
 ## 4. Pratiques de développement sécurisé
 
-- **Rust** pour `vibed` : pas d'`unsafe` sans justification commentée et revue dédiée. La CI livrée (`.github/workflows/ci.yml`) exécute `cargo build`, `cargo test` et `cargo clippy -- -D warnings` en bloquant ; `cargo audit` et `cargo deny` sont une cible Phase 2.
+- **Rust** pour `vibed` : pas d'`unsafe` sans justification commentée et revue dédiée. La CI livrée (`.github/workflows/ci.yml`) exécute en bloquant : `cargo fmt --check`, `cargo build --locked`, `cargo test --locked` (dont les tests d'intégration MCP bout-en-bout sur socket), `cargo clippy --all-targets --locked -- -D warnings` et **`cargo audit`** (advisories RustSec, job dédié) ; `cargo deny` reste une cible.
 - Dépendances épinglées — c'est effectif : `vibed/Cargo.lock` commité, paquets npm installés en versions exactes **avec `--ignore-scripts`**, image de base référencée par digest, GitHub Actions épinglées par SHA, archives/sources tierces vérifiées par sha256, inventaire NEVRA embarqué dans l'image. Les mises à jour de dépendances (dont les bumps de SHA d'Actions et de digest de base) sont revues comme du code, dans des commits dédiés.
 - Toute nouvelle capacité exposée aux agents (nouvel outil MCP) doit déclarer son tier, ses contraintes de chemin et son entrée dans le modèle de menace **avant** merge.
 - Les tests de non-régression sécurité livrés (refus par défaut, outil inconnu refusé, T2/T3 jamais auto-approuvés, chargement effectif de `security/policy.d/default.toml`, denylist de chemins) sont exécutés par la CI et bloquants ; la couverture s'étend à chaque nouvel outil.

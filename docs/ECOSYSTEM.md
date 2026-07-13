@@ -3,9 +3,9 @@
 > Issue d'une veille GitHub multi-sondes (**113 projets candidats**, 7 catégories) suivie d'une curation stricte : licence redistribuable dans une ISO, maintenance active, offline-first, compatibilité OS immuable (bootc), non-redondance (« un seul terminal, un seul prompt, une seule distro Neovim »).
 > Datée du **2026-07-03** — à re-vérifier avant chaque intégration (versions, licences, activité).
 
-## ⚠️ Correction bloquante identifiée
+## ✅ Correction bloquante — appliquée
 
-**Les binaires officiels VS Code sont propriétaires et NON redistribuables dans une ISO.** L'image doit les remplacer par **VSCodium** (MIT, marketplace Open VSX où Cline et Continue sont publiés). → À appliquer dans `os/Containerfile` avant la première release.
+**Les binaires officiels VS Code sont propriétaires et NON redistribuables dans une ISO.** L'image les remplace par **VSCodium** (MIT, marketplace Open VSX où Cline et Continue sont publiés). → Appliqué dans `os/Containerfile` (paquet `codium`, dépôt paulcarroty) avant la première release — VS Code n'a jamais été embarqué.
 
 ## 🎯 L'expérience visée (synthèse du curateur)
 
@@ -111,7 +111,7 @@ On démarre sur un **Plasma 6 brandé** — fork Catppuccin « VibeOS Dark », p
 
 ## Intégration — plan d'action
 
-1. **Phase 1 (image)** : swap VS Code→VSCodium ; ajouter la couche « terminal vibecoding » (Ghostty, fish, Starship, Zellij, yazi, lazygit, atuin, zoxide, bat, eza, btop, mise, opencode, nvim) + `/etc/skel` (preset VibeVim, layouts Zellij, config fish/starship) ; age/SOPS ; sqlite-vec.
+1. **Phase 1 (image)** : ✅ fait — VSCodium livré (paquet `codium`) ; couche « terminal vibecoding » (Ghostty, fish, Starship, Zellij, yazi, lazygit, atuin, zoxide, bat, eza, btop, mise, opencode, nvim) + `/etc/skel` (preset VibeVim, layouts Zellij, config fish/starship) livrées. **Exception : age/SOPS et sqlite-vec ne sont pas intégrés à l'image** — recalés en cible ultérieure (voir niveau 1-bis).
 2. **Phase 2 (vibed+MCP)** : registre MCP par défaut (filesystem/git/fetch/memory + Playwright + Serena) **enveloppé dans les policy tiers** ; systemd-creds pour les clés.
 3. **Bureau (chantier dédié)** : thème « VibeOS Dark » (fork Catppuccin), Panel Colorizer presets, HUD Quickshell (statut agents/tiers/ollama), sur le blueprint uBlue.
 4. **Phase 5 (branding)** : Plymouth original, SDDM (base Astronaut), session focus optionnelle.

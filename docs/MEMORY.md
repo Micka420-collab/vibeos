@@ -332,8 +332,9 @@ documentée ([THREAT-MODEL.md](THREAT-MODEL.md) §7). La cible Phase 3 :
 
 ## 7. Rétention et purge
 
-Valeurs par défaut, configurables dans `/etc/vibeos/policy.d/memory.toml`
-(lu par `vibed`) :
+Valeurs par défaut **cibles**. Le mécanisme visé — un fichier
+`/etc/vibeos/policy.d/memory.toml` lu par `vibed` — n'est **pas implémenté
+aujourd'hui** : `vibed` n'applique encore aucune logique de rétention.
 
 | Donnée | Rétention par défaut | Mécanisme |
 |---|---|---|
