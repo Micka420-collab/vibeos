@@ -56,12 +56,32 @@ par défaut. ~40 recalages docs. Image bootc construite et inspectée.
   mémoire en spammant des appels T2/T3 (anti-DoS, analogue à F4).
 - **`vibectl approve/deny` réservés à root** (garde `require_root` explicite,
   fail-closed si euid indéterminable).
+- **Responsabilité dans l'audit** : l'`outcome` d'un appel approuvé porte l'uid
+  de l'opérateur (`ok_approved(by_uid=N)`) — le grant étant supprimé à la
+  consommation, le journal inviolable est la seule trace durable de *qui* a
+  autorisé le changement système.
 - Passe de cohérence docs : chemin d'audit (rotation par jour) et
   approbation/user-projects décrits comme livrés partout.
 
-**État tests** : **106 tests vibed verts** (100 unitaires + 4 intégration MCP
+**Audit Fable 5 (4 points — tous traités)** :
+- **n°1/n°2** confinement `fs.read`/`fs.list` au home appelant + allow-list
+  système : **déjà livré** (F1).
+- **n°3** `source` documenté **non fiable** (auto-déclaré par l'agent, jamais
+  une preuve de provenance/autorité) — MEMORY.md §9, THREAT-MODEL §6,
+  description de l'outil ; garde-fou avant toute consolidation `knowledge`.
+- **n°4** `[rule.callers]` via `/proc/<pid>/exe` : décision **posée** en
+  ADR-010 (cible Phase 3/4).
+- **n°5** **rate-limiting par uid** (token bucket, module `ratelimit`) : borne
+  un agent emballé/compromis (flood audit + mémoire + approbations) ;
+  dépassement = refus fail-closed audité `rate_limited`. Rétention/purge du
+  journal = politique opérateur (purge = T3) ; rotation par jour déjà en place.
+
+**État tests** : **112 tests vibed verts** (105 unitaires + 5 intégration MCP
 e2e + 2 politique) ; `clippy --all-targets -D warnings` 0 warning ; `fmt
 --check` OK ; `cargo build --release` des 2 binaires OK ; shellcheck vert.
+Image `vibeos:dev-final` construite et `bootc container lint` OK (2 warnings
+d'hygiène, 0 erreur) sur l'arbre du matin ; rebuild de validation du nouveau
+Rust lancé.
 
 ## 🔧 En cours / non terminé
 
