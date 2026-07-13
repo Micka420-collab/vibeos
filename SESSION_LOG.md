@@ -258,8 +258,16 @@ construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erre
     inertes en prod (fix : règle T0 `agent-observability`).
   - **MED** — deny-list complétée (`user@*.service`, `dbus.socket`).
   - Confinement `agents.list`, extraction F6 memory, anti-DoS : **confirmés sains**.
+- **Vérif transverse** (déclenchée par le bug HIGH) : aucun autre outil n'a le
+  pattern « validation après décision policy ». Seuls `fs.*` (chemin normalisé
+  tôt + recheck canonique anti-symlink déjà en place) et `svc.*` (désormais
+  canonicalisé) ont une cible policy-pertinente. Pas de bug frère.
+- **Durcissement helpers agent-runner** (défense en profondeur) : validation du
+  nom d'instance (`%i`) dans les 3 scripts shell Phase 2.5 (rejet hors
+  `[A-Za-z0-9._-]` → pas de traversée de chemin). shellcheck propre.
 - **État** : **148 tests vibed verts** (137 unit + 8 e2e MCP + 3 politique) +
-  17 vitest ; clippy/fmt propres ; PR #11 MERGEABLE.
+  17 vitest + smoke ACP + bundle Zed ; clippy/fmt/shellcheck propres ; **CI Rust
+  verte sur le commit de fix** ; PR #11 MERGEABLE.
 
 ## 🔧 En cours / non terminé (checkpoint final 2026-07-13 nuit)
 
