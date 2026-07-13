@@ -1,0 +1,27 @@
+# dependabot.yml — entretien automatisé des dépendances épinglées.
+#
+# Les Actions GitHub sont épinglées par SHA de commit (audit sécurité du
+# 2026-07-03) : sans mise à jour automatisée, ces pins ne recevraient jamais
+# les correctifs de sécurité des actions elles-mêmes. Dependabot ouvre une PR
+# par mise à jour ; le SHA reste la référence, le commentaire de version est
+# régénéré. Même logique pour le Cargo.lock de vibed (RustSec).
+
+version: 2
+updates:
+  # Actions des workflows CI (ci.yml, build-os.yml) — pins par SHA.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["ci", "supply-chain"]
+    commit-message:
+      prefix: "CI"
+
+  # Dépendances Rust de vibed (Cargo.toml + Cargo.lock épinglé).
+  - package-ecosystem: "cargo"
+    directory: "/vibed"
+    schedule:
+      interval: "weekly"
+    labels: ["rust", "supply-chain"]
+    commit-message:
+      prefix: "vibed"

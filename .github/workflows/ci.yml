@@ -1,8 +1,12 @@
 # ci.yml — Code-level CI for VibeOS:
-#   * rust        vibed daemon (build + tests + clippy -D warnings). The
+#   * rust        vibed daemon (fmt --check + build + tests + clippy
+#                 --all-targets -D warnings, tout en --locked : le Cargo.lock
+#                 commité fait foi, jamais régénéré silencieusement). The
 #                 integration test suite loads the shipped policy file
 #                 security/policy.d/default.toml through the REAL parser, so a
 #                 policy/parser mismatch fails this job.
+#   * audit       cargo audit (RustSec advisories) sur le Cargo.lock épinglé —
+#                 critère de sortie Phase 2 (ROADMAP.md §4).
 #   * shellcheck  memory/genesis.sh (first-boot Genesis script) and
 #                 os/rootfs/usr/bin/vibeos-hud (HUD launcher)
 #   * policy      quick schema validation of security/policy.d/*.toml with
@@ -31,10 +35,17 @@ on:
 permissions:
   contents: read
 
+# Un seul run par branche : un push rapproché annule le run précédent (les
+# minutes CI sont comptées, cf. ROADMAP.md §3 garde-fous).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
-    name: vibed — build, test, clippy
+    name: vibed — fmt, build, test, clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: vibed
@@ -45,22 +56,51 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-08)
         with:
-          components: clippy
+          components: clippy, rustfmt
 
+      - name: Format (check only)
+        run: cargo fmt --check
+
+      # --locked partout : si Cargo.lock est désynchronisé de Cargo.toml, la CI
+      # échoue au lieu de régénérer le lock et de tester d'autres versions que
+      # celles épinglées (posture supply-chain, SECURITY.md).
       - name: Build
-        run: cargo build
+        run: cargo build --locked
 
       # Includes the integration test that loads the repository's
       # security/policy.d/default.toml with the real policy engine.
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
+      # --all-targets : le code des tests (~50 tests unitaires + intégration)
+      # est linté au même niveau que le code de production.
       - name: Clippy (deny warnings)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  audit:
+    name: vibed — cargo audit (RustSec)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: vibed
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-08)
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit
 
   shellcheck:
     name: scripts shell — shellcheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -76,6 +116,7 @@ jobs:
   policy:
     name: policy.d — TOML schema validation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

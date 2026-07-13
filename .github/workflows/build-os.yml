@@ -4,8 +4,10 @@
 # Design:
 #   * A `setup` job decides, from the trigger, whether this is a RELEASE and
 #     which architectures to build:
-#       - push on main / pull_request  -> BUILD CHECK, amd64 only, no push.
-#       - push tag v* / workflow_dispatch -> RELEASE, amd64 + arm64.
+#       - push on main / pull_request / dispatch non confirmé
+#           -> BUILD CHECK, amd64 only, no push.
+#       - push tag v* / dispatch confirmé (`publier`)
+#           -> RELEASE, amd64 + arm64.
 #   * `build` runs as a matrix, each arch on its OWN native runner
 #     (amd64 -> ubuntu-latest, arm64 -> ubuntu-24.04-arm). Each builds the image
 #     for its platform natively and, on a release, pushes an arch-tagged image
@@ -16,10 +18,14 @@
 #   * `iso` (release only) builds one installer ISO per arch, each on its native
 #     runner, and uploads it as an artifact.
 #
-# Auth: the built-in GITHUB_TOKEN (packages: write) — no extra secrets.
-# Signing is cosign KEYLESS (OIDC via id-token: write). Publishing/signing only
-# happen on tags and manual dispatch; normal commits to main are validated but
-# not published. Cut a `v*` tag to release.
+# Auth: the built-in GITHUB_TOKEN — no extra secrets. Signing is cosign
+# KEYLESS (OIDC via id-token: write). Les permissions d'écriture (packages,
+# id-token) sont accordées PAR JOB, jamais au niveau workflow : setup et les
+# builds de vérification tournent en lecture seule.
+# Publishing/signing only happen on tags v* — or on a manual dispatch where
+# the operator has TYPED `publier` in the confirm_release input (garde contre
+# une release accidentelle depuis n'importe quelle branche : un dispatch non
+# confirmé n'est qu'un build de vérification amd64). Cut a `v*` tag to release.
 
 name: build-os
 
@@ -29,29 +35,45 @@ on:
     tags: ["v*"]
     paths:
       - "os/**"
+      - "vibed/**" # le binaire vibed est compilé en multi-stage dans os/Containerfile
       - "memory/**"
       - "security/**"
       - ".github/workflows/build-os.yml"
   pull_request:
     paths:
       - "os/**"
+      - "vibed/**"
       - "memory/**"
       - "security/**"
       - ".github/workflows/build-os.yml"
   workflow_dispatch:
+    inputs:
+      confirm_release:
+        description: >-
+          Taper exactement `publier` pour pousser + signer une release complète
+          (images multi-arch, tag :latest, cosign, ISO). Vide = simple build de
+          vérification amd64 sans push.
+        required: false
+        default: ""
 
 env:
   REGISTRY: ghcr.io
 
 permissions:
   contents: read
-  packages: write
-  id-token: write
+
+# Deux pushes rapprochés ne doivent pas builder deux images ~12 Go en
+# parallèle. Les runs de release (tag v*) ne sont jamais annulés en vol : un
+# push/tag concurrent attend au lieu d'interrompre une publication.
+concurrency:
+  group: build-os-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   setup:
     name: Decide release scope
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       image: ${{ steps.cfg.outputs.image }}
       repo: ${{ steps.cfg.outputs.repo }}
@@ -66,7 +88,11 @@ jobs:
           # (with registry) for manifest/iso docker:// references.
           echo "repo=${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
           echo "image=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/vibeos" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          # Release = tag v*, ou dispatch explicitement confirmé (`publier`).
+          # Un dispatch non confirmé reste un build de vérification sans push.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]] \
+             || { [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]] \
+                  && [[ "${{ inputs.confirm_release }}" == "publier" ]]; }; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"},{"arch":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]}' >> "$GITHUB_OUTPUT"
           else
@@ -82,6 +108,12 @@ jobs:
   build:
     name: Build ${{ matrix.arch }} (native)
     needs: setup
+    # Garde-fou ROADMAP Phase 1 : « temps de build CI < 45 min par
+    # architecture » — au-delà, le job est tué au lieu de dériver en silence.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write # push des images d'arch sur ghcr.io (releases seulement)
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -141,6 +173,11 @@ jobs:
     if: needs.setup.outputs.publish == 'true'
     needs: [setup, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push du manifest multi-arch (latest, <sha>, version)
+      id-token: write # OIDC pour la signature cosign keyless
     steps:
       - name: Log in to ghcr.io
         uses: redhat-actions/podman-login@4934294ad0449894bcd1e9f191899d7292469603 # v1
@@ -180,6 +217,10 @@ jobs:
     name: Build install ISO (${{ matrix.arch }})
     if: needs.setup.outputs.publish == 'true'
     needs: [setup, build, manifest]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read # pull de l'image d'arch depuis ghcr.io
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -228,6 +269,10 @@ jobs:
 
       # Native runner: no --target-arch needed, the image is this arch. The root
       # filesystem type is declared in the image (00-vibeos.toml), so no --rootfs.
+      # bootc-image-builder est épinglé par digest (supply chain : l'outil qui
+      # fabrique l'artefact final livré aux utilisateurs ne flotte pas sur
+      # :latest). Mise à jour délibérée : re-résoudre le digest avec
+      #   skopeo inspect --format '{{.Digest}}' docker://quay.io/centos-bootc/bootc-image-builder:latest
       - name: Run bootc-image-builder (--type iso)
         run: |
           mkdir -p output
@@ -236,7 +281,7 @@ jobs:
             -v /var/lib/containers/storage:/var/lib/containers/storage \
             -v ./config.toml:/config.toml:ro \
             -v ./output:/output \
-            quay.io/centos-bootc/bootc-image-builder:latest \
+            quay.io/centos-bootc/bootc-image-builder@sha256:2b52843ea2bfda73b0a08d97e76b734393b1d3a804681b9fabb26723bd3a2f0b \
             --type iso \
             --config /config.toml \
             "${{ needs.setup.outputs.image }}:${GITHUB_SHA}-${{ matrix.arch }}"
