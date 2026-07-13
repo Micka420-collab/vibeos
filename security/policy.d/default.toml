@@ -190,13 +190,33 @@ tools = ["svc.restart"]
 tier = "T2"
 action = "allow"
 approval = "human"
-reason = "Service restarts require human approval; security-critical units can never be restarted by agents."
+reason = "Service restarts require human approval; access-, audit- and approval-critical units can never be restarted by agents (denied BEFORE the approval floor: an agent cannot even queue an approval request for them)."
 
+# Non-negotiable deny-list: a matching unit is DENIED outright (policy.rs
+# apply_rule checks service.denied BEFORE the T2 approval floor), so an agent
+# cannot even put these into the approval queue. Two axes: (1) units whose
+# restart would cut the operator's ACCESS to the machine or to the approval
+# path, and (2) the warden/audit pipeline itself. Glob patterns allowed.
 [rule.services]
 denied = [
-  "vibed.service",             # agents must not restart their own warden
-  "systemd-journald.service",  # log pipeline stays out of reach
-  "auditd.service",            # audit pipeline stays out of reach
+  # Warden + approval mechanism — an agent must never touch what governs it.
+  "vibed.service",              # the policy warden + approval store owner
+  "vibeos-agent@*.service",     # the agent supervisor itself
+  "polkit.service",             # authorization backbone
+  # Audit / log pipeline — tamper resistance.
+  "systemd-journald.service",   # log pipeline stays out of reach
+  "auditd.service",             # audit pipeline stays out of reach
+  # Operator ACCESS — restarting any of these can lock the human out, removing
+  # the very ability to approve or intervene.
+  "sshd.service",               # remote SSH access
+  "NetworkManager.service",     # network (remote access) — common impl
+  "systemd-networkd.service",   # network — alternative impl
+  "display-manager.service",    # the graphical session where approval happens
+  "sddm.service",               # the shipped display manager (concrete alias)
+  "systemd-logind.service",     # login/session management
+  # System bus — the machine (and vibed's own D-Bus calls) depend on it.
+  "dbus-broker.service",        # Fedora 42 system bus
+  "dbus.service",               # alternative bus implementation
 ]
 
 # --- Catch-all: everything not explicitly allowed above is denied -----------
