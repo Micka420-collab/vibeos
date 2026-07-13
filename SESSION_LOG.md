@@ -46,7 +46,20 @@ par défaut. ~40 recalages docs. Image bootc construite et inspectée.
 - Cosmétique : Genesis ne bake plus un hostname transitoire (localhost/fedora)
   comme nom de naissance.
 
-**État tests** : **100 tests vibed verts** (94 unitaires + 4 intégration MCP
+**Durcissements complémentaires (fin d'après-midi)** :
+- **Supply-chain CI 2026** : job `supply_chain` (SBOM anchore/sbom-action +
+  scan Trivy), job **MSRV 1.75** (build+test `--locked`), actions épinglées
+  par SHA, Dependabot.
+- **Bornage du store d'approbation** : `request_approval` purge les `pending`
+  périmés (> 1 h), **déduplique** les requêtes identiques (tool,target,uid) et
+  applique un **plafond dur** (64) — un agent ne peut plus remplir le volume
+  mémoire en spammant des appels T2/T3 (anti-DoS, analogue à F4).
+- **`vibectl approve/deny` réservés à root** (garde `require_root` explicite,
+  fail-closed si euid indéterminable).
+- Passe de cohérence docs : chemin d'audit (rotation par jour) et
+  approbation/user-projects décrits comme livrés partout.
+
+**État tests** : **106 tests vibed verts** (100 unitaires + 4 intégration MCP
 e2e + 2 politique) ; `clippy --all-targets -D warnings` 0 warning ; `fmt
 --check` OK ; `cargo build --release` des 2 binaires OK ; shellcheck vert.
 
