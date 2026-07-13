@@ -83,6 +83,7 @@
 
 - **Phase 1 (v0.1)** : CI verte sur GitHub Actions, ISO amd64+arm64 bootables en VM, validation NVIDIA sur le PC de référence.
 - **Phase 2 (v0.2)** : `vibed` embarqué ✅ · HUD installé + auto-démarré ✅ · Global Theme par défaut ✅ · config MCP client ✅ · `memory.append` + `scope`/`limit` ✅ · tests d'intégration MCP e2e en CI ✅ · `svc.status` + `fs.list` (T0) ✅ · groupe `vibeos-agents` automatique ✅ — restent les **outils T1 réels** supplémentaires, les scopes `user`/`projects` de `memory.append`, la **lecture du journal** (T0, à concevoir contre la fuite de secrets via logs), le **branchement live du HUD** et le preset **Panel Colorizer**.
+- **Phase 2.5 (v0.2.5) — « Autonomie encadrée & accès IA externes »** *(proposée, ~3-5 semaines)* : superviseur d'agent budgété (`vibectl agent run`, budget wall-clock + nombre d'appels, **kill-switch humain** `vibectl agent stop`), **auth par abonnement** (`claude setup-token`/`codex`) scellée **TPM2** via `systemd-creds`, **allowlist d'egress par unité** (`IPAddressAllow/Deny`), type de journal réservé `autonomous_session`. **Périmètre figé T0/T1** (pas d'anticipation T2/T3). Voir [ROADMAP.md](ROADMAP.md) §4 bis.
 - **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée, **sandbox par outil (systemd-run, seccomp, landlock)**.
 - **Phase 4 (v0.4)** : durcissement (UKI / boot mesuré, SELinux dédiée `vibed_t`, hash-chaining audit, `User=vibed`).
 - **Phase 5 (v0.5)** : installateur brandé + identité visuelle complète.

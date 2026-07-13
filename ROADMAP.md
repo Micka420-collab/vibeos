@@ -20,7 +20,8 @@
 |---|---|---|---|---|
 | 0 | — | Fondation | ✅ Fait (2026-07-03) | 2–3 semaines (effectué) |
 | 1 | v0.1 | Première ISO | 🔄 En cours (reste : validation VM + NVIDIA) | 6–10 semaines |
-| 2 | v0.2 | vibed + MCP | 🔄 Bien avancée (vibed + HUD + thème + MCP client + memory.append complet + svc.status/fs.list/sectools.list + audit chaîné + **fs.read/list confinés** + **memory.query extraits** + **plomberie d'approbation T2/T3**) | 3–4 mois |
+| 2 | v0.2 | vibed + MCP | 🔄 Bien avancée (vibed + HUD + thème + MCP client + memory.append complet + svc.status/fs.list/sectools.list + audit chaîné + **fs.read/list confinés** + **memory.query extraits** + **plomberie d'approbation T2/T3** + **rate-limiting par uid**) | 3–4 mois |
+| 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | Proposée (superviseur d'agent budgété + kill-switch humain, auth abonnement scellée TPM2, allowlist egress par unité — périmètre figé T0/T1) | 3–5 semaines |
 | 3 | v0.3 | Genesis & mémoire | 🔄 Démarrée (generator amnésique + hardware.json schema 2 + ébauche vibectl livrés) | 2–3 mois |
 | 4 | v0.4 | Durcissement | 🔄 Amorcée (audit chaîné SHA-256 + rotation ; reste : ancrage TPM/Rekor, User=vibed, SELinux) | 4–6 mois |
 | 5 | v0.5 | Installateur & identité | Planifiée | 2–3 mois |
@@ -152,6 +153,43 @@ gantt
 | Effet tunnel Rust : daemon jamais « fini » | Périmètre v0.2 strictement limité à T0/T1 ; tout le reste va dans les phases suivantes |
 
 **Durée indicative** : 3–4 mois.
+
+---
+
+## 4 bis. Phase 2.5 — v0.2.5 « Autonomie encadrée & accès IA externes »
+
+**Objectif** : permettre des sessions d'agents longues, non supervisées en continu, **dans le contrat T0/T1 existant** — sans toucher au moteur de politiques ni anticiper le flux d'approbation T2/T3 de la Phase 4. En parallèle, sécuriser la façon dont ces agents s'authentifient auprès de leurs fournisseurs de modèles (abonnement plutôt que clé API quand c'est pertinent) et gouverner leurs appels réseau sortants.
+
+> **Statut : proposé (non commencé)**. Périmètre **figé à T0/T1** dès le lancement : aucun livrable de cette phase n'ouvre une capacité T2/T3 ni n'anticipe l'approbation humaine (Phase 4). Le scellement TPM2 des jetons est un morceau du travail Phase 3 (LUKS/TPM2) **avancé** ici parce que nécessaire à l'auth externe.
+
+### Livrables
+
+- **Superviseur d'agent** (`vibectl agent run`, ou unité template `vibeos-agent@.service`) : lance un CLI déjà embarqué (claude, codex, gemini, opencode) en mode non-interactif, avec **budget de temps** (wall-clock), **budget de nombre d'appels d'outils**, et **kill-switch humain uniquement** (`vibectl agent stop` — jamais un outil MCP exposé à l'agent lui-même).
+- **Authentification par abonnement en mode par défaut** pour les CLI qui le supportent : `claude setup-token` (Claude Code, scope inference-only) et l'équivalent Codex (`codex login --with-access-token`) plutôt qu'une clé API facturée au token — mécanisme **déjà natif** de ces CLI, pas un contournement.
+- **Scellement TPM2 du jeton** via `systemd-creds` (`LoadCredentialEncrypted=` dans l'unité agent-runner) — même ancrage de confiance que le LUKS mémoire prévu Phase 3, posé plus tôt car nécessaire ici. **Jamais de jeton en clair** sur disque en dehors de l'espace credential privé de l'unité.
+- **Allowlist d'egress réseau par unité** (`IPAddressAllow=`/`IPAddressDeny=` systemd — même famille de directives que le durcissement déjà en place sur `vibed.service`) : chaque CLI ne joint que les hôtes de son propre fournisseur (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`…). Résolution **par nom d'hôte**, pas par IP figée.
+- **Nouveau type de journal réservé au système** : `autonomous_session` (5ᵉ entrée de `JOURNAL_RESERVED_TYPES`, aux côtés de `genesis`/`boot`/`tool_call`/`purge`) — émis par le superviseur lui-même au début et à la fin d'une session, **jamais forgeable par l'agent** (invariant §4).
+- **Identité d'authentification en mémoire** : `identity.toml` ou le journal note **quel compte** a authentifié les agents de la machine (label déclaratif, jamais le jeton) — cohérent avec « la mémoire appartient à la machine et à son humain ».
+
+### Critères de sortie (mesurables)
+
+- [ ] `vibectl agent run --budget 8h` tourne en autonomie et s'arrête au budget écoulé même sans intervention ; journal exploitable (début/fin, actions T0/T1, erreurs).
+- [ ] Jeton `setup-token` scellé via `systemd-creds` survit à un reboot ; `fs.read` du fichier credential échoue **même pour root** sans le TPM de la machine (testé).
+- [ ] Un agent lancé par le superviseur ne peut atteindre, en sortant, **que** les hôtes de son fournisseur déclaré — test négatif : connexion à un hôte hors-liste échoue et est journalisée.
+- [ ] `ANTHROPIC_API_KEY` positionnée globalement dans l'environnement système **ne prend pas** le pas silencieusement sur l'auth abonnement du superviseur (piège documenté des CLI elles-mêmes — vérifié explicitement).
+- [ ] Kill-switch : `vibectl agent stop` interrompt une session en **< 5 s**, dernier append mémoire cohérent (pas de ligne JSONL tronquée).
+- [ ] Toute tentative T2/T3 pendant une session autonome reste refusée **exactement comme aujourd'hui** — zéro régression du contrat existant.
+
+### Risques principaux
+
+| Risque | Mitigation |
+|---|---|
+| Confondre « plus autonome » et « moins gouverné » | Périmètre figé à T0/T1 dès le lancement ; toute tentative d'anticiper l'approbation T2/T3 (Phase 4) refusée en revue |
+| Politique d'usage des abonnements IA en mouvement côté fournisseurs | Documenter la règle « un humain, un abonnement, une machine » dans `docs/` ; revoir à chaque changement de policy constaté |
+| Allowlist d'egress cassée par un changement d'IP/CDN fournisseur | Allowlist **par nom d'hôte** (résolution DNS), testée en CI régulièrement |
+| Kill-switch exposé par erreur à l'agent | `vibectl agent stop` est une commande **opérateur** (comme `approve`/`deny`, root) ; jamais un outil MCP — vérifié en revue |
+
+**Durée indicative** : 3–5 semaines (délibérément resserré : pas de sandbox seccomp/Landlock complet, ça reste Phase 4).
 
 ---
 
