@@ -85,11 +85,23 @@ mod tests {
 
     #[test]
     fn double_star_crosses_segments_and_matches_zero() {
-        assert!(glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/audit/vibed.jsonl"));
-        assert!(glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/audit/a/b/c"));
+        assert!(glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/audit/vibed.jsonl"
+        ));
+        assert!(glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/audit/a/b/c"
+        ));
         // `**` matches zero segments: the directory itself is covered.
-        assert!(glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/audit"));
-        assert!(!glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/memory/x"));
+        assert!(glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/audit"
+        ));
+        assert!(!glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/memory/x"
+        ));
     }
 
     #[test]
@@ -113,7 +125,10 @@ mod tests {
     fn mid_segment_wildcards() {
         assert!(glob_match("/proc/*/environ", "/proc/1234/environ"));
         assert!(!glob_match("/proc/*/environ", "/proc/1234/task/1/environ"));
-        assert!(glob_match("/home/*/.claude/credentials*", "/home/dev/.claude/credentials.json"));
+        assert!(glob_match(
+            "/home/*/.claude/credentials*",
+            "/home/dev/.claude/credentials.json"
+        ));
     }
 
     #[test]
@@ -122,18 +137,33 @@ mod tests {
         // `/proc/<pid>/task/<tid>/environ` (variable depth), where the
         // single-segment `/proc/*/environ` does not.
         assert!(glob_match("/proc/**/environ", "/proc/1234/environ"));
-        assert!(glob_match("/proc/**/environ", "/proc/1234/task/5678/environ"));
+        assert!(glob_match(
+            "/proc/**/environ",
+            "/proc/1234/task/5678/environ"
+        ));
         assert!(glob_match("/proc/**/cmdline", "/proc/1234/cmdline"));
-        assert!(glob_match("/proc/**/cmdline", "/proc/1234/task/5678/cmdline"));
+        assert!(glob_match(
+            "/proc/**/cmdline",
+            "/proc/1234/task/5678/cmdline"
+        ));
         // `**` also matches zero intermediate segments.
         assert!(glob_match("/proc/**/environ", "/proc/environ"));
     }
 
     #[test]
     fn normalize_resolves_dots_and_rejects_escapes() {
-        assert_eq!(normalize_path("/home/dev/../dev2/x").as_deref(), Some("/home/dev2/x"));
-        assert_eq!(normalize_path("/home//dev/./x").as_deref(), Some("/home/dev/x"));
-        assert_eq!(normalize_path("/home/dev/../../etc/shadow").as_deref(), Some("/etc/shadow"));
+        assert_eq!(
+            normalize_path("/home/dev/../dev2/x").as_deref(),
+            Some("/home/dev2/x")
+        );
+        assert_eq!(
+            normalize_path("/home//dev/./x").as_deref(),
+            Some("/home/dev/x")
+        );
+        assert_eq!(
+            normalize_path("/home/dev/../../etc/shadow").as_deref(),
+            Some("/etc/shadow")
+        );
         assert_eq!(normalize_path("/").as_deref(), Some("/"));
         assert_eq!(normalize_path("/../etc"), None);
         assert_eq!(normalize_path("relative/path"), None);

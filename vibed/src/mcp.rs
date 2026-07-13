@@ -53,8 +53,13 @@ const MAX_APPEND_BYTES: usize = 16 * 1024;
 /// Journal event types an AGENT may append via memory.append. The remaining
 /// types of docs/MEMORY.md §3.5 (`genesis`, `boot`, `tool_call`, `purge`) are
 /// reserved for the system itself (genesis.sh, vibed, vibectl) and refused.
-const JOURNAL_AGENT_TYPES: [&str; 5] =
-    ["observation", "decision", "preference", "project_seen", "error"];
+const JOURNAL_AGENT_TYPES: [&str; 5] = [
+    "observation",
+    "decision",
+    "preference",
+    "project_seen",
+    "error",
+];
 const JOURNAL_RESERVED_TYPES: [&str; 4] = ["genesis", "boot", "tool_call", "purge"];
 /// Memory sub-scopes addressable by memory.query's `scope` argument, mapped to
 /// their location in the store (relative path, is_directory). Keep in sync
@@ -110,10 +115,7 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
 /// the governed write path (scope-based, no path argument, so this path
 /// denylist cannot and need not apply to it) — and the policy itself is not
 /// agent-writable.
-const BUILTIN_DENY_WRITE: &[&str] = &[
-    "/etc/vibeos/policy.d/**",
-    "/var/lib/vibeos/memory/**",
-];
+const BUILTIN_DENY_WRITE: &[&str] = &["/etc/vibeos/policy.d/**", "/var/lib/vibeos/memory/**"];
 
 /// Returns the matched pattern when `path` (already normalized) hits the
 /// built-in denylist. `write` selects the additional write-only entries.
@@ -184,7 +186,8 @@ pub async fn handle_connection(
         let line = match std::str::from_utf8(&buf) {
             Ok(s) => s.trim(),
             Err(_) => {
-                let resp = error_response(Value::Null, -32700, "parse error: line is not valid UTF-8");
+                let resp =
+                    error_response(Value::Null, -32700, "parse error: line is not valid UTF-8");
                 let mut out = resp.to_string();
                 out.push('\n');
                 if let Err(e) = write_half.write_all(out.as_bytes()).await {
@@ -208,7 +211,11 @@ pub async fn handle_connection(
                     Some(response)
                 }
             }
-            Err(e) => Some(error_response(Value::Null, -32700, &format!("parse error: {e}"))),
+            Err(e) => Some(error_response(
+                Value::Null,
+                -32700,
+                &format!("parse error: {e}"),
+            )),
         };
 
         if let Some(response) = response {
@@ -245,7 +252,11 @@ where
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            return Ok(if buf.is_empty() { LineRead::Eof } else { LineRead::Line });
+            return Ok(if buf.is_empty() {
+                LineRead::Eof
+            } else {
+                LineRead::Line
+            });
         }
         if let Some(idx) = available.iter().position(|&b| b == b'\n') {
             buf.extend_from_slice(&available[..=idx]);
@@ -261,7 +272,12 @@ where
     }
 }
 
-async fn dispatch(request: Request, policy: &Arc<PolicyEngine>, audit: &AuditLog, caller: Caller) -> Value {
+async fn dispatch(
+    request: Request,
+    policy: &Arc<PolicyEngine>,
+    audit: &AuditLog,
+    caller: Caller,
+) -> Value {
     debug!("dispatch method={}", request.method);
     let id = request.id.unwrap_or(Value::Null);
     match request.method.as_str() {
@@ -311,7 +327,15 @@ async fn handle_tools_call(
             None => {
                 // Relative path or attempt to climb above `/`: fail-closed.
                 // The raw (rejected) path is the non-secret audit target.
-                try_audit(audit, &name, &args, Some(raw), Decision::Deny, "blocked_invalid_path", caller);
+                try_audit(
+                    audit,
+                    &name,
+                    &args,
+                    Some(raw),
+                    Decision::Deny,
+                    "blocked_invalid_path",
+                    caller,
+                );
                 return tool_result(
                     id,
                     format!("policy: path '{raw}' is not an absolute, normalizable path"),
@@ -333,7 +357,15 @@ async fn handle_tools_call(
     if let Some(path) = normalized_path.as_deref() {
         let is_write = name == "fs.write";
         if let Some(pattern) = builtin_denied(path, is_write) {
-            try_audit(audit, &name, &args, target.as_deref(), Decision::Deny, "blocked_builtin_denylist", caller);
+            try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                Decision::Deny,
+                "blocked_builtin_denylist",
+                caller,
+            );
             return tool_result(
                 id,
                 format!("policy: path '{path}' is denied by the built-in denylist ({pattern})"),
@@ -351,11 +383,27 @@ async fn handle_tools_call(
 
     match decision {
         Decision::Deny => {
-            try_audit(audit, &name, &args, target.as_deref(), decision, "blocked", caller);
+            try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                decision,
+                "blocked",
+                caller,
+            );
             tool_result(id, format!("policy: tool '{name}' is denied"), true)
         }
         Decision::RequireApproval => {
-            try_audit(audit, &name, &args, target.as_deref(), decision, "pending_approval", caller);
+            try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                decision,
+                "pending_approval",
+                caller,
+            );
             let tier_str = tier.map(Tier::as_str).unwrap_or("?");
             tool_result(
                 id,
@@ -368,7 +416,15 @@ async fn handle_tools_call(
         }
         Decision::Allow => {
             // Fail-closed: if the audit trail cannot be written, nothing runs.
-            if !try_audit(audit, &name, &args, target.as_deref(), decision, "started", caller) {
+            if !try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                decision,
+                "started",
+                caller,
+            ) {
                 return tool_result(
                     id,
                     "audit log unavailable: refusing execution (fail-closed)".to_string(),
@@ -386,15 +442,39 @@ async fn handle_tools_call(
             .await;
             match executed {
                 Ok(Ok(text)) => {
-                    try_audit(audit, &name, &args, target.as_deref(), decision, "ok", caller);
+                    try_audit(
+                        audit,
+                        &name,
+                        &args,
+                        target.as_deref(),
+                        decision,
+                        "ok",
+                        caller,
+                    );
                     tool_result(id, text, false)
                 }
                 Ok(Err(message)) => {
-                    try_audit(audit, &name, &args, target.as_deref(), decision, &format!("error: {message}"), caller);
+                    try_audit(
+                        audit,
+                        &name,
+                        &args,
+                        target.as_deref(),
+                        decision,
+                        &format!("error: {message}"),
+                        caller,
+                    );
                     tool_result(id, message, true)
                 }
                 Err(join_error) => {
-                    try_audit(audit, &name, &args, target.as_deref(), decision, "panic", caller);
+                    try_audit(
+                        audit,
+                        &name,
+                        &args,
+                        target.as_deref(),
+                        decision,
+                        "panic",
+                        caller,
+                    );
                     tool_result(id, format!("internal error: {join_error}"), true)
                 }
             }
@@ -491,13 +571,13 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match \
              files, optionally restricted to one scope and capped by limit (docs/MEMORY.md §9)",
             json!({"type": "object",
-                   "properties": {
-                       "query": {"type": "string"},
-                       "scope": {"type": "string",
-                                 "enum": ["identity", "hardware", "user",
-                                          "projects", "journal", "knowledge"]},
-                       "limit": {"type": "integer", "minimum": 1}
-                   }}),
+            "properties": {
+                "query": {"type": "string"},
+                "scope": {"type": "string",
+                          "enum": ["identity", "hardware", "user",
+                                   "projects", "journal", "knowledge"]},
+                "limit": {"type": "integer", "minimum": 1}
+            }}),
         ),
         (
             "memory.append",
@@ -507,11 +587,11 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
              'knowledge' (entry: subject/fact/source[/confidence]); vibed stamps ts (and the \
              fact id). 'user' and 'projects' are a Phase 2/3 remainder (docs/MEMORY.md §9)",
             json!({"type": "object", "required": ["scope", "entry"],
-                   "properties": {
-                       "scope": {"type": "string",
-                                 "enum": ["journal", "knowledge", "user", "projects"]},
-                       "entry": {"type": "object"}
-                   }}),
+            "properties": {
+                "scope": {"type": "string",
+                          "enum": ["journal", "knowledge", "user", "projects"]},
+                "entry": {"type": "object"}
+            }}),
         ),
     ]
 }
@@ -572,9 +652,12 @@ fn os_status() -> Result<String, String> {
         .ok()
         .and_then(|s| s.split_whitespace().next().map(str::to_string))
         .and_then(|first| first.parse::<f64>().ok());
-    let loadavg = std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .map(|s| s.split_whitespace().take(3).map(str::to_string).collect::<Vec<_>>());
+    let loadavg = std::fs::read_to_string("/proc/loadavg").ok().map(|s| {
+        s.split_whitespace()
+            .take(3)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
     let (mem_total_kb, mem_available_kb) = read_meminfo();
     let mounts = read_mounts();
     Ok(json!({
@@ -695,7 +778,10 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
     // Normalization resolves `..` lexically, so the prefix check below cannot
     // be escaped with traversal sequences.
     let path = normalize_path(raw).ok_or_else(|| format!("fs.write: invalid path '{raw}'"))?;
-    if !USER_WRITE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+    if !USER_WRITE_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
         return Err(format!(
             "fs.write is T1 (modify-user): path must start with one of {USER_WRITE_PREFIXES:?}"
         ));
@@ -721,7 +807,10 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
 
     // (a) The canonical target must still sit under a user-write prefix; a
     //     symlinked parent that escaped to /etc, /var/lib, ... is rejected here.
-    if !USER_WRITE_PREFIXES.iter().any(|prefix| canonical_str.starts_with(prefix)) {
+    if !USER_WRITE_PREFIXES
+        .iter()
+        .any(|prefix| canonical_str.starts_with(prefix))
+    {
         return Err(format!(
             "fs.write: canonical path '{canonical_str}' escapes the user-write scope \
              (symlinked parent?)"
@@ -768,9 +857,16 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
 /// policy forbids via `paths.denied`/`paths.allowed`. Anything other than a
 /// clean `Allow` is refused. The tool already passed the lexical policy check
 /// in `handle_tools_call`, so this can only tighten, never loosen.
-fn recheck_policy_canonical(policy: &PolicyEngine, tool: &str, canonical: &str) -> Result<(), String> {
+fn recheck_policy_canonical(
+    policy: &PolicyEngine,
+    tool: &str,
+    canonical: &str,
+) -> Result<(), String> {
     let tier = tool_tier(tool);
-    let ctx = CallContext { path: Some(canonical), service: None };
+    let ctx = CallContext {
+        path: Some(canonical),
+        service: None,
+    };
     match policy.evaluate(tool, tier, ctx) {
         Decision::Allow => Ok(()),
         _ => Err(format!(
@@ -786,8 +882,9 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
     let uid = caller.uid.ok_or_else(|| {
         "fs.write: caller uid unavailable (SO_PEERCRED); refusing (fail-closed)".to_string()
     })?;
-    let home = home_dir_for_uid(uid)
-        .ok_or_else(|| format!("fs.write: no home directory for uid {uid} in /etc/passwd; refusing"))?;
+    let home = home_dir_for_uid(uid).ok_or_else(|| {
+        format!("fs.write: no home directory for uid {uid} in /etc/passwd; refusing")
+    })?;
     // Canonicalize the home so the Fedora `/home -> /var/home` symlink (and any
     // other) is resolved to the same space as the (already canonical) target.
     let canonical_home = std::fs::canonicalize(&home)
@@ -948,7 +1045,9 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
         let name_hit = relative.to_lowercase().contains(&query);
         let content_hit = std::fs::read(path).ok().is_some_and(|bytes| {
             let end = bytes.len().min(MAX_MEMORY_SCAN_BYTES);
-            String::from_utf8_lossy(&bytes[..end]).to_lowercase().contains(&query)
+            String::from_utf8_lossy(&bytes[..end])
+                .to_lowercase()
+                .contains(&query)
         });
         if name_hit || content_hit {
             matches.push(json!({ "file": relative }));
@@ -1012,10 +1111,9 @@ fn memory_append_at(
     let ts = utc_iso8601(epoch_secs);
     let (relative_file, line_value) = match scope {
         "journal" => {
-            let event_type = entry
-                .get("type")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "memory.append: missing 'type' field in journal entry".to_string())?;
+            let event_type = entry.get("type").and_then(Value::as_str).ok_or_else(|| {
+                "memory.append: missing 'type' field in journal entry".to_string()
+            })?;
             if JOURNAL_RESERVED_TYPES.contains(&event_type) {
                 return Err(format!(
                     "memory.append: journal type '{event_type}' is reserved for the system \
@@ -1109,7 +1207,9 @@ fn memory_append_at(
     // O_NOFOLLOW: if the target name was swapped for a symlink, refuse rather
     // than follow it out of the store.
     static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = APPEND_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = APPEND_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -1192,7 +1292,11 @@ fn utc_civil(epoch_secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let mp = (5 * doy + 2) / 153; // [0, 11]
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
     let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
-    let year = if month <= 2 { year_of_era + 1 } else { year_of_era };
+    let year = if month <= 2 {
+        year_of_era + 1
+    } else {
+        year_of_era
+    };
     (year, month, day, hour, minute, second)
 }
 
@@ -1262,16 +1366,32 @@ mod tests {
             "/etc/vibeos/policy.d/default.toml",
             "/var/lib/vibeos/memory/identity.toml",
         ] {
-            assert!(builtin_denied(path, true).is_some(), "{path} must be write-denied");
-            assert!(builtin_denied(path, false).is_none(), "{path} must stay readable");
+            assert!(
+                builtin_denied(path, true).is_some(),
+                "{path} must be write-denied"
+            );
+            assert!(
+                builtin_denied(path, false).is_none(),
+                "{path} must stay readable"
+            );
         }
     }
 
     #[test]
     fn builtin_denylist_leaves_normal_paths_alone() {
-        for path in ["/etc/os-release", "/home/dev/project/main.rs", "/var/home/dev/notes.md"] {
-            assert!(builtin_denied(path, false).is_none(), "{path} must be readable");
-            assert!(builtin_denied(path, true).is_none(), "{path} must be writable");
+        for path in [
+            "/etc/os-release",
+            "/home/dev/project/main.rs",
+            "/var/home/dev/notes.md",
+        ] {
+            assert!(
+                builtin_denied(path, false).is_none(),
+                "{path} must be readable"
+            );
+            assert!(
+                builtin_denied(path, true).is_none(),
+                "{path} must be writable"
+            );
         }
     }
 
@@ -1287,19 +1407,32 @@ mod tests {
     #[test]
     fn fs_write_rejects_paths_outside_user_prefixes() {
         let policy = empty_policy();
-        let caller = Caller { uid: Some(1000), gid: None, pid: None };
-        let err = fs_write(&json!({"path": "/etc/passwd", "content": "x"}), &policy, caller)
-            .unwrap_err();
+        let caller = Caller {
+            uid: Some(1000),
+            gid: None,
+            pid: None,
+        };
+        let err = fs_write(
+            &json!({"path": "/etc/passwd", "content": "x"}),
+            &policy,
+            caller,
+        )
+        .unwrap_err();
         assert!(err.contains("modify-user"), "unexpected error: {err}");
         // /tmp was removed from the v0.1 write scope (D7).
-        let err = fs_write(&json!({"path": "/tmp/x", "content": "x"}), &policy, caller).unwrap_err();
+        let err =
+            fs_write(&json!({"path": "/tmp/x", "content": "x"}), &policy, caller).unwrap_err();
         assert!(err.contains("modify-user"), "unexpected error: {err}");
     }
 
     #[test]
     fn fs_write_rejects_traversal_and_memory_volume() {
         let policy = empty_policy();
-        let caller = Caller { uid: Some(1000), gid: None, pid: None };
+        let caller = Caller {
+            uid: Some(1000),
+            gid: None,
+            pid: None,
+        };
         let err = fs_write(
             &json!({"path": "/home/dev/../../etc/cron.d/evil", "content": "x"}),
             &policy,
@@ -1372,7 +1505,11 @@ mod tests {
     }
 
     fn caller_uid(uid: u32) -> Caller {
-        Caller { uid: Some(uid), gid: None, pid: None }
+        Caller {
+            uid: Some(uid),
+            gid: None,
+            pid: None,
+        }
     }
 
     /// A fresh, empty scratch directory inside `uid`'s real home (removed by the
@@ -1382,7 +1519,8 @@ mod tests {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let home = home_dir_for_uid(uid).expect("caller uid has a home in /etc/passwd");
-        let dir = std::path::Path::new(&home).join(format!(".vibed-test-{tag}-{}-{n}", std::process::id()));
+        let dir = std::path::Path::new(&home)
+            .join(format!(".vibed-test-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create home scratch dir");
         dir
@@ -1425,8 +1563,14 @@ mod tests {
             caller_uid(0),
         );
         let err = res.unwrap_err();
-        assert!(err.contains("cross-user"), "expected cross-user refusal, got: {err}");
-        assert!(!target.exists(), "no file may be created on a cross-user refusal");
+        assert!(
+            err.contains("cross-user"),
+            "expected cross-user refusal, got: {err}"
+        );
+        assert!(
+            !target.exists(),
+            "no file may be created on a cross-user refusal"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1444,7 +1588,10 @@ mod tests {
             &permissive_policy(),
             Caller::default(),
         );
-        assert!(res.unwrap_err().contains("uid unavailable"), "unknown uid must be refused");
+        assert!(
+            res.unwrap_err().contains("uid unavailable"),
+            "unknown uid must be refused"
+        );
         assert!(!target.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1456,7 +1603,8 @@ mod tests {
             return;
         }
         let base = home_scratch(uid, "nofollow");
-        let victim = std::env::temp_dir().join(format!("vibed-nofollow-victim-{}", std::process::id()));
+        let victim =
+            std::env::temp_dir().join(format!("vibed-nofollow-victim-{}", std::process::id()));
         let _ = std::fs::remove_file(&victim);
         let link = base.join("link");
         std::os::unix::fs::symlink(&victim, &link).expect("create final-component symlink");
@@ -1465,8 +1613,14 @@ mod tests {
             &permissive_policy(),
             caller_uid(uid),
         );
-        assert!(res.is_err(), "writing through a symlinked final name must fail (O_NOFOLLOW)");
-        assert!(!victim.exists(), "the symlink target must never be created/written");
+        assert!(
+            res.is_err(),
+            "writing through a symlinked final name must fail (O_NOFOLLOW)"
+        );
+        assert!(
+            !victim.exists(),
+            "the symlink target must never be created/written"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1524,7 +1678,11 @@ mod tests {
             secret.display()
         ));
         let target = format!("{}/via/implant", base.display());
-        let res = fs_write(&json!({"path": target, "content": "x"}), &policy, caller_uid(uid));
+        let res = fs_write(
+            &json!({"path": target, "content": "x"}),
+            &policy,
+            caller_uid(uid),
+        );
         let err = res.unwrap_err();
         assert!(
             err.contains("denied by policy"),
@@ -1571,14 +1729,20 @@ mod tests {
         // Character device: reading to the end would exhaust memory.
         if std::path::Path::new("/dev/zero").exists() {
             let err = fs_read(&json!({"path": "/dev/zero"}), &policy).unwrap_err();
-            assert!(err.contains("not a regular file"), "char device must be refused: {err}");
+            assert!(
+                err.contains("not a regular file"),
+                "char device must be refused: {err}"
+            );
         }
         // A directory is not a regular file either.
         let dir = std::env::temp_dir().join(format!("vibed-read-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let err = fs_read(&json!({"path": dir.to_string_lossy()}), &policy).unwrap_err();
-        assert!(err.contains("not a regular file"), "directory must be refused: {err}");
+        assert!(
+            err.contains("not a regular file"),
+            "directory must be refused: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1597,7 +1761,10 @@ mod tests {
         let big = dir.join("big.bin");
         std::fs::write(&big, vec![b'a'; MAX_READ_BYTES + 4096]).unwrap();
         let out = fs_read(&json!({"path": big.to_string_lossy()}), &policy).expect("read big");
-        assert!(out.contains("truncated"), "oversized read must be truncated");
+        assert!(
+            out.contains("truncated"),
+            "oversized read must be truncated"
+        );
         assert!(
             out.len() <= MAX_READ_BYTES + 64,
             "returned content must stay within the cap (+ notice), got {}",
@@ -1645,8 +1812,14 @@ mod tests {
                       micki:x:1000:1000:,,,:/home/micki:/bin/bash\n\
                       svc:x:1001:1001::/var/home/svc:/usr/sbin/nologin\n";
         assert_eq!(home_dir_for_uid_in(passwd, 0).as_deref(), Some("/root"));
-        assert_eq!(home_dir_for_uid_in(passwd, 1000).as_deref(), Some("/home/micki"));
-        assert_eq!(home_dir_for_uid_in(passwd, 1001).as_deref(), Some("/var/home/svc"));
+        assert_eq!(
+            home_dir_for_uid_in(passwd, 1000).as_deref(),
+            Some("/home/micki")
+        );
+        assert_eq!(
+            home_dir_for_uid_in(passwd, 1001).as_deref(),
+            Some("/var/home/svc")
+        );
         assert_eq!(home_dir_for_uid_in(passwd, 4242), None);
     }
 
@@ -1667,7 +1840,11 @@ mod tests {
         assert_eq!(tool_tier("svc.restart"), Some(Tier::T2));
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
-        assert_eq!(tool_tier("disk.wipe"), None, "unknown tool has no tier => default-deny");
+        assert_eq!(
+            tool_tier("disk.wipe"),
+            None,
+            "unknown tool has no tier => default-deny"
+        );
     }
 
     // -- memory.query (scope/limit) and memory.append -------------------------
@@ -1682,8 +1859,11 @@ mod tests {
         for sub in ["user", "projects", "journal", "knowledge"] {
             std::fs::create_dir_all(dir.join(sub)).expect("create memory scratch");
         }
-        std::fs::write(dir.join("identity.toml"), "schema = 1\nhostname = \"testhost\"\n")
-            .expect("write identity");
+        std::fs::write(
+            dir.join("identity.toml"),
+            "schema = 1\nhostname = \"testhost\"\n",
+        )
+        .expect("write identity");
         std::fs::write(dir.join("user").join("profile.toml"), "lang = \"fr\"\n")
             .expect("write profile");
         std::fs::write(
@@ -1773,10 +1953,14 @@ mod tests {
         assert_eq!(event["ts"], "2026-07-08T01:01:01Z");
         assert_eq!(event["type"], "observation");
         assert_eq!(event["source"], "claude-code");
-        assert_eq!(event["data"]["note"], "le projet vibeos-ui utilise pnpm, pas npm");
+        assert_eq!(
+            event["data"]["note"],
+            "le projet vibeos-ui utilise pnpm, pas npm"
+        );
         // A second append lands on a NEW line of the same file (append-only).
         let _ = memory_append_at(&root, &args, T_2026_07_08 + 60).expect("second append");
-        let written = std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl")).unwrap();
+        let written =
+            std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl")).unwrap();
         assert_eq!(written.lines().count(), 2, "appends must never overwrite");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1792,7 +1976,10 @@ mod tests {
                 T_2026_07_08,
             )
             .unwrap_err();
-            assert!(err.contains("reserved"), "type '{reserved}': unexpected error: {err}");
+            assert!(
+                err.contains("reserved"),
+                "type '{reserved}': unexpected error: {err}"
+            );
         }
         let err = memory_append_at(
             &root,
@@ -1801,7 +1988,10 @@ mod tests {
             T_2026_07_08,
         )
         .unwrap_err();
-        assert!(err.contains("unknown journal type"), "unexpected error: {err}");
+        assert!(
+            err.contains("unknown journal type"),
+            "unexpected error: {err}"
+        );
         assert!(!root.join("journal").join("2026-07-08.jsonl").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1857,7 +2047,10 @@ mod tests {
         assert_eq!(fact["fact"], "utilise pnpm");
         assert_eq!(fact["confidence"], 0.9);
         assert_eq!(fact["ts"], "2026-07-08T01:01:01Z");
-        assert!(fact["id"].as_str().unwrap().starts_with(&T_2026_07_08.to_string()));
+        assert!(fact["id"]
+            .as_str()
+            .unwrap()
+            .starts_with(&T_2026_07_08.to_string()));
         // out-of-range confidence is refused
         let err = memory_append_at(
             &root,
@@ -1880,7 +2073,10 @@ mod tests {
                 T_2026_07_08,
             )
             .unwrap_err();
-            assert!(err.contains("not implemented"), "scope '{scope}': unexpected error: {err}");
+            assert!(
+                err.contains("not implemented"),
+                "scope '{scope}': unexpected error: {err}"
+            );
         }
         let err = memory_append_at(
             &root,
@@ -1903,8 +2099,14 @@ mod tests {
             T_2026_07_08,
         )
         .unwrap_err();
-        assert!(err.contains("memory store absent"), "unexpected error: {err}");
-        assert!(!root.exists(), "the store root must never be created by memory.append");
+        assert!(
+            err.contains("memory store absent"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !root.exists(),
+            "the store root must never be created by memory.append"
+        );
     }
 
     #[test]

@@ -20,12 +20,19 @@ fn repo_policy_dir() -> PathBuf {
         .join("policy.d")
 }
 
-const NO_CTX: CallContext<'_> = CallContext { path: None, service: None };
+const NO_CTX: CallContext<'_> = CallContext {
+    path: None,
+    service: None,
+};
 
 #[test]
 fn shipped_default_policy_loads_with_rules() {
     let dir = repo_policy_dir();
-    assert!(dir.is_dir(), "missing {} — repository layout changed?", dir.display());
+    assert!(
+        dir.is_dir(),
+        "missing {} — repository layout changed?",
+        dir.display()
+    );
     let engine = PolicyEngine::load_dir(&dir)
         .unwrap_or_else(|e| panic!("shipped policy must load (fail-closed engine): {e}"));
     assert!(
