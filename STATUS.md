@@ -66,6 +66,9 @@
   - **Mode amnésique (Phase 3)** : **generator systemd** `vibeos-amnesic-generator` livré (tmpfs sur `vibeos.amnesic=1` + injection `VIBEOS_MEMORY_MODE=amnesic` + marqueur `/run/vibeos/memory-mode`), shellcheck + 8 tests fonctionnels.
   - **`hardware.json` schema 2** : champs structurés cpu (model/cores), memory (total_bytes), gpu (vendor/model/vram_bytes via nvidia-smi/lspci) + blobs bruts ; smoke test Genesis de non-régression en CI (layout, schema, idempotence, marqueur amnésique).
   - Fix au passage : bit exécutable manquant sur `vibeos-agents-group.sh`.
+  - **`vibectl`** (2ᵉ binaire du crate) : `memory status` / `memory mode` / `audit verify` / `approvals list` / `approve` / `deny`.
+  - **Revue Fable 5 (7 findings, 6 traités)** : **F1** `fs.read`/`fs.list` **confinés au home de l'appelant** + allow-list système (ferme le vrai trou v0.1 : lecture cross-user) ; **F2** `memory.query` rend des **extraits de contenu bornés** ; **F4** **rotation** du journal d'audit par jour UTC (chaîne continue) ; **F3** **flux d'approbation humaine minimal** T2/T3 (requête → `vibectl approve` → grant à usage unique expirant → exécution auditée) ; **F5** cohérence doc `vibeos-agents` + ADR-010 (`[rule.callers]`) ; **F7** `CLAUDE.md` dans `/etc/skel`. Reste **F6** (découpe de `mcp.rs`). **100 tests vibed verts.**
+  - Journal de session : [SESSION_LOG.md](SESSION_LOG.md).
 
 ## 📋 Reste à faire (court terme)
 
