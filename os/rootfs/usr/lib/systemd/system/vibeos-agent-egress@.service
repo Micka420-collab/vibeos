@@ -1,0 +1,23 @@
+# vibeos-agent-egress@.service — resolve the per-instance egress allowlist.
+#
+# Compiles the hostname allowlist (/etc/vibeos/agent-egress.conf + optional
+# /etc/vibeos/agent.d/%i.egress) into a systemd drop-in of IPAddressAllow= lines
+# that vibeos-agent@%i.service consumes at start. Runs BEFORE the agent unit
+# because IPAddressAllow= is applied at unit start. See vibeos-agent-egress.sh.
+
+[Unit]
+Description=VibeOS: resolve network egress allowlist for agent instance %i
+Documentation=https://github.com/Micka420-collab/vibeos
+ConditionPathExists=/usr/bin/vibectl
+After=network-online.target
+Wants=network-online.target
+# Ordering only — the agent unit Wants/After this; keep them in the same startup.
+Before=vibeos-agent@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/vibeos/vibeos-agent-egress.sh %i
+
+[Install]
+WantedBy=multi-user.target
