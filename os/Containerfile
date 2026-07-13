@@ -260,7 +260,11 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         scap-security-guide \
         suricata \
         age \
-    && dnf clean all
+    && dnf clean all \
+    # /run is a tmpfs recreated every boot: don't bake service runtime dirs
+    # into the image (bootc lint `nonempty-run-tmp`). suricata/tor recreate
+    # them at boot via their own tmpfiles.d.
+    && rm -rf /run/suricata /run/tor
 
 # --- 1e. Vibecoding terminal stack (COPR) ------------------------------------
 # Tools not packaged in Fedora, from well-maintained COPRs (probed working on
