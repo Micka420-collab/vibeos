@@ -101,6 +101,15 @@ BorderSizeAuto=false
 blurEnabled=true
 contrastEnabled=true
 
+# ---- Default wallpaper --------------------------------------------------------
+# Wallpaper package name, resolved against /usr/share/wallpapers (KPackage).
+# "VibeOS" is the official default wallpaper (desktop/wallpapers/VibeOS,
+# PNG 1536x1024, scale-and-crop by Plasma). The alternatives (VibeOSDark
+# "Genesis" and VibeOSVoid) stay selectable in the picker. Users can change
+# it freely — this only sets the OUT-OF-BOX default via the Global Theme.
+[Wallpaper]
+Image=VibeOS
+
 # ---- Cursor (v0.1: Breeze; VibeOS cursor set = Phase 5) ----------------------
 [kcminputrc][Mouse]
 cursorTheme=breeze_cursors

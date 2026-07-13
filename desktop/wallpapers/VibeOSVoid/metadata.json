@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "VibeOSVoid",
+        "Name": "VibeOS Void",
+        "Name[fr]": "VibeOS Void",
+        "Description": "Original VibeOS wallpaper — Void (near-crust clean slate). Catppuccin Mocha-derived palette. Source SVG: desktop/wallpapers/src/vibeos-void.svg.",
+        "Description[fr]": "Fond d'écran VibeOS original — Void (ardoise vierge quasi-crust). Palette dérivée de Catppuccin Mocha. Source SVG : desktop/wallpapers/src/vibeos-void.svg.",
+        "License": "Apache-2.0",
+        "Version": "0.1",
+        "Website": "https://github.com/Micka420-collab/vibeos",
+        "Authors": [
+            {
+                "Name": "VibeOS Project"
+            }
+        ]
+    }
+}

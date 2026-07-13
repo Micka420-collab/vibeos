@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "VibeOSDark",
+        "Name": "VibeOS Genesis",
+        "Name[fr]": "VibeOS Genesis",
+        "Description": "Original VibeOS wallpaper — Genesis (mauve→blue aurora mesh). Catppuccin Mocha-derived palette, single mauve accent. Source SVG: desktop/wallpapers/src/vibeos-dark.svg.",
+        "Description[fr]": "Fond d'écran VibeOS original — Genesis (mesh aurora mauve→bleu). Palette dérivée de Catppuccin Mocha, accent mauve unique. Source SVG : desktop/wallpapers/src/vibeos-dark.svg.",
+        "License": "Apache-2.0",
+        "Version": "0.1",
+        "Website": "https://github.com/Micka420-collab/vibeos",
+        "Authors": [
+            {
+                "Name": "VibeOS Project"
+            }
+        ]
+    }
+}

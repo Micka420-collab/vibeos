@@ -432,11 +432,15 @@ COPY --chmod=0755 memory/genesis.sh /usr/libexec/vibeos/genesis.sh
 #   * Kvantum        -> engine installed (layer 1g); default widget style
 #   * Quickshell QML -> autostarted HUD; data still mocked ("vibed hors ligne")
 #                       until the QML socket wiring lands (Phase 2 remainder)
-#   * wallpapers     -> available in the picker (default: Phase 5 branding)
+#   * wallpapers     -> three Plasma wallpaper packages; "VibeOS" is the
+#                       out-of-box default (Global Theme defaults: [Wallpaper]
+#                       Image=VibeOS), Genesis/Void stay in the picker
 #   * SDDM/Plymouth  -> present; switched on at branding (Phase 5)
 COPY desktop/theme/vibeos-dark.colors /usr/share/color-schemes/VibeOSDark.colors
 COPY desktop/look-and-feel/org.vibeos.dark /usr/share/plasma/look-and-feel/org.vibeos.dark
-COPY desktop/wallpapers /usr/share/wallpapers/VibeOSDark
+COPY desktop/wallpapers/VibeOS /usr/share/wallpapers/VibeOS
+COPY desktop/wallpapers/VibeOSDark /usr/share/wallpapers/VibeOSDark
+COPY desktop/wallpapers/VibeOSVoid /usr/share/wallpapers/VibeOSVoid
 COPY desktop/sddm/vibeos /usr/share/sddm/themes/vibeos
 COPY desktop/plymouth/vibeos /usr/share/plymouth/themes/vibeos
 COPY desktop/kvantum/VibeOSDark /usr/share/Kvantum/VibeOSDark

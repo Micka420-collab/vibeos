@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "VibeOS",
+        "Name": "VibeOS",
+        "Name[fr]": "VibeOS",
+        "Description": "Official VibeOS default wallpaper.",
+        "Description[fr]": "Fond d'écran officiel par défaut de VibeOS.",
+        "License": "Apache-2.0",
+        "Version": "0.1",
+        "Website": "https://github.com/Micka420-collab/vibeos",
+        "Authors": [
+            {
+                "Name": "VibeOS Project"
+            }
+        ]
+    }
+}
