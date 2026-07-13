@@ -153,12 +153,16 @@ Les **ISO installables** (une par architecture) sont produites en artefacts de l
 
 ### Parler à `vibed` depuis une session VibeOS
 
-```bash
-# Prérequis (première barrière d'accès au socket, voulue) :
-sudo usermod -aG vibeos-agents $USER   # puis rouvrir la session
+Accès au socket : **les administrateurs (groupe `wheel`) sont enrôlés
+automatiquement** dans `vibeos-agents` à chaque boot (`vibeos-agents-group.service`)
+— ils ont déjà `sudo`, donc c'est *moins* que ce qu'ils détiennent. Un compte
+**non-`wheel`** reste opt-in : `sudo usermod -aG vibeos-agents <user>` (puis
+rouvrir la session). L'appartenance devient effective à la connexion suivante.
 
+```bash
 # Claude Code découvre le serveur MCP « vibeos » automatiquement
-# (config livrée dans ~/.claude.json). Test manuel sans client MCP :
+# (config livrée dans ~/.claude.json ; instructions dans ~/.claude/CLAUDE.md).
+# Test manuel sans client MCP :
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | socat - UNIX-CONNECT:/run/vibed/mcp.sock
 ```

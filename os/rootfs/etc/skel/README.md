@@ -35,10 +35,12 @@ Pour revoir le message de bienvenue : `rm ~/.local/state/vibeos/welcome-shown`.
 ## Notes v0.1 (honnêteté)
 
 - L'accès au socket MCP de `vibed` (Claude Code via `.claude.json`, HUD)
-  exige d'appartenir au groupe **`vibeos-agents`** :
-  `sudo usermod -aG vibeos-agents $USER` puis rouvrir la session. Sans cela,
-  le serveur MCP `vibeos` apparaît « hors ligne » — c'est la première
-  barrière d'accès, voulue (voir `agent/README.md`).
+  exige d'appartenir au groupe **`vibeos-agents`**. Les **administrateurs
+  (`wheel`) y sont enrôlés automatiquement** à chaque boot par
+  `vibeos-agents-group.service` (ils ont déjà `sudo`). Un compte **non-`wheel`**
+  reste opt-in : `sudo usermod -aG vibeos-agents <user>` puis rouvrir la
+  session. Tant que l'utilisateur n'y est pas, le serveur MCP `vibeos` apparaît
+  « hors ligne » (voir `agent/README.md`).
 - Le **HUD Quickshell** affiche en v0.1 des données de démonstration et une
   pastille « vibed hors ligne » : le branchement live du QML sur le socket
   est le reste du chantier Phase 2 (`desktop/quickshell/README.md` §4).

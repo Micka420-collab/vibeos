@@ -230,3 +230,37 @@ VibeOS vise du matériel de développement réel. La machine de référence n°1
 - (−) Sous Secure Boot, le module NVIDIA non signé ne se charge pas : jusqu'à la signature MOK (Phase 4), le GPU NVIDIA exige Secure Boot désactivé ou l'enrôlement manuel d'une clé — limite documentée dans [HARDWARE.md](HARDWARE.md).
 
 > **Évolution 2026-07-03 — runners natifs** : la CI ne passe plus par l'émulation qemu-user-static ; chaque architecture est construite sur son **runner natif** (`ubuntu-latest` pour amd64, `ubuntu-24.04-arm` pour arm64), jobs ISO compris. La conséquence « CI sensiblement plus lente » est levée ; le build local arm64 depuis un hôte amd64 reste possible via qemu ([BUILD.md](BUILD.md) §2.6).
+
+---
+
+## ADR-010 — Identité de l'appelant par exécutable (`[rule.callers]`) — *proposé, cible Phase 3/4*
+
+**Statut** : proposé (non implémenté). Ouvert le 2026-07-13 à la suite d'une revue.
+
+**Contexte.** Aujourd'hui, l'accès au socket MCP est une **confiance binaire** :
+tout membre du groupe `vibeos-agents` obtient indifféremment la surface T0/T1
+autorisée par la politique. Le moteur ne peut pas exprimer « l'agent local
+`ollama` a moins de droits que Claude Code » : la politique matche sur le **nom
+d'outil**, pas sur **qui appelle**. Or `vibed` capture déjà `SO_PEERCRED`
+(uid/**pid**/gid) à l'accept — le pid permet de résoudre l'exécutable appelant
+via `/proc/<pid>/exe`.
+
+**Décision (cible).** Étendre le schéma de politique d'un sous-tableau optionnel
+`[rule.callers]` : une allow/deny-list d'exécutables (chemins canoniques, ex.
+`/usr/bin/claude`, `/usr/bin/opencode`) et/ou d'uids. À l'accept, `vibed`
+résoudra `/proc/<pid>/exe` (chemin réel, canonicalisé) et l'exposera dans le
+`CallContext` ; une règle sans `callers` reste inconditionnelle (rétrocompatible).
+
+**Conséquences.**
+- (+) Politique par **provenance d'agent** : restreindre les modèles locaux non
+  fiables (jailbreak, poids empoisonnés — cf. [THREAT-MODEL.md](THREAT-MODEL.md)
+  S4) à un sous-ensemble strict, tout en laissant plus de latitude à un client
+  audité.
+- (−) `/proc/<pid>/exe` est **indicatif, pas une preuve d'intégrité** : un
+  binaire renommé/remplacé peut usurper un chemin. C'est un contrôle de *défense
+  en profondeur*, pas une frontière de confiance — à combiner avec la signature
+  d'exécutable (IMA/EVM) en Phase 4+ pour une garantie forte.
+- (−) Fenêtre TOCTOU pid→exe (le pid peut être recyclé) : résolution **à
+  l'accept**, sur la connexion, pas par appel.
+- Ce mécanisme ne remplace **pas** le tiering ni l'approbation humaine T2/T3 ; il
+  affine *qui* peut demander *quoi* en amont.
