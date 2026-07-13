@@ -15,38 +15,16 @@
 //
 // Disabling the native Read/Write/Edit tools (couche 1) is done by CONFIG
 // (`permissions.deny` under a Zed-scoped `CLAUDE_CONFIG_DIR`), not here — see the
-// README and os/rootfs/etc/skel/.config/zed/.
+// README and os/rootfs/etc/skel/.config/vibeos/zed-claude/.
 
 import { ClaudeAcpAgent, runAcp } from "@agentclientprotocol/claude-agent-acp";
 import { checkPolicy, DEFAULT_SOCKET } from "./policy-client.js";
-import { shouldAutoAllow } from "./gate.js";
-import { mapToVibedCall } from "./tool-map.js";
+import { applyGovernanceGate, type GateableAgent } from "./patch.js";
 
 const SOCKET = process.env.VIBED_MCP_SOCKET ?? DEFAULT_SOCKET;
 
-const original = ClaudeAcpAgent.prototype.canUseTool;
-
-ClaudeAcpAgent.prototype.canUseTool = function (this: ClaudeAcpAgent, sessionId: string) {
-  const base = original.call(this, sessionId);
-  return async (toolName: any, toolInput: any, options: any) => {
-    const call = mapToVibedCall(toolName, toolInput);
-    if (call) {
-      let decision = null;
-      try {
-        decision = await checkPolicy(SOCKET, call.tool, call.target);
-      } catch {
-        decision = null;
-      }
-      if (shouldAutoAllow(decision)) {
-        // Governed auto-mode: the policy already permits this T0/T1 call, so run
-        // it without prompting the human.
-        return { behavior: "allow", updatedInput: toolInput };
-      }
-    }
-    // Not a governed vibeos tool, or not auto-allowed (T2/T3, unknown, or a
-    // failed check) -> the adapter's normal permission prompt handles it.
-    return base(toolName, toolInput, options);
-  };
-};
+applyGovernanceGate(ClaudeAcpAgent as unknown as GateableAgent, (tool, target) =>
+  checkPolicy(SOCKET, tool, target),
+);
 
 runAcp();
