@@ -1,11 +1,13 @@
 # HUD Quickshell — le tableau de bord agents de VibeOS
 
-> Statut : **prototype de design v0.1** — ce code QML est la maquette exécutable du HUD.
-> Il n'est **pas garanti fonctionnel** sur une machine réelle tant que le paquet
-> Quickshell (COPR, voir `docs/ECOSYSTEM.md`) n'est pas intégré à l'image et que le
-> chantier bureau n'a pas fait une passe de test sur Plasma 6/Wayland. Toutes les
-> données affichées en v0.1 sont **mockées** (voir §4). Règle D20 : rien ici ne
-> prétend être branché sur `vibed` — ce branchement est la Phase 2.
+> Statut : **runtime livré, données mockées.** Le runtime Quickshell est désormais
+> **compilé dans l'image** (étage `quickshell-builder` d'`os/Containerfile` — aucun
+> paquet n'existe pour Fedora 42) et le HUD est **auto-démarré** en session Plasma
+> (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`).
+> Toutes les données affichées restent **mockées** (voir §4) : le branchement live
+> du QML sur le socket de `vibed` (`Quickshell.Io`) est le reste du chantier
+> Phase 2. Règle D20 : rien ici ne prétend être branché sur `vibed` tant que ce
+> n'est pas le cas — le HUD affiche « vibed hors ligne ».
 >
 > **Langage visuel.** Le HUD applique à la lettre le système de design
 > [`docs/DESIGN-SYSTEM.md`](../../docs/DESIGN-SYSTEM.md) : verre frosté (glass-panel,
@@ -45,27 +47,34 @@ Couleurs des tiers (fork Catppuccin Mocha « VibeOS Dark », MIT) :
 
 ## 2. Lancement et installation
 
-Quickshell résout une configuration nommée « vibeos » ; en v0.1 cette
-configuration est **fournie par l'image**, immuable. Le HUD se lance avec :
+La configuration du HUD est **fournie par l'image**, immuable, sous
+`/usr/share/vibeos/quickshell/`. Quickshell ne résout les configurations
+*nommées* (`-c`) que depuis `$XDG_CONFIG_HOME` : le HUD se lance donc **par
+chemin explicite**, via le lanceur livré dans l'image :
 
 ```sh
-quickshell -c vibeos
+vibeos-hud                     # = quickshell -p /usr/share/vibeos/quickshell
 ```
 
 Intégration dans l'image (rien de tout cela ne s'écrit dans `/usr` à l'exécution) :
 
 - les fichiers QML de ce répertoire sont **livrés dans l'image** sous
   **`/usr/share/vibeos/quickshell/`** (contenu d'image immuable, jamais copié ni
-  modifié à l'exécution). Seuls d'éventuels **réglages utilisateur** iraient dans
-  `~/.config` ; aucun QML n'est déposé dans `/etc/skel` ;
-- le démarrage automatique passe par un fichier autostart Plasma
-  (`/etc/skel/.config/autostart/vibeos-hud.desktop`, `Exec=quickshell -c vibeos`) —
-  livré par le chantier bureau, pas par ce répertoire ;
-- le **paquet** `quickshell` (COPR, LGPL-3.0) est déclaré dans `os/Containerfile`,
-  qui appartient à un autre chantier : ici on ne fait que le référencer.
+  modifié à l'exécution). Pour personnaliser : copier le dossier dans
+  `~/.config/quickshell/vibeos` et lancer `quickshell -c vibeos` — aucun QML
+  n'est déposé dans `/etc/skel` ;
+- le démarrage automatique est **livré** : autostart Plasma
+  `/etc/skel/.config/autostart/vibeos-hud.desktop` (`Exec=/usr/bin/vibeos-hud`,
+  `TryExec=quickshell`, `OnlyShowIn=KDE`) — supprimer ce fichier de son `$HOME`
+  désactive le HUD ;
+- le **runtime** `quickshell` (LGPL-3.0) est **compilé depuis les sources** dans
+  `os/Containerfile` (étage `quickshell-builder`, recette du spec Fedora
+  officiel, version épinglée + sha256) : **aucun paquet n'existe pour Fedora
+  42** — le paquet officiel Fedora commence à f44, aucun COPR n'a de chroot
+  f42 (vérifié 2026-07-08).
 
-Arrêt/relance à la main : `quickshell kill -c vibeos` puis relancer. Le HUD est une
-couche additionnelle : le supprimer ne casse rien dans Plasma.
+Arrêt : `quickshell kill -p /usr/share/vibeos/quickshell` ; relance : `vibeos-hud`.
+Le HUD est une couche additionnelle : le supprimer ne casse rien dans Plasma.
 
 ## 3. Comment le HUD lit l'état
 
@@ -94,7 +103,7 @@ connecter. Sinon → état « hors ligne » (voir §5), jamais une erreur.
 
 | Donnée | v0.1 (livré) | Phase 2 (cible) |
 |---|---|---|
-| État du démon | **mock : toujours « hors ligne »** (honnête : `/usr/bin/vibed` n'est pas dans l'image en Phase 1) | connexion réelle au socket, reconnexion périodique |
+| État du démon | **mock : toujours « hors ligne »** (honnête : `vibed` tourne bien au boot, mais ce QML n'ouvre encore **aucun** socket) | connexion réelle au socket, reconnexion périodique |
 | Statut système | mock plausible (`mockOsStatus()`) | `tools/call os.status` via le socket |
 | État mémoire | mock plausible (`mockMemoryQuery()`) | `tools/call memory.query` via le socket |
 | Roster des agents + tiers | **mock assumé** : `vibed` v0.1 n'expose aucun outil `agents.list` — cette donnée n'est *pas encore dérivable* du démon | outil `agents.list` (ou flux dérivé des peer credentials de l'audit) à spécifier en Phase 2 |

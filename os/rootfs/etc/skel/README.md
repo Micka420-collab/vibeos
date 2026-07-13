@@ -13,6 +13,8 @@ Ces fichiers sont copiés automatiquement dans le dossier personnel de chaque
 | `.config/zellij/layouts/vibe.kdl` | Layout signature « agent + lazygit + logs » (commande `vibe`) |
 | `.config/nvim/` | Preset Neovim « VibeVim » : lazy.nvim + LazyVim + codecompanion (ollama + ACP) |
 | `.config/vibeos/welcome.md` | Mot de bienvenue affiché au tout premier terminal |
+| `.config/autostart/vibeos-hud.desktop` | Autostart du **HUD agents** (Quickshell) en session Plasma — lance `/usr/bin/vibeos-hud` ; supprimez ce fichier de votre `$HOME` pour désactiver le HUD |
+| `.claude.json` | Config MCP de **Claude Code** : serveur `vibeos` pré-déclaré (pont `socat` → socket `/run/vibed/mcp.sock`) — voir `agent/README.md` |
 
 ## Réinitialiser / régénérer ses dotfiles
 
@@ -32,9 +34,17 @@ Pour revoir le message de bienvenue : `rm ~/.local/state/vibeos/welcome-shown`.
 
 ## Notes v0.1 (honnêteté)
 
-- Le pane « vibed audit » du layout `vibe` affiche **« vibed hors ligne »**
-  tant que le démon `vibed` n'écrit pas son journal
-  (`/var/lib/vibeos/audit/vibed.jsonl`) — c'est normal, il arrive en Phase 2.
+- L'accès au socket MCP de `vibed` (Claude Code via `.claude.json`, HUD)
+  exige d'appartenir au groupe **`vibeos-agents`** :
+  `sudo usermod -aG vibeos-agents $USER` puis rouvrir la session. Sans cela,
+  le serveur MCP `vibeos` apparaît « hors ligne » — c'est la première
+  barrière d'accès, voulue (voir `agent/README.md`).
+- Le **HUD Quickshell** affiche en v0.1 des données de démonstration et une
+  pastille « vibed hors ligne » : le branchement live du QML sur le socket
+  est le reste du chantier Phase 2 (`desktop/quickshell/README.md` §4).
+- Le pane « vibed audit » du layout `vibe` se remplit dès que des appels
+  d'outils MCP sont audités dans `/var/lib/vibeos/audit/vibed.jsonl`
+  (le démon `vibed` démarre au boot depuis la v0.1).
 - Le **premier lancement de `nvim`** télécharge les plugins du preset VibeVim :
   il faut le réseau **une fois**. Ensuite, tout fonctionne hors ligne
   (modèles locaux via ollama).

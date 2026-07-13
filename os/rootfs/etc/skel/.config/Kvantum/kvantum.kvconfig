@@ -1,0 +1,5 @@
+# VibeOS — sélection du thème Kvantum actif (voir desktop/look-and-feel/README.md §4.2).
+# Le Global Theme org.vibeos.dark pose widgetStyle=kvantum ; ce fichier désigne
+# QUEL thème Kvantum est utilisé. Modifiable librement (kvantummanager).
+[General]
+theme=VibeOSDark

@@ -31,6 +31,12 @@ use crate::policy::{CallContext, Decision, PolicyEngine, Tier};
 
 /// Memory store created by vibeos-genesis.service (see memory/genesis.sh).
 pub const MEMORY_DIR: &str = "/var/lib/vibeos/memory";
+/// Security toolkit manifest shipped in the image (os/rootfs). Read-only,
+/// consulted by `sectools.list`; see docs/SECURITY-TOOLKIT.md.
+const SECTOOLS_MANIFEST: &str = "/usr/share/vibeos/security-tools.tsv";
+/// Standard binary directories probed to tell whether a toolkit entry is
+/// actually installed (pure filesystem stat — sectools.list never executes).
+const SECTOOLS_BIN_DIRS: [&str; 4] = ["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
 /// MCP protocol revision advertised in `initialize`.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 /// Hard cap on file content returned by fs.read.
@@ -45,8 +51,35 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 const O_NOFOLLOW: i32 = 0x20000;
 /// Per-file cap when scanning memory content in memory.query.
 const MAX_MEMORY_SCAN_BYTES: usize = 64 * 1024;
+/// Hard cap on entries returned by one fs.list call.
+const MAX_LIST_ENTRIES: usize = 500;
 /// Upper bound on files walked by memory.query.
 const MAX_MEMORY_FILES: usize = 200;
+/// Hard cap on one serialized memory.append line, newline included (anti-DoS:
+/// an agent cannot balloon the memory store with a single call).
+const MAX_APPEND_BYTES: usize = 16 * 1024;
+/// Journal event types an AGENT may append via memory.append. The remaining
+/// types of docs/MEMORY.md §3.5 (`genesis`, `boot`, `tool_call`, `purge`) are
+/// reserved for the system itself (genesis.sh, vibed, vibectl) and refused.
+const JOURNAL_AGENT_TYPES: [&str; 5] = [
+    "observation",
+    "decision",
+    "preference",
+    "project_seen",
+    "error",
+];
+const JOURNAL_RESERVED_TYPES: [&str; 4] = ["genesis", "boot", "tool_call", "purge"];
+/// Memory sub-scopes addressable by memory.query's `scope` argument, mapped to
+/// their location in the store (relative path, is_directory). Keep in sync
+/// with the layout in docs/MEMORY.md §3.
+const MEMORY_SCOPES: [(&str, &str, bool); 6] = [
+    ("identity", "identity.toml", false),
+    ("hardware", "hardware.json", false),
+    ("user", "user", true),
+    ("projects", "projects", true),
+    ("journal", "journal", true),
+    ("knowledge", "knowledge", true),
+];
 /// fs.write (T1 modify-user) is confined to user-scope prefixes.
 /// On Fedora bootc systems /home is a symlink to /var/home, so both spellings
 /// must be accepted. Keep in sync with `security/policy.d/default.toml`
@@ -70,8 +103,7 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "**/.gnupg/**",             // GnuPG key material, wherever it lives
     "/etc/ssh/*",               // sshd config AND host keys
     "/etc/ssh/ssh_host_*",      // host private keys (explicit, in case of subdirs)
-    "**/.aws/credentials",      // AWS access keys
-    "**/.aws/config",           // AWS profiles / sso config
+    "**/.aws/**",               // AWS credentials, config, SSO cache — whole dir
     "**/.config/gcloud/**",     // Google Cloud credentials store
     "/etc/NetworkManager/system-connections/**", // Wi-Fi/VPN PSKs and certs
     "**/.docker/config.json",   // registry auth tokens
@@ -83,15 +115,28 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "/proc/**/cmdline",         // command lines may carry secrets/tokens
     "/run/credentials/**",      // decrypted systemd credentials
     "/boot/**",                 // boot chain is none of the agent's business
+    // Credentials of the AI agents themselves and of the developer tooling
+    // shipped in the image. fs.read is NOT confined to the caller's home
+    // (vibed runs as root), so without these entries any agent could read
+    // every user's agent tokens — including other users'.
+    "**/.claude/**",               // Claude Code state: OAuth token, transcripts
+    "**/.claude.json",             // Claude Code top-level config may carry keys
+    "**/.config/gh/**",            // GitHub CLI hosts.yml (oauth_token)
+    "**/.gemini/**",               // gemini-cli oauth_creds.json
+    "**/.codex/**",                // codex auth.json
+    "**/.local/share/opencode/**", // opencode auth.json + agent-internal state
+    "**/.ollama/**",               // ollama keypair (id_ed25519)
+    "**/.npmrc",                   // npm registry authTokens
+    "**/.git-credentials",         // plaintext git credentials store
+    "**/.config/sops/**",          // SOPS/age private keys (keys.txt)
 ];
 
 /// Additional BUILT-IN denylist for WRITES only: agents may query the memory
-/// through memory.query but never write it directly (memory.append is the
-/// Phase 2 write path), and the policy itself is not agent-writable.
-const BUILTIN_DENY_WRITE: &[&str] = &[
-    "/etc/vibeos/policy.d/**",
-    "/var/lib/vibeos/memory/**",
-];
+/// through memory.query but never write it via fs.write — memory.append is
+/// the governed write path (scope-based, no path argument, so this path
+/// denylist cannot and need not apply to it) — and the policy itself is not
+/// agent-writable.
+const BUILTIN_DENY_WRITE: &[&str] = &["/etc/vibeos/policy.d/**", "/var/lib/vibeos/memory/**"];
 
 /// Returns the matched pattern when `path` (already normalized) hits the
 /// built-in denylist. `write` selects the additional write-only entries.
@@ -162,7 +207,8 @@ pub async fn handle_connection(
         let line = match std::str::from_utf8(&buf) {
             Ok(s) => s.trim(),
             Err(_) => {
-                let resp = error_response(Value::Null, -32700, "parse error: line is not valid UTF-8");
+                let resp =
+                    error_response(Value::Null, -32700, "parse error: line is not valid UTF-8");
                 let mut out = resp.to_string();
                 out.push('\n');
                 if let Err(e) = write_half.write_all(out.as_bytes()).await {
@@ -186,7 +232,11 @@ pub async fn handle_connection(
                     Some(response)
                 }
             }
-            Err(e) => Some(error_response(Value::Null, -32700, &format!("parse error: {e}"))),
+            Err(e) => Some(error_response(
+                Value::Null,
+                -32700,
+                &format!("parse error: {e}"),
+            )),
         };
 
         if let Some(response) = response {
@@ -223,7 +273,11 @@ where
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
-            return Ok(if buf.is_empty() { LineRead::Eof } else { LineRead::Line });
+            return Ok(if buf.is_empty() {
+                LineRead::Eof
+            } else {
+                LineRead::Line
+            });
         }
         if let Some(idx) = available.iter().position(|&b| b == b'\n') {
             buf.extend_from_slice(&available[..=idx]);
@@ -239,7 +293,12 @@ where
     }
 }
 
-async fn dispatch(request: Request, policy: &Arc<PolicyEngine>, audit: &AuditLog, caller: Caller) -> Value {
+async fn dispatch(
+    request: Request,
+    policy: &Arc<PolicyEngine>,
+    audit: &AuditLog,
+    caller: Caller,
+) -> Value {
     debug!("dispatch method={}", request.method);
     let id = request.id.unwrap_or(Value::Null);
     match request.method.as_str() {
@@ -289,7 +348,15 @@ async fn handle_tools_call(
             None => {
                 // Relative path or attempt to climb above `/`: fail-closed.
                 // The raw (rejected) path is the non-secret audit target.
-                try_audit(audit, &name, &args, Some(raw), Decision::Deny, "blocked_invalid_path", caller);
+                try_audit(
+                    audit,
+                    &name,
+                    &args,
+                    Some(raw),
+                    Decision::Deny,
+                    "blocked_invalid_path",
+                    caller,
+                );
                 return tool_result(
                     id,
                     format!("policy: path '{raw}' is not an absolute, normalizable path"),
@@ -311,7 +378,15 @@ async fn handle_tools_call(
     if let Some(path) = normalized_path.as_deref() {
         let is_write = name == "fs.write";
         if let Some(pattern) = builtin_denied(path, is_write) {
-            try_audit(audit, &name, &args, target.as_deref(), Decision::Deny, "blocked_builtin_denylist", caller);
+            try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                Decision::Deny,
+                "blocked_builtin_denylist",
+                caller,
+            );
             return tool_result(
                 id,
                 format!("policy: path '{path}' is denied by the built-in denylist ({pattern})"),
@@ -329,11 +404,27 @@ async fn handle_tools_call(
 
     match decision {
         Decision::Deny => {
-            try_audit(audit, &name, &args, target.as_deref(), decision, "blocked", caller);
+            try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                decision,
+                "blocked",
+                caller,
+            );
             tool_result(id, format!("policy: tool '{name}' is denied"), true)
         }
         Decision::RequireApproval => {
-            try_audit(audit, &name, &args, target.as_deref(), decision, "pending_approval", caller);
+            try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                decision,
+                "pending_approval",
+                caller,
+            );
             let tier_str = tier.map(Tier::as_str).unwrap_or("?");
             tool_result(
                 id,
@@ -346,7 +437,15 @@ async fn handle_tools_call(
         }
         Decision::Allow => {
             // Fail-closed: if the audit trail cannot be written, nothing runs.
-            if !try_audit(audit, &name, &args, target.as_deref(), decision, "started", caller) {
+            if !try_audit(
+                audit,
+                &name,
+                &args,
+                target.as_deref(),
+                decision,
+                "started",
+                caller,
+            ) {
                 return tool_result(
                     id,
                     "audit log unavailable: refusing execution (fail-closed)".to_string(),
@@ -364,15 +463,39 @@ async fn handle_tools_call(
             .await;
             match executed {
                 Ok(Ok(text)) => {
-                    try_audit(audit, &name, &args, target.as_deref(), decision, "ok", caller);
+                    try_audit(
+                        audit,
+                        &name,
+                        &args,
+                        target.as_deref(),
+                        decision,
+                        "ok",
+                        caller,
+                    );
                     tool_result(id, text, false)
                 }
                 Ok(Err(message)) => {
-                    try_audit(audit, &name, &args, target.as_deref(), decision, &format!("error: {message}"), caller);
+                    try_audit(
+                        audit,
+                        &name,
+                        &args,
+                        target.as_deref(),
+                        decision,
+                        &format!("error: {message}"),
+                        caller,
+                    );
                     tool_result(id, message, true)
                 }
                 Err(join_error) => {
-                    try_audit(audit, &name, &args, target.as_deref(), decision, "panic", caller);
+                    try_audit(
+                        audit,
+                        &name,
+                        &args,
+                        target.as_deref(),
+                        decision,
+                        "panic",
+                        caller,
+                    );
                     tool_result(id, format!("internal error: {join_error}"), true)
                 }
             }
@@ -443,6 +566,16 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"path": {"type": "string"}}}),
         ),
         (
+            "fs.list",
+            Tier::T0,
+            "List one directory (non-recursive, capped at 500 entries): name, type \
+             (file/dir/symlink/other) and size for regular files. Symlinks are reported, \
+             never followed; the same denylist as fs.read applies",
+            json!({"type": "object", "required": ["path"],
+                   "properties": {"path": {"type": "string"},
+                                  "limit": {"type": "integer", "minimum": 1}}}),
+        ),
+        (
             "fs.write",
             Tier::T1,
             "Write a user-scope file (restricted to /home and /var/home)",
@@ -464,12 +597,53 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"unit": {"type": "string"}}}),
         ),
         (
+            "svc.status",
+            Tier::T0,
+            "Read-only state of one systemd unit (systemctl show: load/active/sub state, \
+             unit file state, description). Strict unit-name validation; no state change",
+            json!({"type": "object", "required": ["unit"],
+                   "properties": {"unit": {"type": "string"}}}),
+        ),
+        (
+            "sectools.list",
+            Tier::T0,
+            "Discover the VibeOS security toolkit (read-only, executes nothing): lists the \
+             curated tools, their category, the capability tier that gates AGENT invocation \
+             (T2/T3 = human approval), and whether each is installed. Optional filters: \
+             'category' and 'installed_only'. See docs/SECURITY-TOOLKIT.md",
+            json!({"type": "object",
+            "properties": {
+                "category": {"type": "string"},
+                "installed_only": {"type": "boolean"}
+            }}),
+        ),
+        (
             "memory.query",
             Tier::T0,
-            "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match files \
-             (scope/limit arguments and memory.append are Phase 2/3 targets, see docs/MEMORY.md)",
+            "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match \
+             files, optionally restricted to one scope and capped by limit (docs/MEMORY.md §9)",
             json!({"type": "object",
-                   "properties": {"query": {"type": "string"}}}),
+            "properties": {
+                "query": {"type": "string"},
+                "scope": {"type": "string",
+                          "enum": ["identity", "hardware", "user",
+                                   "projects", "journal", "knowledge"]},
+                "limit": {"type": "integer", "minimum": 1}
+            }}),
+        ),
+        (
+            "memory.append",
+            Tier::T1,
+            "Append ONE entry to the VibeOS memory store — strictly additive, no delete or \
+             rewrite. Writable scopes in v0.2: 'journal' (entry: type/source/data) and \
+             'knowledge' (entry: subject/fact/source[/confidence]); vibed stamps ts (and the \
+             fact id). 'user' and 'projects' are a Phase 2/3 remainder (docs/MEMORY.md §9)",
+            json!({"type": "object", "required": ["scope", "entry"],
+            "properties": {
+                "scope": {"type": "string",
+                          "enum": ["journal", "knowledge", "user", "projects"]},
+                "entry": {"type": "object"}
+            }}),
         ),
     ]
 }
@@ -519,9 +693,206 @@ fn execute_tool(
                        The systemd D-Bus backend lands with vibectl (see ROADMAP.md)."
         })
         .to_string()),
+        "svc.status" => svc_status(args),
+        "sectools.list" => sectools_list(args),
+        "fs.list" => fs_list(args, policy),
         "memory.query" => memory_query(args),
+        "memory.append" => memory_append(args),
         _ => Err(format!("unknown tool: {name}")),
     }
+}
+
+/// sectools.list (T0): read-only discovery of the shipped security toolkit.
+/// Reads the manifest and reports, per tool, its category, the capability tier
+/// that gates AGENT invocation, and whether the binary is installed — checked
+/// by a plain filesystem stat in the standard bin dirs. This tool NEVER
+/// executes any security tool; running one is a future policy-gated path
+/// (T2/T3 = human approval, see docs/SECURITY-TOOLKIT.md).
+fn sectools_list(args: &Value) -> Result<String, String> {
+    let manifest = match std::fs::read_to_string(SECTOOLS_MANIFEST) {
+        Ok(text) => text,
+        Err(_) => {
+            return Ok(json!({
+                "available": false,
+                "note": "security toolkit manifest absent \
+                         (/usr/share/vibeos/security-tools.tsv): not a VibeOS image, \
+                         or the toolkit layer was not built in"
+            })
+            .to_string())
+        }
+    };
+    let category_filter = args.get("category").and_then(Value::as_str);
+    let installed_only = args
+        .get("installed_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let present = |binary: &str| -> bool {
+        SECTOOLS_BIN_DIRS
+            .iter()
+            .any(|dir| std::path::Path::new(dir).join(binary).exists())
+    };
+    Ok(sectools_list_from(
+        &manifest,
+        category_filter,
+        installed_only,
+        present,
+    ))
+}
+
+/// Pure body of sectools.list: parse the manifest and apply filters. The
+/// `present` closure resolves installation status, so tests can drive it
+/// against a fixed set without touching the real filesystem.
+fn sectools_list_from(
+    manifest: &str,
+    category_filter: Option<&str>,
+    installed_only: bool,
+    present: impl Fn(&str) -> bool,
+) -> String {
+    let mut tools = Vec::new();
+    let mut categories: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut installed_count = 0usize;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(4, '\t');
+        let (Some(binary), Some(category), Some(tier)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue; // malformed line: skip rather than fail the whole call
+        };
+        let description = fields.next().unwrap_or("").trim();
+        let (binary, category, tier) = (binary.trim(), category.trim(), tier.trim());
+        categories.insert(category.to_string());
+        if category_filter.is_some_and(|c| c != category) {
+            continue;
+        }
+        let is_installed = present(binary);
+        if is_installed {
+            installed_count += 1;
+        }
+        if installed_only && !is_installed {
+            continue;
+        }
+        tools.push(json!({
+            "binary": binary,
+            "category": category,
+            "tier": tier,
+            "installed": is_installed,
+            "description": description,
+        }));
+    }
+    json!({
+        "available": true,
+        "categories": categories.into_iter().collect::<Vec<_>>(),
+        "count": tools.len(),
+        "installed_count": installed_count,
+        "governance": "Agent invocation of these tools is gated by the vibed policy engine: \
+                       T2 (active against a target) and T3 (destructive) require out-of-band \
+                       HUMAN APPROVAL. sectools.list itself only discovers, never executes. \
+                       Authorized use only. See docs/SECURITY-TOOLKIT.md",
+        "tools": tools,
+    })
+    .to_string()
+}
+
+/// svc.status (T0): read-only state of one systemd unit via `systemctl show`.
+///
+/// Safety posture (vibed runs as root and this SPAWNS a process):
+///   * the unit name is validated by `validate_unit_name` BEFORE anything
+///     runs — conservative allow-list of characters, no `/`, no leading `-`,
+///     bounded length — so neither options nor paths can be injected;
+///   * `--` terminates option parsing as a second fence;
+///   * systemctl is invoked by ABSOLUTE path with a cleared environment;
+///   * `show` is a pure read (no state change), and its D-Bus client applies
+///     its own timeout, so the spawn_blocking worker is not held hostage.
+fn svc_status(args: &Value) -> Result<String, String> {
+    let raw = args
+        .get("unit")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing 'unit' argument".to_string())?;
+    let unit = validate_unit_name(raw)?;
+
+    let output = std::process::Command::new("/usr/bin/systemctl")
+        .env_clear()
+        .args([
+            "show",
+            "--no-pager",
+            "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp",
+            "--",
+            &unit,
+        ])
+        .output()
+        .map_err(|e| format!("svc.status: cannot run systemctl: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let snippet: String = stderr.chars().take(200).collect();
+        return Err(format!(
+            "svc.status {unit}: systemctl exited with {}: {}",
+            output.status,
+            snippet.trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut payload = parse_systemctl_show(&stdout);
+    payload.insert("unit".to_string(), Value::String(unit));
+    Ok(Value::Object(payload).to_string())
+}
+
+/// Conservative systemd unit-name validation. Accepts `name`, `name.service`,
+/// `template@instance.service`, `dbus.socket`, systemd-escaped names (`\x2d`);
+/// appends `.service` when no type suffix is present (systemctl's own
+/// convention). Refuses anything that could be an option or a path.
+fn validate_unit_name(raw: &str) -> Result<String, String> {
+    if raw.is_empty() {
+        return Err("svc.status: 'unit' must not be empty".to_string());
+    }
+    if raw.len() > 255 {
+        return Err("svc.status: unit name exceeds 255 characters".to_string());
+    }
+    if raw.starts_with('-') {
+        return Err(format!(
+            "svc.status: invalid unit name '{raw}' (leading '-')"
+        ));
+    }
+    let valid = raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '@' | '\\'));
+    if !valid {
+        return Err(format!(
+            "svc.status: invalid unit name '{raw}' (allowed: alphanumerics and :-_.@\\)"
+        ));
+    }
+    Ok(if raw.contains('.') {
+        raw.to_string()
+    } else {
+        format!("{raw}.service")
+    })
+}
+
+/// Parse `systemctl show` KEY=VALUE lines into a JSON object with lowercase
+/// snake_case keys. Pure function, unit-tested without spawning anything.
+fn parse_systemctl_show(stdout: &str) -> serde_json::Map<String, Value> {
+    const KEYS: [(&str, &str); 7] = [
+        ("Id", "id"),
+        ("Description", "description"),
+        ("LoadState", "load_state"),
+        ("ActiveState", "active_state"),
+        ("SubState", "sub_state"),
+        ("UnitFileState", "unit_file_state"),
+        ("ActiveEnterTimestamp", "active_enter_timestamp"),
+    ];
+    let mut map = serde_json::Map::new();
+    for line in stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if let Some((_, out_key)) = KEYS.iter().find(|(k, _)| *k == key) {
+            map.insert(out_key.to_string(), Value::String(value.to_string()));
+        }
+    }
+    map
 }
 
 fn os_status() -> Result<String, String> {
@@ -529,9 +900,12 @@ fn os_status() -> Result<String, String> {
         .ok()
         .and_then(|s| s.split_whitespace().next().map(str::to_string))
         .and_then(|first| first.parse::<f64>().ok());
-    let loadavg = std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .map(|s| s.split_whitespace().take(3).map(str::to_string).collect::<Vec<_>>());
+    let loadavg = std::fs::read_to_string("/proc/loadavg").ok().map(|s| {
+        s.split_whitespace()
+            .take(3)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
     let (mem_total_kb, mem_available_kb) = read_meminfo();
     let mounts = read_mounts();
     Ok(json!({
@@ -585,6 +959,7 @@ fn read_mounts() -> Vec<Value> {
 
 fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
 
     let raw = args
         .get("path")
@@ -596,6 +971,14 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     // checked the lexical form before the policy decision.
     let canonical = std::fs::canonicalize(&path).map_err(|e| format!("fs.read {path}: {e}"))?;
     let canonical_str = canonical.to_string_lossy();
+    // Bind the validated file's identity (device, inode) as close to
+    // canonicalization as possible: the open() below re-verifies against it,
+    // so a path component swapped for a symlink between the checks and the
+    // open (TOCTOU, vibed runs as root) is detected and refused. Residual
+    // window: canonicalize -> this lstat (a few µs); full closure comes with
+    // openat2(RESOLVE_NO_SYMLINKS)/per-tool sandboxing in Phase 3.
+    let validated =
+        std::fs::symlink_metadata(&canonical).map_err(|e| format!("fs.read {path}: {e}"))?;
     // Built-in denylist AND the operator's policy (paths.denied / allowed) are
     // re-checked against BOTH the lexical and the canonical path, so neither a
     // symlink nor a policy blind spot can be used to escape into denied ground.
@@ -610,14 +993,30 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
 
     // Reject anything that is not a regular file: character/block devices
     // (e.g. /dev/urandom) would exhaust memory, and FIFOs would block the
-    // worker thread forever.
-    let mut file = std::fs::File::open(&canonical).map_err(|e| format!("fs.read {path}: {e}"))?;
-    let is_file = file
+    // worker thread forever. O_NOFOLLOW: canonicalize already resolved every
+    // symlink, so the final component of `canonical` must not be one anymore —
+    // if it is (post-canonicalization swap), open() fails with ELOOP.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(&canonical)
+        .map_err(|e| format!("fs.read {path}: {e}"))?;
+    let opened = file
         .metadata()
-        .map_err(|e| format!("fs.read {path}: {e}"))?
-        .is_file();
-    if !is_file {
+        .map_err(|e| format!("fs.read {path}: {e}"))?;
+    if !opened.is_file() {
         return Err(format!("fs.read: '{canonical_str}' is not a regular file"));
+    }
+    // The file actually opened must be the very inode that passed the
+    // denylist/policy checks above (fstat on the open fd is authoritative).
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != validated.dev() || opened.ino() != validated.ino() {
+            return Err(format!(
+                "fs.read: '{canonical_str}' changed between validation and open \
+                 (possible symlink race); refusing (fail-closed)"
+            ));
+        }
     }
     // Bounded read: never pull more than MAX_READ_BYTES + 1 into memory (one
     // extra byte only to detect truncation). This caps the allocation well
@@ -637,6 +1036,134 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     Ok(text)
 }
 
+/// fs.list (T0): bounded, non-recursive listing of one directory.
+///
+/// Same confinement discipline as fs.read: lexical normalization (done by the
+/// caller pipeline too), canonicalization, built-in denylist + operator
+/// policy re-checked on BOTH the lexical and canonical form. Symlinks inside
+/// the directory are REPORTED (type "symlink") but never followed — neither
+/// their target type nor size is disclosed.
+fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+    let raw = args
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing 'path' argument".to_string())?;
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => MAX_LIST_ENTRIES,
+        Some(value) => match value.as_u64() {
+            Some(n) if n >= 1 => (n as usize).min(MAX_LIST_ENTRIES),
+            _ => return Err("fs.list: 'limit' must be an integer >= 1".to_string()),
+        },
+    };
+    let path = normalize_path(raw).ok_or_else(|| format!("fs.list: invalid path '{raw}'"))?;
+    let canonical = std::fs::canonicalize(&path).map_err(|e| format!("fs.list {path}: {e}"))?;
+    let canonical_str = canonical.to_string_lossy();
+    for candidate in [path.as_str(), canonical_str.as_ref()] {
+        if let Some(pattern) = builtin_denied(candidate, false) {
+            return Err(format!(
+                "fs.list: '{candidate}' is denied by the built-in denylist ({pattern})"
+            ));
+        }
+    }
+    recheck_policy_canonical(policy, "fs.list", &canonical_str)?;
+
+    // Anti-TOCTOU (same discipline as fs.read; vibed runs as root): capture the
+    // directory's identity right before the read and re-check it right after.
+    // canonicalize resolved every symlink, so the target must be a real
+    // directory now; if a component is swapped for a symlink in the window
+    // around read_dir (e.g. `proj` -> /root), dev/ino changes and we refuse.
+    // Full closure (parent-component swaps mid-read) awaits openat2
+    // (RESOLVE_NO_SYMLINKS) in Phase 3.
+    let before =
+        std::fs::symlink_metadata(&canonical).map_err(|e| format!("fs.list {path}: {e}"))?;
+    if !before.file_type().is_dir() {
+        return Err(format!("fs.list: '{canonical_str}' is not a directory"));
+    }
+    let read_dir = std::fs::read_dir(&canonical).map_err(|e| format!("fs.list {path}: {e}"))?;
+
+    // Keep the `limit` lexicographically-smallest names with O(limit) memory,
+    // so a truncated result is a STABLE prefix regardless of readdir order (a
+    // sort AFTER truncation would return an arbitrary readdir-order subset).
+    struct ByName(String, Value);
+    let mut kept: std::collections::BinaryHeap<ByName> = std::collections::BinaryHeap::new();
+    impl PartialEq for ByName {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+    impl Eq for ByName {}
+    impl PartialOrd for ByName {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for ByName {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.cmp(&other.0)
+        }
+    }
+    let mut total = 0usize;
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // file_type() does not follow symlinks; size only for regular files.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let kind = if file_type.is_dir() {
+            "dir"
+        } else if file_type.is_file() {
+            "file"
+        } else if file_type.is_symlink() {
+            "symlink"
+        } else {
+            "other"
+        };
+        let size = if file_type.is_file() {
+            entry.metadata().ok().map(|m| m.len())
+        } else {
+            None
+        };
+        total += 1;
+        let item = ByName(
+            name.clone(),
+            json!({"name": name, "type": kind, "size": size}),
+        );
+        // Max-heap of size `limit`: its root is the largest kept name; a
+        // smaller incoming name evicts it, so we retain the smallest `limit`.
+        if kept.len() < limit {
+            kept.push(item);
+        } else if let Some(top) = kept.peek() {
+            if item.0 < top.0 {
+                kept.pop();
+                kept.push(item);
+            }
+        }
+    }
+
+    let after =
+        std::fs::symlink_metadata(&canonical).map_err(|e| format!("fs.list {path}: {e}"))?;
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return Err(format!(
+                "fs.list: '{canonical_str}' changed during the read (possible symlink race); \
+                 refusing (fail-closed)"
+            ));
+        }
+    }
+
+    let truncated = total > kept.len();
+    let mut sorted = kept.into_vec();
+    sorted.sort();
+    let listed: Vec<Value> = sorted.into_iter().map(|b| b.1).collect();
+    Ok(json!({
+        "path": canonical_str,
+        "entries": listed,
+        "truncated": truncated
+    })
+    .to_string())
+}
+
 fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -652,7 +1179,10 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
     // Normalization resolves `..` lexically, so the prefix check below cannot
     // be escaped with traversal sequences.
     let path = normalize_path(raw).ok_or_else(|| format!("fs.write: invalid path '{raw}'"))?;
-    if !USER_WRITE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+    if !USER_WRITE_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
         return Err(format!(
             "fs.write is T1 (modify-user): path must start with one of {USER_WRITE_PREFIXES:?}"
         ));
@@ -678,7 +1208,10 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
 
     // (a) The canonical target must still sit under a user-write prefix; a
     //     symlinked parent that escaped to /etc, /var/lib, ... is rejected here.
-    if !USER_WRITE_PREFIXES.iter().any(|prefix| canonical_str.starts_with(prefix)) {
+    if !USER_WRITE_PREFIXES
+        .iter()
+        .any(|prefix| canonical_str.starts_with(prefix))
+    {
         return Err(format!(
             "fs.write: canonical path '{canonical_str}' escapes the user-write scope \
              (symlinked parent?)"
@@ -725,9 +1258,16 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
 /// policy forbids via `paths.denied`/`paths.allowed`. Anything other than a
 /// clean `Allow` is refused. The tool already passed the lexical policy check
 /// in `handle_tools_call`, so this can only tighten, never loosen.
-fn recheck_policy_canonical(policy: &PolicyEngine, tool: &str, canonical: &str) -> Result<(), String> {
+fn recheck_policy_canonical(
+    policy: &PolicyEngine,
+    tool: &str,
+    canonical: &str,
+) -> Result<(), String> {
     let tier = tool_tier(tool);
-    let ctx = CallContext { path: Some(canonical), service: None };
+    let ctx = CallContext {
+        path: Some(canonical),
+        service: None,
+    };
     match policy.evaluate(tool, tier, ctx) {
         Decision::Allow => Ok(()),
         _ => Err(format!(
@@ -743,8 +1283,9 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
     let uid = caller.uid.ok_or_else(|| {
         "fs.write: caller uid unavailable (SO_PEERCRED); refusing (fail-closed)".to_string()
     })?;
-    let home = home_dir_for_uid(uid)
-        .ok_or_else(|| format!("fs.write: no home directory for uid {uid} in /etc/passwd; refusing"))?;
+    let home = home_dir_for_uid(uid).ok_or_else(|| {
+        format!("fs.write: no home directory for uid {uid} in /etc/passwd; refusing")
+    })?;
     // Canonicalize the home so the Fedora `/home -> /var/home` symlink (and any
     // other) is resolved to the same space as the (already canonical) target.
     let canonical_home = std::fs::canonicalize(&home)
@@ -805,12 +1346,46 @@ fn home_dir_for_uid_in(passwd: &str, uid: u32) -> Option<String> {
 }
 
 fn memory_query(args: &Value) -> Result<String, String> {
+    memory_query_at(std::path::Path::new(MEMORY_DIR), args)
+}
+
+/// Body of memory.query with the store root as a parameter, so the tests can
+/// run it against a scratch layout without touching /var/lib/vibeos/memory.
+fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     let query = args
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_lowercase();
-    let root = std::path::Path::new(MEMORY_DIR);
+
+    // `scope` restricts the walk to one entry of the docs/MEMORY.md §3 layout.
+    let scope = match args.get("scope") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) => match MEMORY_SCOPES.iter().find(|(n, _, _)| n == name) {
+            Some(entry) => Some(*entry),
+            None => {
+                let valid: Vec<&str> = MEMORY_SCOPES.iter().map(|(n, _, _)| *n).collect();
+                return Err(format!(
+                    "memory.query: unknown scope '{name}' (valid: {})",
+                    valid.join(", ")
+                ));
+            }
+        },
+        Some(_) => return Err("memory.query: 'scope' must be a string".to_string()),
+    };
+
+    // `limit` caps the number of matches returned; the walk itself stays
+    // bounded by MAX_MEMORY_FILES regardless.
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => MAX_MEMORY_FILES,
+        Some(value) => match value.as_u64() {
+            Some(n) if n >= 1 => (n as usize).min(MAX_MEMORY_FILES),
+            _ => return Err("memory.query: 'limit' must be an integer >= 1".to_string()),
+        },
+    };
+
     if !root.is_dir() {
         return Ok(json!({
             "initialized": false,
@@ -820,9 +1395,35 @@ fn memory_query(args: &Value) -> Result<String, String> {
         .to_string());
     }
 
-    // Bounded iterative walk: no recursion, hard cap on visited files.
+    // Bounded iterative walk: no recursion, hard cap on visited files, and
+    // NEVER follows symlinks (entry.file_type() / symlink_metadata do not
+    // traverse) — a link planted inside the store cannot route the walk (or
+    // the content scan) outside /var/lib/vibeos/memory, e.g. into the audit
+    // trail.
     let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    // A walk root is only pushed if it is a REAL directory (symlink_metadata
+    // does not follow): if `journal` (or the store root itself) is a symlink,
+    // the walk must not descend through it out of the store.
+    let push_if_real_dir = |stack: &mut Vec<std::path::PathBuf>, p: std::path::PathBuf| {
+        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
+            stack.push(p);
+        }
+    };
+    match scope {
+        None => push_if_real_dir(&mut stack, root.to_path_buf()),
+        Some((_, relative, is_dir)) => {
+            let start = root.join(relative);
+            if is_dir {
+                push_if_real_dir(&mut stack, start);
+            } else if start
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_file())
+            {
+                files.push(start);
+            }
+        }
+    }
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -831,12 +1432,15 @@ fn memory_query(args: &Value) -> Result<String, String> {
             if files.len() >= MAX_MEMORY_FILES {
                 break;
             }
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.is_file() {
-                files.push(path);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
             }
+            // Symlinks (and any other special type) are deliberately skipped.
         }
         if files.len() >= MAX_MEMORY_FILES {
             break;
@@ -844,7 +1448,12 @@ fn memory_query(args: &Value) -> Result<String, String> {
     }
 
     let mut matches = Vec::new();
+    let mut truncated = false;
     for path in &files {
+        if matches.len() >= limit {
+            truncated = true;
+            break;
+        }
         let relative = path
             .strip_prefix(root)
             .unwrap_or(path)
@@ -855,10 +1464,28 @@ fn memory_query(args: &Value) -> Result<String, String> {
             continue;
         }
         let name_hit = relative.to_lowercase().contains(&query);
-        let content_hit = std::fs::read(path).ok().is_some_and(|bytes| {
-            let end = bytes.len().min(MAX_MEMORY_SCAN_BYTES);
-            String::from_utf8_lossy(&bytes[..end]).to_lowercase().contains(&query)
-        });
+        // Bounded scan: never pull more than MAX_MEMORY_SCAN_BYTES of one file
+        // into memory (same take() discipline as fs.read) — a huge file in the
+        // store must not translate into an unbounded allocation. O_NOFOLLOW:
+        // the file was a regular file when the walk collected it; if it was
+        // swapped for a symlink before this open (TOCTOU), open() fails with
+        // ELOOP instead of following it out of the store.
+        let content_hit = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
+            .ok()
+            .is_some_and(|file| {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                let ok = file
+                    .take(MAX_MEMORY_SCAN_BYTES as u64)
+                    .read_to_end(&mut bytes)
+                    .is_ok();
+                ok && String::from_utf8_lossy(&bytes)
+                    .to_lowercase()
+                    .contains(&query)
+            });
         if name_hit || content_hit {
             matches.push(json!({ "file": relative }));
         }
@@ -867,10 +1494,259 @@ fn memory_query(args: &Value) -> Result<String, String> {
     Ok(json!({
         "initialized": true,
         "query": query,
+        "scope": scope.map(|(name, _, _)| name),
         "scanned_files": files.len(),
-        "matches": matches
+        "matches": matches,
+        "truncated": truncated
     })
     .to_string())
+}
+
+fn memory_append(args: &Value) -> Result<String, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("memory.append: system clock error: {e}"))?
+        .as_secs();
+    memory_append_at(std::path::Path::new(MEMORY_DIR), args, now)
+}
+
+/// Body of memory.append with the store root and the clock as parameters
+/// (deterministic, filesystem-scratch-friendly tests).
+///
+/// Strictly ADDITIVE by construction: the only operation is an O_APPEND write
+/// of one serialized line to a scope-derived file — there is no delete, no
+/// rewrite, and no caller-controlled path (docs/MEMORY.md §9). The caller's
+/// authoritative identity (uid/gid/pid) is recorded by the audit pipeline;
+/// the `source` field below is self-declared memory metadata.
+fn memory_append_at(
+    root: &std::path::Path,
+    args: &Value,
+    epoch_secs: u64,
+) -> Result<String, String> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let scope = args
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "memory.append: missing 'scope' argument".to_string())?;
+    let entry = args
+        .get("entry")
+        .ok_or_else(|| "memory.append: missing 'entry' argument".to_string())?;
+    if !entry.is_object() {
+        return Err("memory.append: 'entry' must be an object".to_string());
+    }
+
+    if !root.is_dir() {
+        return Err(
+            "memory.append: memory store absent: vibeos-genesis.service has not run yet \
+             (nothing to append to; fail-closed)"
+                .to_string(),
+        );
+    }
+
+    let ts = utc_iso8601(epoch_secs);
+    let (relative_file, line_value) = match scope {
+        "journal" => {
+            let event_type = entry.get("type").and_then(Value::as_str).ok_or_else(|| {
+                "memory.append: missing 'type' field in journal entry".to_string()
+            })?;
+            if JOURNAL_RESERVED_TYPES.contains(&event_type) {
+                return Err(format!(
+                    "memory.append: journal type '{event_type}' is reserved for the system \
+                     (genesis.sh, vibed, vibectl) and cannot be appended by an agent"
+                ));
+            }
+            if !JOURNAL_AGENT_TYPES.contains(&event_type) {
+                return Err(format!(
+                    "memory.append: unknown journal type '{event_type}' (valid: {})",
+                    JOURNAL_AGENT_TYPES.join(", ")
+                ));
+            }
+            let source = validated_source(entry)?;
+            let data = entry.get("data").cloned().unwrap_or_else(|| json!({}));
+            if !data.is_object() {
+                return Err("memory.append: 'data' must be an object".to_string());
+            }
+            (
+                format!("journal/{}.jsonl", utc_date_string(epoch_secs)),
+                json!({ "ts": ts, "type": event_type, "source": source, "data": data }),
+            )
+        }
+        "knowledge" => {
+            let subject = required_entry_str(entry, "subject", 256)?;
+            let fact = required_entry_str(entry, "fact", 4096)?;
+            let source = validated_source(entry)?;
+            let confidence = match entry.get("confidence") {
+                None | Some(Value::Null) => None,
+                Some(value) => match value.as_f64() {
+                    Some(c) if (0.0..=1.0).contains(&c) => Some(c),
+                    _ => {
+                        return Err(
+                            "memory.append: 'confidence' must be a number between 0 and 1"
+                                .to_string(),
+                        )
+                    }
+                },
+            };
+            let mut fact_value = json!({
+                "id": next_fact_id(epoch_secs),
+                "ts": ts,
+                "subject": subject,
+                "fact": fact,
+                "source": source
+            });
+            if let Some(c) = confidence {
+                fact_value["confidence"] = json!(c);
+            }
+            ("knowledge/facts.jsonl".to_string(), fact_value)
+        }
+        "user" | "projects" => {
+            return Err(format!(
+                "memory.append: scope '{scope}' is not implemented yet (structured TOML/JSON \
+                 merge — Phase 2/3 remainder, docs/MEMORY.md §3); the append-only scopes \
+                 'journal' and 'knowledge' are the writable surface of v0.2"
+            ));
+        }
+        other => {
+            return Err(format!(
+                "memory.append: unknown scope '{other}' (writable: journal, knowledge)"
+            ));
+        }
+    };
+
+    let mut line = serde_json::to_string(&line_value)
+        .map_err(|e| format!("memory.append: serialization failed: {e}"))?;
+    line.push('\n');
+    if line.len() > MAX_APPEND_BYTES {
+        return Err(format!(
+            "memory.append: entry exceeds the {} KiB line cap",
+            MAX_APPEND_BYTES / 1024
+        ));
+    }
+
+    let target = root.join(&relative_file);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "memory.append: internal error: target has no parent".to_string())?;
+    // Genesis creates the subdirectories; recreate defensively with the same
+    // private permissions if one is missing (never the store root itself).
+    if !parent.is_dir() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|e| format!("memory.append: cannot create '{relative_file}' parent: {e}"))?;
+    }
+
+    // Serialize appends within the process; combined with O_APPEND, each entry
+    // lands as one contiguous line even under concurrent connections.
+    // O_NOFOLLOW: if the target name was swapped for a symlink, refuse rather
+    // than follow it out of the store.
+    static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = APPEND_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW)
+        .open(&target)
+        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
+
+    Ok(json!({
+        "appended": true,
+        "file": relative_file,
+        "bytes": line.len(),
+        "ts": ts
+    })
+    .to_string())
+}
+
+/// `source` field of a memory entry: the self-declared emitter label (e.g.
+/// "claude-code"), constrained to a safe charset. The authoritative caller
+/// identity lives in the audit trail, not here.
+fn validated_source(entry: &Value) -> Result<String, String> {
+    let source = entry
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "memory.append: missing 'source' field in entry".to_string())?;
+    let valid = !source.is_empty()
+        && source.len() <= 64
+        && source
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !valid {
+        return Err(
+            "memory.append: 'source' must be 1-64 characters of [A-Za-z0-9._-]".to_string(),
+        );
+    }
+    Ok(source.to_string())
+}
+
+/// Required bounded string field of a memory entry.
+fn required_entry_str(entry: &Value, field: &str, max_len: usize) -> Result<String, String> {
+    let value = entry
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("memory.append: missing '{field}' field in entry"))?;
+    if value.is_empty() || value.len() > max_len {
+        return Err(format!(
+            "memory.append: '{field}' must be 1-{max_len} bytes"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// Unique-enough fact id: epoch seconds + pid + per-process sequence number.
+/// No dedup semantics — facts are append-only; curation is a vibectl matter.
+fn next_fact_id(epoch_secs: u64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{epoch_secs}-{}-{n}", std::process::id())
+}
+
+/// Civil UTC date-time from unix epoch seconds — Howard Hinnant's
+/// `civil_from_days` algorithm, std-only (the crate deliberately has no
+/// date/time dependency). Returns (year, month, day, hour, minute, second).
+fn utc_civil(epoch_secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (epoch_secs / 86_400) as i64;
+    let seconds_of_day = epoch_secs % 86_400;
+    let hour = (seconds_of_day / 3_600) as u32;
+    let minute = ((seconds_of_day % 3_600) / 60) as u32;
+    let second = (seconds_of_day % 60) as u32;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let year_of_era = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    let year = if month <= 2 {
+        year_of_era + 1
+    } else {
+        year_of_era
+    };
+    (year, month, day, hour, minute, second)
+}
+
+/// `AAAA-MM-JJ` (UTC) — the journal's one-file-per-day naming (MEMORY.md §3.5).
+fn utc_date_string(epoch_secs: u64) -> String {
+    let (year, month, day, ..) = utc_civil(epoch_secs);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// ISO 8601 UTC timestamp with a `Z` suffix.
+fn utc_iso8601(epoch_secs: u64) -> String {
+    let (year, month, day, hour, minute, second) = utc_civil(epoch_secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 // ---------------------------------------------------------------------------
@@ -927,16 +1803,32 @@ mod tests {
             "/etc/vibeos/policy.d/default.toml",
             "/var/lib/vibeos/memory/identity.toml",
         ] {
-            assert!(builtin_denied(path, true).is_some(), "{path} must be write-denied");
-            assert!(builtin_denied(path, false).is_none(), "{path} must stay readable");
+            assert!(
+                builtin_denied(path, true).is_some(),
+                "{path} must be write-denied"
+            );
+            assert!(
+                builtin_denied(path, false).is_none(),
+                "{path} must stay readable"
+            );
         }
     }
 
     #[test]
     fn builtin_denylist_leaves_normal_paths_alone() {
-        for path in ["/etc/os-release", "/home/dev/project/main.rs", "/var/home/dev/notes.md"] {
-            assert!(builtin_denied(path, false).is_none(), "{path} must be readable");
-            assert!(builtin_denied(path, true).is_none(), "{path} must be writable");
+        for path in [
+            "/etc/os-release",
+            "/home/dev/project/main.rs",
+            "/var/home/dev/notes.md",
+        ] {
+            assert!(
+                builtin_denied(path, false).is_none(),
+                "{path} must be readable"
+            );
+            assert!(
+                builtin_denied(path, true).is_none(),
+                "{path} must be writable"
+            );
         }
     }
 
@@ -952,19 +1844,32 @@ mod tests {
     #[test]
     fn fs_write_rejects_paths_outside_user_prefixes() {
         let policy = empty_policy();
-        let caller = Caller { uid: Some(1000), gid: None, pid: None };
-        let err = fs_write(&json!({"path": "/etc/passwd", "content": "x"}), &policy, caller)
-            .unwrap_err();
+        let caller = Caller {
+            uid: Some(1000),
+            gid: None,
+            pid: None,
+        };
+        let err = fs_write(
+            &json!({"path": "/etc/passwd", "content": "x"}),
+            &policy,
+            caller,
+        )
+        .unwrap_err();
         assert!(err.contains("modify-user"), "unexpected error: {err}");
         // /tmp was removed from the v0.1 write scope (D7).
-        let err = fs_write(&json!({"path": "/tmp/x", "content": "x"}), &policy, caller).unwrap_err();
+        let err =
+            fs_write(&json!({"path": "/tmp/x", "content": "x"}), &policy, caller).unwrap_err();
         assert!(err.contains("modify-user"), "unexpected error: {err}");
     }
 
     #[test]
     fn fs_write_rejects_traversal_and_memory_volume() {
         let policy = empty_policy();
-        let caller = Caller { uid: Some(1000), gid: None, pid: None };
+        let caller = Caller {
+            uid: Some(1000),
+            gid: None,
+            pid: None,
+        };
         let err = fs_write(
             &json!({"path": "/home/dev/../../etc/cron.d/evil", "content": "x"}),
             &policy,
@@ -1037,7 +1942,11 @@ mod tests {
     }
 
     fn caller_uid(uid: u32) -> Caller {
-        Caller { uid: Some(uid), gid: None, pid: None }
+        Caller {
+            uid: Some(uid),
+            gid: None,
+            pid: None,
+        }
     }
 
     /// A fresh, empty scratch directory inside `uid`'s real home (removed by the
@@ -1047,7 +1956,8 @@ mod tests {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let home = home_dir_for_uid(uid).expect("caller uid has a home in /etc/passwd");
-        let dir = std::path::Path::new(&home).join(format!(".vibed-test-{tag}-{}-{n}", std::process::id()));
+        let dir = std::path::Path::new(&home)
+            .join(format!(".vibed-test-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create home scratch dir");
         dir
@@ -1090,8 +2000,14 @@ mod tests {
             caller_uid(0),
         );
         let err = res.unwrap_err();
-        assert!(err.contains("cross-user"), "expected cross-user refusal, got: {err}");
-        assert!(!target.exists(), "no file may be created on a cross-user refusal");
+        assert!(
+            err.contains("cross-user"),
+            "expected cross-user refusal, got: {err}"
+        );
+        assert!(
+            !target.exists(),
+            "no file may be created on a cross-user refusal"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1109,7 +2025,10 @@ mod tests {
             &permissive_policy(),
             Caller::default(),
         );
-        assert!(res.unwrap_err().contains("uid unavailable"), "unknown uid must be refused");
+        assert!(
+            res.unwrap_err().contains("uid unavailable"),
+            "unknown uid must be refused"
+        );
         assert!(!target.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1121,7 +2040,8 @@ mod tests {
             return;
         }
         let base = home_scratch(uid, "nofollow");
-        let victim = std::env::temp_dir().join(format!("vibed-nofollow-victim-{}", std::process::id()));
+        let victim =
+            std::env::temp_dir().join(format!("vibed-nofollow-victim-{}", std::process::id()));
         let _ = std::fs::remove_file(&victim);
         let link = base.join("link");
         std::os::unix::fs::symlink(&victim, &link).expect("create final-component symlink");
@@ -1130,8 +2050,14 @@ mod tests {
             &permissive_policy(),
             caller_uid(uid),
         );
-        assert!(res.is_err(), "writing through a symlinked final name must fail (O_NOFOLLOW)");
-        assert!(!victim.exists(), "the symlink target must never be created/written");
+        assert!(
+            res.is_err(),
+            "writing through a symlinked final name must fail (O_NOFOLLOW)"
+        );
+        assert!(
+            !victim.exists(),
+            "the symlink target must never be created/written"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1189,7 +2115,11 @@ mod tests {
             secret.display()
         ));
         let target = format!("{}/via/implant", base.display());
-        let res = fs_write(&json!({"path": target, "content": "x"}), &policy, caller_uid(uid));
+        let res = fs_write(
+            &json!({"path": target, "content": "x"}),
+            &policy,
+            caller_uid(uid),
+        );
         let err = res.unwrap_err();
         assert!(
             err.contains("denied by policy"),
@@ -1228,6 +2158,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn builtin_denylist_covers_ai_agent_credentials() {
+        // fs.read is not confined to the caller's home (vibed runs as root):
+        // the tokens of the AI agents and dev tooling shipped in the image
+        // must be unreadable for EVERY user's home.
+        for path in [
+            "/home/dev/.claude/.credentials.json",
+            "/home/dev/.claude/history.jsonl",
+            "/var/home/dev/.claude.json",
+            "/home/dev/.config/gh/hosts.yml",
+            "/home/dev/.gemini/oauth_creds.json",
+            "/home/dev/.codex/auth.json",
+            "/home/dev/.local/share/opencode/auth.json",
+            "/home/dev/.ollama/id_ed25519",
+            "/home/dev/.npmrc",
+            "/home/dev/.git-credentials",
+            "/home/dev/.config/sops/age/keys.txt",
+        ] {
+            assert!(
+                builtin_denied(path, false).is_some(),
+                "{path} must be read-denied by the built-in denylist"
+            );
+        }
+        // But ordinary dotfiles stay readable: the denylist targets secrets,
+        // not the whole home.
+        for path in ["/home/dev/.bashrc", "/home/dev/.config/fish/config.fish"] {
+            assert!(
+                builtin_denied(path, false).is_none(),
+                "{path} must stay readable"
+            );
+        }
+    }
+
     // -- Fix 4: fs.read special files and bounded reads ----------------------
 
     #[test]
@@ -1236,14 +2199,20 @@ mod tests {
         // Character device: reading to the end would exhaust memory.
         if std::path::Path::new("/dev/zero").exists() {
             let err = fs_read(&json!({"path": "/dev/zero"}), &policy).unwrap_err();
-            assert!(err.contains("not a regular file"), "char device must be refused: {err}");
+            assert!(
+                err.contains("not a regular file"),
+                "char device must be refused: {err}"
+            );
         }
         // A directory is not a regular file either.
         let dir = std::env::temp_dir().join(format!("vibed-read-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let err = fs_read(&json!({"path": dir.to_string_lossy()}), &policy).unwrap_err();
-        assert!(err.contains("not a regular file"), "directory must be refused: {err}");
+        assert!(
+            err.contains("not a regular file"),
+            "directory must be refused: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1262,12 +2231,35 @@ mod tests {
         let big = dir.join("big.bin");
         std::fs::write(&big, vec![b'a'; MAX_READ_BYTES + 4096]).unwrap();
         let out = fs_read(&json!({"path": big.to_string_lossy()}), &policy).expect("read big");
-        assert!(out.contains("truncated"), "oversized read must be truncated");
+        assert!(
+            out.contains("truncated"),
+            "oversized read must be truncated"
+        );
         assert!(
             out.len() <= MAX_READ_BYTES + 64,
             "returned content must stay within the cap (+ notice), got {}",
             out.len()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_read_still_reads_through_symlinks_via_canonicalization() {
+        // O_NOFOLLOW + the dev/ino recheck guard against TOCTOU swaps, but a
+        // legitimate read THROUGH a symlink keeps working: canonicalize
+        // resolves the link before open, so the final component of the opened
+        // path is the real file.
+        let policy = permissive_policy();
+        let dir = std::env::temp_dir().join(format!("vibed-read-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let real = dir.join("real.txt");
+        std::fs::write(&real, "via symlink").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let out = fs_read(&json!({"path": link.to_string_lossy()}), &policy)
+            .expect("reading through a symlink must still work");
+        assert_eq!(out, "via symlink");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1310,8 +2302,14 @@ mod tests {
                       micki:x:1000:1000:,,,:/home/micki:/bin/bash\n\
                       svc:x:1001:1001::/var/home/svc:/usr/sbin/nologin\n";
         assert_eq!(home_dir_for_uid_in(passwd, 0).as_deref(), Some("/root"));
-        assert_eq!(home_dir_for_uid_in(passwd, 1000).as_deref(), Some("/home/micki"));
-        assert_eq!(home_dir_for_uid_in(passwd, 1001).as_deref(), Some("/var/home/svc"));
+        assert_eq!(
+            home_dir_for_uid_in(passwd, 1000).as_deref(),
+            Some("/home/micki")
+        );
+        assert_eq!(
+            home_dir_for_uid_in(passwd, 1001).as_deref(),
+            Some("/var/home/svc")
+        );
         assert_eq!(home_dir_for_uid_in(passwd, 4242), None);
     }
 
@@ -1327,10 +2325,613 @@ mod tests {
     fn registry_tiers_are_stable() {
         assert_eq!(tool_tier("os.status"), Some(Tier::T0));
         assert_eq!(tool_tier("fs.read"), Some(Tier::T0));
+        assert_eq!(tool_tier("fs.list"), Some(Tier::T0));
         assert_eq!(tool_tier("fs.write"), Some(Tier::T1));
         assert_eq!(tool_tier("pkg.install"), Some(Tier::T2));
         assert_eq!(tool_tier("svc.restart"), Some(Tier::T2));
+        assert_eq!(tool_tier("svc.status"), Some(Tier::T0));
+        assert_eq!(tool_tier("sectools.list"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
-        assert_eq!(tool_tier("disk.wipe"), None, "unknown tool has no tier => default-deny");
+        assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
+        assert_eq!(
+            tool_tier("disk.wipe"),
+            None,
+            "unknown tool has no tier => default-deny"
+        );
+    }
+
+    // -- svc.status (T0) -------------------------------------------------------
+
+    #[test]
+    fn unit_name_validation_accepts_real_units_and_appends_service() {
+        assert_eq!(validate_unit_name("sshd").unwrap(), "sshd.service");
+        assert_eq!(validate_unit_name("sshd.service").unwrap(), "sshd.service");
+        assert_eq!(validate_unit_name("dbus.socket").unwrap(), "dbus.socket");
+        assert_eq!(
+            validate_unit_name("getty@tty1.service").unwrap(),
+            "getty@tty1.service"
+        );
+        assert_eq!(
+            validate_unit_name("systemd-journald").unwrap(),
+            "systemd-journald.service"
+        );
+        // systemd-escaped names stay intact.
+        assert_eq!(
+            validate_unit_name("run-media-usb\\x2ddisk.mount").unwrap(),
+            "run-media-usb\\x2ddisk.mount"
+        );
+    }
+
+    #[test]
+    fn unit_name_validation_refuses_injection_shapes() {
+        for bad in [
+            "",
+            "-p",            // an option, not a unit
+            "--property=Id", // ditto
+            "../etc/passwd", // path traversal (contains '/')
+            "/usr/bin/true", // absolute path
+            "a unit",        // whitespace
+            "unit;reboot",   // shell metacharacter
+            "unit$(reboot)", // ditto
+            "unit\nother",   // newline
+        ] {
+            assert!(
+                validate_unit_name(bad).is_err(),
+                "'{bad}' must be refused by unit-name validation"
+            );
+        }
+        let oversized = "a".repeat(256);
+        assert!(validate_unit_name(&oversized).is_err());
+    }
+
+    // -- fs.list (T0) ----------------------------------------------------------
+
+    /// A policy allowing fs.list everywhere except an explicit denied subtree,
+    /// mirroring the shipped fs-read rule shape.
+    fn list_policy() -> PolicyEngine {
+        policy_from_toml(
+            r#"
+            [[rule]]
+            id = "fs-read"
+            tools = ["fs.read", "fs.list"]
+            tier = "T0"
+            action = "allow"
+            "#,
+        )
+    }
+
+    #[test]
+    fn fs_list_lists_names_types_sizes_sorted() {
+        let policy = list_policy();
+        let dir = std::env::temp_dir().join(format!("vibed-list-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
+        std::fs::write(dir.join("b.txt"), "12345").unwrap();
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        std::os::unix::fs::symlink("/etc/os-release", dir.join("link")).expect("symlink");
+        let payload: Value = serde_json::from_str(
+            &fs_list(&json!({"path": dir.to_string_lossy()}), &policy).unwrap(),
+        )
+        .unwrap();
+        let entries = payload["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["a.txt", "b.txt", "link", "sub"], "sorted by name");
+        assert_eq!(entries[0]["type"], "file");
+        assert_eq!(entries[0]["size"], 1);
+        assert_eq!(entries[1]["size"], 5);
+        assert_eq!(entries[2]["type"], "symlink");
+        assert!(
+            entries[2]["size"].is_null(),
+            "a symlink discloses no target size"
+        );
+        assert_eq!(entries[3]["type"], "dir");
+        assert_eq!(payload["truncated"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_list_respects_limit_and_returns_stable_lexicographic_prefix() {
+        let policy = list_policy();
+        let dir = std::env::temp_dir().join(format!("vibed-list-lim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // Create in a shuffled order so a readdir-order bug would surface.
+        for name in ["e", "b", "d", "a", "c"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let payload: Value = serde_json::from_str(
+            &fs_list(&json!({"path": dir.to_string_lossy(), "limit": 3}), &policy).unwrap(),
+        )
+        .unwrap();
+        let entries = payload["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        // The truncated set must be the SMALLEST `limit` names, sorted — a
+        // stable prefix, not an arbitrary readdir-order subset.
+        assert_eq!(
+            names,
+            ["a", "b", "c"],
+            "truncation must keep the lexicographic prefix"
+        );
+        assert_eq!(payload["truncated"], true);
+        let err =
+            fs_list(&json!({"path": dir.to_string_lossy(), "limit": 0}), &policy).unwrap_err();
+        assert!(err.contains("integer >= 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_list_refuses_when_target_is_not_a_directory() {
+        // canonicalize follows a symlink to its real target; that target must
+        // itself be a real directory. A symlink to a regular file is refused.
+        let policy = list_policy();
+        let base = std::env::temp_dir().join(format!("vibed-list-sym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mkdir");
+        let file = base.join("regular.txt");
+        std::fs::write(&file, "x").unwrap();
+        let link = base.join("link-to-file");
+        std::os::unix::fs::symlink(&file, &link).expect("symlink");
+        let err = fs_list(&json!({"path": link.to_string_lossy()}), &policy).unwrap_err();
+        assert!(err.contains("not a directory"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn fs_list_refuses_denylisted_directories() {
+        let policy = list_policy();
+        // The denylist applies to the DIRECTORY itself: /root and a user's
+        // .ssh directory are unlistable, whoever asks.
+        for path in ["/root", "/home/dev/.ssh", "/home/dev/.claude"] {
+            let err = builtin_denied(path, false);
+            assert!(err.is_some(), "{path} must be builtin-denied");
+        }
+        // End-to-end through fs_list for a path that exists on every test box.
+        if std::path::Path::new("/root").exists() {
+            let err = fs_list(&json!({"path": "/root"}), &policy).unwrap_err();
+            assert!(err.contains("denylist"), "unexpected error: {err}");
+        }
+    }
+
+    // -- sectools.list (T0) ----------------------------------------------------
+
+    const SAMPLE_MANIFEST: &str = "# header comment\n\
+        \n\
+        nmap\tnetwork\tT2\tPort scanner\n\
+        john\tpasswords\tT1\tOffline cracker\n\
+        dig\trecon\tT0\tDNS lookups\n\
+        # a comment line\n\
+        ettercap\tnetwork\tT3\tMITM framework\n\
+        malformed-line-without-tabs\n";
+
+    #[test]
+    fn sectools_list_parses_manifest_with_tiers_and_categories() {
+        // Everything present.
+        let payload: Value =
+            serde_json::from_str(&sectools_list_from(SAMPLE_MANIFEST, None, false, |_| true))
+                .unwrap();
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["count"], 4, "the malformed line must be skipped");
+        assert_eq!(payload["installed_count"], 4);
+        // Categories are sorted and unique.
+        let cats: Vec<&str> = payload["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        assert_eq!(cats, ["network", "passwords", "recon"]);
+        // Governance note surfaces the human-approval gate.
+        assert!(payload["governance"]
+            .as_str()
+            .unwrap()
+            .contains("HUMAN APPROVAL"));
+        // Tiers are carried through verbatim.
+        let nmap = payload["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["binary"] == "nmap")
+            .unwrap();
+        assert_eq!(nmap["tier"], "T2");
+        assert_eq!(nmap["category"], "network");
+    }
+
+    #[test]
+    fn sectools_list_filters_by_category_and_installed() {
+        // Category filter.
+        let payload: Value = serde_json::from_str(&sectools_list_from(
+            SAMPLE_MANIFEST,
+            Some("network"),
+            false,
+            |_| true,
+        ))
+        .unwrap();
+        assert_eq!(payload["count"], 2, "only network tools");
+        // installed_only with a presence oracle that only knows `nmap`.
+        let payload: Value =
+            serde_json::from_str(&sectools_list_from(SAMPLE_MANIFEST, None, true, |bin| {
+                bin == "nmap"
+            }))
+            .unwrap();
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["tools"][0]["binary"], "nmap");
+        // installed_count counts across the whole manifest, not the filtered view.
+        assert_eq!(payload["installed_count"], 1);
+    }
+
+    #[test]
+    fn sectools_list_reports_absent_manifest() {
+        // The real tool returns available:false when the file is missing; the
+        // pure body is exercised above, so here we only assert the shape used
+        // by sectools_list() for the absent case is valid JSON.
+        let payload: Value =
+            serde_json::from_str(&sectools_list_from("", None, false, |_| false)).unwrap();
+        assert_eq!(payload["count"], 0);
+        assert_eq!(payload["available"], true);
+    }
+
+    #[test]
+    fn systemctl_show_output_parses_to_snake_case_json() {
+        let stdout = "Id=sshd.service\n\
+                      Description=OpenSSH server daemon\n\
+                      LoadState=loaded\n\
+                      ActiveState=active\n\
+                      SubState=running\n\
+                      UnitFileState=enabled\n\
+                      ActiveEnterTimestamp=Mon 2026-07-13 08:00:00 UTC\n\
+                      IgnoredKey=whatever\n\
+                      not-a-kv-line\n";
+        let map = parse_systemctl_show(stdout);
+        assert_eq!(map["id"], "sshd.service");
+        assert_eq!(map["active_state"], "active");
+        assert_eq!(map["sub_state"], "running");
+        assert_eq!(map["unit_file_state"], "enabled");
+        assert_eq!(map["load_state"], "loaded");
+        assert!(!map.contains_key("IgnoredKey"));
+        assert!(!map.contains_key("ignored_key"));
+    }
+
+    // -- memory.query (scope/limit) and memory.append -------------------------
+
+    /// A scratch memory store mimicking the docs/MEMORY.md §3 layout.
+    fn memory_scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("vibed-mem-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["user", "projects", "journal", "knowledge"] {
+            std::fs::create_dir_all(dir.join(sub)).expect("create memory scratch");
+        }
+        std::fs::write(
+            dir.join("identity.toml"),
+            "schema = 1\nhostname = \"testhost\"\n",
+        )
+        .expect("write identity");
+        std::fs::write(dir.join("user").join("profile.toml"), "lang = \"fr\"\n")
+            .expect("write profile");
+        std::fs::write(
+            dir.join("journal").join("2026-01-01.jsonl"),
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"genesis\",\"source\":\"genesis.sh\",\"data\":{}}\n",
+        )
+        .expect("write journal");
+        dir
+    }
+
+    fn parse_result(result: Result<String, String>) -> Value {
+        serde_json::from_str(&result.expect("tool call succeeds")).expect("valid JSON payload")
+    }
+
+    #[test]
+    fn memory_query_scope_restricts_the_walk() {
+        let root = memory_scratch("qscope");
+        // journal scope: only the journal file is visible.
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "journal"})));
+        assert_eq!(payload["scope"], "journal");
+        assert_eq!(payload["scanned_files"], 1);
+        assert_eq!(payload["matches"][0]["file"], "journal/2026-01-01.jsonl");
+        // identity scope resolves the single file.
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "identity"})));
+        assert_eq!(payload["matches"][0]["file"], "identity.toml");
+        // a scope never leaks files from another scope.
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_rejects_invalid_scope_and_limit() {
+        let root = memory_scratch("qbad");
+        let err = memory_query_at(&root, &json!({"scope": "audit"})).unwrap_err();
+        assert!(err.contains("unknown scope"), "unexpected error: {err}");
+        let err = memory_query_at(&root, &json!({"scope": 3})).unwrap_err();
+        assert!(err.contains("must be a string"), "unexpected error: {err}");
+        let err = memory_query_at(&root, &json!({"limit": 0})).unwrap_err();
+        assert!(err.contains("integer >= 1"), "unexpected error: {err}");
+        let err = memory_query_at(&root, &json!({"limit": -4})).unwrap_err();
+        assert!(err.contains("integer >= 1"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_limit_caps_and_flags_truncation() {
+        let root = memory_scratch("qlimit");
+        let payload = parse_result(memory_query_at(&root, &json!({"limit": 1})));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["truncated"], true);
+        // without a limit, the scratch store fits well under the cap.
+        let payload = parse_result(memory_query_at(&root, &json!({})));
+        assert!(payload["matches"].as_array().unwrap().len() >= 3);
+        assert_eq!(payload["truncated"], false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_reports_uninitialized_store() {
+        let root = std::env::temp_dir().join(format!("vibed-mem-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let payload = parse_result(memory_query_at(&root, &json!({})));
+        assert_eq!(payload["initialized"], false);
+    }
+
+    #[test]
+    fn memory_query_content_scan_is_bounded_per_file() {
+        let root = memory_scratch("qbound");
+        // The needle sits AFTER the 64 KiB scan cap: a bounded scan must not
+        // see it (and must not have loaded the whole file to find out).
+        let mut big = vec![b'a'; MAX_MEMORY_SCAN_BYTES + 1024];
+        big.extend_from_slice(b"needle-beyond-cap");
+        std::fs::write(root.join("knowledge").join("big.md"), &big).expect("write big");
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"query": "needle-beyond-cap"}),
+        ));
+        assert_eq!(
+            payload["matches"].as_array().unwrap().len(),
+            0,
+            "content beyond MAX_MEMORY_SCAN_BYTES must not be scanned"
+        );
+        // Same needle before the cap: found.
+        std::fs::write(
+            root.join("knowledge").join("small.md"),
+            b"needle-before-cap",
+        )
+        .expect("write small");
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"query": "needle-before-cap"}),
+        ));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_walk_never_follows_symlinks() {
+        let root = memory_scratch("qsymlink");
+        // An out-of-store area holding a "secret" the walk must never reach.
+        let outside =
+            std::env::temp_dir().join(format!("vibed-mem-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        std::fs::write(outside.join("secret.txt"), "outside-secret-content").expect("write secret");
+        // A symlinked DIRECTORY and a symlinked FILE planted inside the store.
+        std::os::unix::fs::symlink(&outside, root.join("knowledge").join("linkdir"))
+            .expect("dir symlink");
+        std::os::unix::fs::symlink(
+            outside.join("secret.txt"),
+            root.join("knowledge").join("linkfile.txt"),
+        )
+        .expect("file symlink");
+        // Neither shows up in a listing...
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
+        assert_eq!(
+            payload["matches"].as_array().unwrap().len(),
+            0,
+            "symlinks inside the store must be invisible to the walk"
+        );
+        // ...nor can their content be matched.
+        let payload = parse_result(memory_query_at(&root, &json!({"query": "outside-secret"})));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    // 2026-07-08T01:01:01Z (see the utc_helpers test for the constant's proof).
+    const T_2026_07_08: u64 = 1_783_468_800 + 3_661;
+
+    #[test]
+    fn memory_append_journal_writes_one_dated_line() {
+        let root = memory_scratch("ajournal");
+        let args = json!({
+            "scope": "journal",
+            "entry": {
+                "type": "observation",
+                "source": "claude-code",
+                "data": { "note": "le projet vibeos-ui utilise pnpm, pas npm" }
+            }
+        });
+        let payload = parse_result(memory_append_at(&root, &args, T_2026_07_08));
+        assert_eq!(payload["appended"], true);
+        assert_eq!(payload["file"], "journal/2026-07-08.jsonl");
+        let written = std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl"))
+            .expect("journal file written");
+        let event: Value = serde_json::from_str(written.trim()).expect("one valid JSON line");
+        assert_eq!(event["ts"], "2026-07-08T01:01:01Z");
+        assert_eq!(event["type"], "observation");
+        assert_eq!(event["source"], "claude-code");
+        assert_eq!(
+            event["data"]["note"],
+            "le projet vibeos-ui utilise pnpm, pas npm"
+        );
+        // A second append lands on a NEW line of the same file (append-only).
+        let _ = memory_append_at(&root, &args, T_2026_07_08 + 60).expect("second append");
+        let written =
+            std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl")).unwrap();
+        assert_eq!(written.lines().count(), 2, "appends must never overwrite");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_rejects_reserved_and_unknown_journal_types() {
+        let root = memory_scratch("atypes");
+        for reserved in JOURNAL_RESERVED_TYPES {
+            let err = memory_append_at(
+                &root,
+                &json!({"scope": "journal",
+                        "entry": {"type": reserved, "source": "claude-code", "data": {}}}),
+                T_2026_07_08,
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("reserved"),
+                "type '{reserved}': unexpected error: {err}"
+            );
+        }
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "opinion", "source": "claude-code", "data": {}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("unknown journal type"),
+            "unexpected error: {err}"
+        );
+        assert!(!root.join("journal").join("2026-07-08.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_validates_source_data_and_size() {
+        let root = memory_scratch("aguard");
+        // bad source charset
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "a b/c", "data": {}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("'source'"), "unexpected error: {err}");
+        // data must be an object
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "x", "data": "free text"}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("'data'"), "unexpected error: {err}");
+        // line cap (anti-DoS)
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "x",
+                              "data": {"blob": "A".repeat(MAX_APPEND_BYTES)}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("line cap"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_knowledge_stamps_id_and_ts() {
+        let root = memory_scratch("afact");
+        let payload = parse_result(memory_append_at(
+            &root,
+            &json!({"scope": "knowledge",
+                    "entry": {"subject": "vibeos-ui", "fact": "utilise pnpm",
+                              "source": "claude-code", "confidence": 0.9}}),
+            T_2026_07_08,
+        ));
+        assert_eq!(payload["file"], "knowledge/facts.jsonl");
+        let written = std::fs::read_to_string(root.join("knowledge").join("facts.jsonl")).unwrap();
+        let fact: Value = serde_json::from_str(written.trim()).unwrap();
+        assert_eq!(fact["subject"], "vibeos-ui");
+        assert_eq!(fact["fact"], "utilise pnpm");
+        assert_eq!(fact["confidence"], 0.9);
+        assert_eq!(fact["ts"], "2026-07-08T01:01:01Z");
+        assert!(fact["id"]
+            .as_str()
+            .unwrap()
+            .starts_with(&T_2026_07_08.to_string()));
+        // out-of-range confidence is refused
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "knowledge",
+                    "entry": {"subject": "s", "fact": "f", "source": "x", "confidence": 2.0}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("between 0 and 1"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_refuses_unimplemented_and_unknown_scopes() {
+        let root = memory_scratch("ascope");
+        for scope in ["user", "projects"] {
+            let err = memory_append_at(
+                &root,
+                &json!({"scope": scope, "entry": {"source": "x"}}),
+                T_2026_07_08,
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("not implemented"),
+                "scope '{scope}': unexpected error: {err}"
+            );
+        }
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "identity", "entry": {"source": "x"}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown scope"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_fails_closed_on_uninitialized_store() {
+        let root = std::env::temp_dir().join(format!("vibed-mem-noinit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "x", "data": {}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("memory store absent"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !root.exists(),
+            "the store root must never be created by memory.append"
+        );
+    }
+
+    #[test]
+    fn utc_helpers_match_known_dates() {
+        assert_eq!(utc_iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_date_string(0), "1970-01-01");
+        // 2024-02-29 (leap day): 1_704_067_200 (2024-01-01) + 59 days.
+        assert_eq!(utc_date_string(1_704_067_200 + 59 * 86_400), "2024-02-29");
+        // 2026-07-08: 1_767_225_600 (2026-01-01) + 188 days = 1_783_468_800.
+        assert_eq!(utc_date_string(1_783_468_800), "2026-07-08");
+        assert_eq!(utc_iso8601(1_783_468_800 + 3_661), "2026-07-08T01:01:01Z");
+        // end-of-year boundary
+        assert_eq!(utc_date_string(1_767_225_600 - 1), "2025-12-31");
+        assert_eq!(utc_iso8601(1_767_225_600 - 1), "2025-12-31T23:59:59Z");
     }
 }

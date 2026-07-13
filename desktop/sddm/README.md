@@ -2,7 +2,7 @@
 
 Ce dossier contient le **thème SDDM « VibeOS »** : l'écran de connexion (greeter) qui s'affiche entre le boot (Plymouth) et la session Plasma 6. Il matérialise, *avant même d'être connecté*, l'identité VibeOS — carte de verre sombre, aurore mauve→blue, anneau signature, horloge mono.
 
-> **Statut : 🛣️ Phase 5 (branding).** En v0.1, le greeter réellement embarqué est **Breeze** (voir [docs/DESKTOP.md](../../docs/DESKTOP.md) §4.1). Ce thème est **conçu et écrit en entier maintenant** ; il ne devient l'écran de connexion par défaut qu'une fois **activé en Phase 5** (voir plus bas). Rien ici ne modifie la session v0.1.
+> **Statut : copié dans l'image, non actif par défaut — activation 🛣️ Phase 5 (branding).** Le thème est **copié au build** sous `/usr/share/sddm/themes/vibeos/` (sélectionnable dans Réglages système ▸ Écran de connexion) ; le greeter **par défaut** reste **Breeze** (voir [docs/DESKTOP.md](../../docs/DESKTOP.md) §4). Il ne devient l'écran de connexion par défaut qu'une fois **activé en Phase 5** (voir plus bas). Rien ici ne modifie le greeter par défaut.
 
 Référence de design : [docs/DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md) **§11.2 (Login)**. Palette : [desktop/theme/palette.md](../theme/palette.md).
 
@@ -68,7 +68,7 @@ sddm-greeter-qt6 --test-mode --theme .
 
 ## Honnêteté (invariant projet)
 
-- **Ce n'est pas dans l'image v0.1.** Le greeter v0.1 reste Breeze ; ce dossier est la **cible** Phase 5, écrite en avance et cohérente avec le langage de design.
+- **Copié dans l'image, non actif par défaut.** Le thème est livré sous `/usr/share/sddm/themes/vibeos/` (sélectionnable), mais le greeter par défaut reste Breeze tant que la Phase 5 ne pose pas le drop-in SDDM d'activation (ci-dessus).
 - **Police `Inter` = aspirationnelle.** `Main.qml` demande `font-sans` = Inter ; tant qu'Inter n'est pas packagé dans l'image, fontconfig substitue **Noto Sans** (§3.1). La pile ne « casse » jamais.
 - **Pas de vrai flou.** Un greeter ne doit **jamais** échouer à se charger : seuls les modules Qt6 toujours présents sont importés (`QtQuick`, `QtQuick.Controls.Basic`, `QtQuick.Layouts`). Le « verre » est donc honnêtement **approché** — remplissage translucide sur notre propre aurore (pas des fenêtres vives) + arête spéculaire ; l'élévation est simulée par des sous-couches translucides. Un vrai flou d'arrière-plan exigerait `QtQuick.Effects` / le compositeur, dépendances écartées ici par robustesse.
 - **Tokens en dur = choix documenté.** SDDM n'a pas de singleton de thème à importer : chaque hex de `Main.qml` renvoie à un token de [DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md §12), synchronisé à la main.

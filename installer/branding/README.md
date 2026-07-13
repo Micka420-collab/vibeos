@@ -19,11 +19,11 @@ posé au build) ou **`/etc`** (défauts) — jamais écrit à l'exécution.
 
 | # | Asset | Format / spec | Résolutions | Emplacement cible dans l'image | Phase | Statut |
 |---|---|---|---|---|---|---|
-| 1 | **Logo VibeOS** (monogramme « V », source vectorielle) | SVG 1.1 autonome, aucune référence externe — source : [`vibeos-logo.svg`](vibeos-logo.svg) | vectoriel (viewBox 256×256) | `/usr/share/pixmaps/vibeos/vibeos-logo.svg` | 1 | ✅ **livré** (ce dossier) |
+| 1 | **Logo VibeOS** (monogramme « V », source vectorielle) | SVG 1.1 autonome, aucune référence externe — source : [`vibeos-logo.svg`](vibeos-logo.svg) | vectoriel (viewBox 256×256) | `/usr/share/pixmaps/vibeos/vibeos-logo.svg` | 1 | ✅ livré **dans le dépôt** — 🔲 **non copié dans l'image** (aucun `COPY` vers `/usr/share/pixmaps` dans `os/Containerfile` à ce jour) |
 | 1b | Rendus PNG du logo (icônes hicolor) | PNG-32 (alpha), rendus depuis le SVG (`rsvg-convert`/Inkscape) | 16, 22, 32, 48, 64, 128, 256, 512 px | `/usr/share/icons/hicolor/<taille>x<taille>/apps/vibeos.png` | 1 | 🔲 à créer |
-| 2 | **Wallpaper « VibeOS Dark »** (défaut Plasma) | Paquet wallpaper KDE : `contents/images/<WxH>.png` + `metadata.json` ; motif géométrique sombre sur base `#1e1e2e`, accent mauve — œuvre **originale** (redistribuable) | 3840×2160 (min), 2560×1440, 1920×1080 ; variantes verticales optionnelles | `/usr/share/wallpapers/VibeOSDark/` (+ réglage par défaut via le global theme du chantier bureau) | 1 | 🔲 à créer |
-| 3 | **Thème Plymouth** (splash de boot) | Thème two-step ou script : `vibeos.plymouth` + assets PNG (logo animé, spinner, watermark) ; **création originale** — le thème adi1090x est rejeté (provenance d'assets floue, [ECOSYSTEM.md](../../docs/ECOSYSTEM.md)) ; activation : `plymouth-set-default-theme vibeos` au build de l'image (référence pour le chantier `os/`) | logo ≈ 256×256 px, watermark ≈ 200 px, fond couleur unie `#1e1e2e` (indépendant de la résolution) | `/usr/share/plymouth/themes/vibeos/` | 5 | 🔲 à créer |
-| 4 | **Thème SDDM** (écran de connexion) | v0.1 : Breeze + fond VibeOS via `/etc/sddm.conf.d/` (config seulement) ; Phase 5 : thème QML complet (base **SDDM Astronaut**, GPL-3.0 — licence à re-vérifier avant fork) : `Main.qml`, `theme.conf`, assets | fond 3840×2160 (réutiliser l'asset n°2), avatar par défaut 256×256 | `/usr/share/sddm/themes/vibeos/` + défauts `/etc/sddm.conf.d/10-vibeos.conf` | 1 (fond) / 5 (thème) | 🔲 à créer |
+| 2 | **Wallpaper « VibeOS Dark »** (défaut Plasma) | Paquet wallpaper KDE : `contents/images/<WxH>.png` + `metadata.json` ; motif géométrique sombre sur base `#1e1e2e`, accent mauve — œuvre **originale** (redistribuable) | 3840×2160 (min), 2560×1440, 1920×1080 ; variantes verticales optionnelles | `/usr/share/wallpapers/VibeOSDark/` (+ réglage par défaut via le global theme du chantier bureau) | 1 | ✅ **créé et copié dans l'image** — trois paquets sous [`desktop/wallpapers/`](../../desktop/wallpapers/README.md) (« VibeOS » = défaut via le Global Theme, « Genesis », « Void ») |
+| 3 | **Thème Plymouth** (splash de boot) | Thème two-step ou script : `vibeos.plymouth` + assets PNG (logo animé, spinner, watermark) ; **création originale** — le thème adi1090x est rejeté (provenance d'assets floue, [ECOSYSTEM.md](../../docs/ECOSYSTEM.md)) ; activation : `plymouth-set-default-theme vibeos` au build de l'image (référence pour le chantier `os/`) | logo ≈ 256×256 px, watermark ≈ 200 px, fond couleur unie `#1e1e2e` (indépendant de la résolution) | `/usr/share/plymouth/themes/vibeos/` | 5 | ✅ **créé et copié dans l'image** ([`desktop/plymouth/vibeos/`](../../desktop/plymouth/README.md)) — **non actif par défaut** (activation Phase 5) ; les 3 PNG restent à générer (dégradation gracieuse) |
+| 4 | **Thème SDDM** (écran de connexion) | Thème QML **original** VibeOS (`Main.qml`, `theme.conf`, `metadata.desktop` — aucun fork Astronaut, voir [`desktop/sddm/`](../../desktop/sddm/README.md)) | aurore peinte procéduralement (Canvas, aucun fond bitmap requis) ; `preview.png` à générer | `/usr/share/sddm/themes/vibeos/` + drop-in d'activation `sddm.conf.d` (Phase 5) | 5 (activation) | ✅ **créé et copié dans l'image** — **non actif par défaut** (greeter Breeze ; activation Phase 5) |
 | 5 | **Branding Anaconda** (installateur) | Remplacement des pixmaps de l'environnement d'installation (logo latéral, en-tête) — vecteur d'injection : paquet logos custom ou `product.img` ajouté à l'ISO (méthode Bazzite/uBlue) ; l'inventaire exact des fichiers est à confirmer contre la version d'Anaconda embarquée par bootc-image-builder au moment de l'intégration | `sidebar-logo.png` ≈ 180×60 (rendu depuis le SVG n°1), en-tête/topbar aux dimensions du thème Anaconda courant | `/usr/share/anaconda/pixmaps/` (dans l'environnement d'installation de l'ISO, pas dans l'image système) | 1 (logo minimal, si trivial) / 5 (thème complet) | 🔲 à créer |
 
 ---
@@ -41,10 +41,12 @@ posé au build) ou **`/etc`** (défauts) — jamais écrit à l'exécution.
    « V » identique du splash Plymouth au HUD Quickshell.
 4. **Sobriété au boot** : Plymouth = fond uni + logo + spinner. Pas
    d'animation lourde : le boot doit rester rapide et lisible.
-5. **Honnêteté (D20)** : le statut ci-dessus fait foi. Seule la source SVG du
-   logo est livrée aujourd'hui ; tout le reste est **à créer** — ne jamais
-   présenter un thème Plymouth/SDDM/Anaconda comme existant tant que la case
-   n'est pas passée à ✅.
+5. **Honnêteté (D20)** : le statut ci-dessus fait foi. La source SVG du logo
+   est livrée dans le dépôt mais **pas copiée dans l'image** ; les thèmes
+   Plymouth et SDDM et les wallpapers vivent sous `desktop/` et **sont copiés
+   dans l'image** (non actifs par défaut, sauf le wallpaper via le Global
+   Theme) ; le reste (PNG hicolor, branding Anaconda) est **à créer** — ne
+   jamais présenter un asset comme livré tant que la case n'est pas à ✅.
 
 ## Pipeline de rendu (référence)
 

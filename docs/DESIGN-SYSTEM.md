@@ -391,7 +391,7 @@ Chaque surface applique les tokens ci-dessus. La **règle d'or** clôt chaque bl
 - **Pager d'activités** : Vibe (halo mauve) · Focus (Void, notifications off) · Review (teinte verte discrète) — cohérent avec les wallpapers (§7).
 - **Règle d'or** : le verre du panneau et du dock partage la recette `glass-chrome` ; l'accent d'activité = Mauve, jamais une autre teinte.
 
-### 11.4 HUD agents — Quickshell · 🛣️ Phase 2 (données mockées, labellisées)
+### 11.4 HUD agents — Quickshell · ✅ livré et auto-démarré (données mockées, labellisées — branchement live : Phase 2)
 
 - **Barre HUD** : `glass-panel` (Crust 66 %, `blur-heavy`), ancrée en haut (DESKTOP §2.4), couche additionnelle au panneau Plasma.
 - **État global** : point/anneau — gris `Overlay1` (vibed hors ligne) → Mauve `glow-agent-active` (agents actifs) → Peach pulsé (approbation T2 attendue). Voir §10.

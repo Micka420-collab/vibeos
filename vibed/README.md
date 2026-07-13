@@ -59,10 +59,14 @@ sequenceDiagram
 |---|---|---|---|
 | `os.status` | T0 | Allow | Uptime, charge, mémoire, points de montage (via `/proc`) |
 | `fs.read` | T0 | Allow (hors chemins refusés) | Lecture de fichier (UTF-8 lossy, tronqué à 256 KiB) ; denylist codée en dur + `paths.denied` de la politique ; re-vérification sur le chemin canonicalisé (symlinks) |
-| `fs.write` | T1 | Allow (périmètre restreint) | Écriture restreinte à `/home/**` et `/var/home/**` **uniquement** (sur Fedora, `/home` est un lien vers `/var/home`) ; la mémoire VibeOS n'est **pas** inscriptible par `fs.write` (cible Phase 2 : `memory.append`) |
+| `fs.list` | T0 | Allow (hors chemins refusés) | Listing **non récursif** d'un répertoire (nom, type, taille des fichiers réguliers ; plafond 500 entrées + `limit`) ; même denylist que `fs.read` ; les symlinks sont signalés mais **jamais suivis** |
+| `fs.write` | T1 | Allow (périmètre restreint) | Écriture restreinte à `/home/**` et `/var/home/**` **uniquement** (sur Fedora, `/home` est un lien vers `/var/home`) ; la mémoire VibeOS n'est **pas** inscriptible par `fs.write` — son chemin d'écriture gouverné est `memory.append` |
 | `pkg.install` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucun paquet installé |
 | `svc.restart` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucune unité redémarrée |
-| `memory.query` | T0 | Allow | Recherche par sous-chaîne dans `/var/lib/vibeos/memory` (argument unique `query` ; `scope`/`limit` et `memory.append` sont des cibles Phase 2/3, voir `docs/MEMORY.md`) |
+| `svc.status` | T0 | Allow | État d'une unité systemd en lecture seule (`systemctl show` : load/active/sub state, unit file state) ; validation stricte du nom d'unité en code (pas d'injection d'option ni de chemin), environnement vidé, chemin absolu |
+| `sectools.list` | T0 | Allow | Découverte **en lecture seule** de la trousse cybersécurité (`/usr/share/vibeos/security-tools.tsv`) : nom, catégorie, tier gouvernant l'invocation agent, présence — **n'exécute aucun outil** (lancer un outil T2/T3 = chemin séparé, approbation humaine ; voir [../docs/SECURITY-TOOLKIT.md](../docs/SECURITY-TOOLKIT.md)) |
+| `memory.query` | T0 | Allow | Recherche par sous-chaîne dans `/var/lib/vibeos/memory` ; arguments `query`, `scope` (identity/hardware/user/projects/journal/knowledge) et `limit` (plafond de résultats, drapeau `truncated`) — voir `docs/MEMORY.md` §9 |
+| `memory.append` | T1 | Allow | Écriture mémoire **strictement additive** : une ligne JSONL par appel, scopes `journal` (type/source/data, types réservés au système refusés) et `knowledge` (subject/fact/source[/confidence]) ; `ts` et `id` posés par vibed, ligne plafonnée à 16 KiB, `O_APPEND`+`O_NOFOLLOW`, aucun argument de chemin ; scopes `user`/`projects` = reste Phase 2/3 |
 
 **Default-deny absolu** : un outil absent du registre est refusé, et un outil sans règle qui matche est refusé aussi. Il n'existe aucun « défaut par tier » permissif.
 
@@ -120,14 +124,25 @@ Les chemins sont normalisés lexicalement avant toute décision (`//`, `.`, `..`
 
 ### Denylist codée en dur
 
-Indépendamment de la politique chargée (une politique erronée ou altérée ne peut **pas** rouvrir ces chemins), le code refuse — lectures **et** écritures :
+Indépendamment de la politique chargée (une politique erronée ou altérée ne peut **pas** rouvrir ces chemins), le code refuse — lectures **et** écritures (source de vérité : `BUILTIN_DENY_ALWAYS` dans `src/mcp.rs`, ~30 motifs) :
 
 ```
-/var/lib/vibeos/audit/**   /etc/shadow*   **/.ssh/**   **/.gnupg/**
-/proc/*/environ   /run/credentials/**   /boot/**
+/var/lib/vibeos/audit/**    /etc/shadow*    /etc/gshadow*    **/.ssh/**
+**/.gnupg/**    /etc/ssh/*    **/.aws/**
+**/.config/gcloud/**    /etc/NetworkManager/system-connections/**
+**/.docker/config.json    **/.kube/config    **/.netrc    /root/**
+/proc/**/environ    /proc/**/cmdline    /run/credentials/**    /boot/**
 ```
 
-et, pour les **écritures seulement** : `/etc/vibeos/policy.d/**` et `/var/lib/vibeos/memory/**` (la mémoire se lit via `memory.query` ; son chemin d'écriture, `memory.append`, est une cible Phase 2).
+plus les credentials des agents IA et de l'outillage dev livrés dans l'image (vibed tourne en root et `fs.read` n'est pas confiné au home de l'appelant) :
+
+```
+**/.claude/**    **/.claude.json    **/.config/gh/**    **/.gemini/**
+**/.codex/**    **/.local/share/opencode/**    **/.ollama/**
+**/.npmrc    **/.git-credentials    **/.config/sops/**
+```
+
+et, pour les **écritures seulement** : `/etc/vibeos/policy.d/**` et `/var/lib/vibeos/memory/**` (la mémoire se lit via `memory.query` ; son chemin d'écriture gouverné est `memory.append`, qui ne prend aucun argument de chemin — cette denylist ne s'applique qu'à `fs.write`).
 
 Le rechargement de la politique se fait par redémarrage du démon (`systemctl restart vibed`) — la politique est immuable après chargement. La politique par défaut livrée est `security/policy.d/default.toml` (installée dans l'image sous `/etc/vibeos/policy.d/`).
 
@@ -136,10 +151,10 @@ Le rechargement de la politique se fait par redémarrage du démon (`systemctl r
 Chaque appel produit au moins une ligne JSON dans `/var/lib/vibeos/audit/vibed.jsonl` :
 
 ```json
-{"ts_unix_ms":1751500000000,"tool":"fs.write","args_fnv1a64":"a1b2c3d4e5f60718","decision":"allow","outcome":"ok","caller_uid":1000,"caller_gid":1002,"caller_pid":4242}
+{"ts_unix_ms":1751500000000,"tool":"fs.write","target":"/var/home/dev/notes.md","args_fnv1a64":"a1b2c3d4e5f60718","decision":"allow","outcome":"ok","caller_uid":1000,"caller_gid":1002,"caller_pid":4242}
 ```
 
-- Les arguments ne sont **jamais** journalisés en clair : digest FNV-1a 64 **non cryptographique** (corrélation, pas intégrité).
+- Les arguments ne sont **jamais** journalisés en clair : digest FNV-1a 64 **non cryptographique** (corrélation, pas intégrité). Le champ `target` porte le sujet **non secret** de l'action (chemin, unité, paquet) pour la forensique — jamais de contenu de fichier.
 - L'identité de l'appelant (uid/gid/pid) provient des **peer credentials** du socket unix (`SO_PEERCRED`), capturées à l'accept et estampillées sur chaque enregistrement de la connexion.
 - v0.1 = JSONL append-only simple. Le chaînage par hachage, la réplication journald et le scellement TPM sont des cibles **Phase 4** (voir `docs/SECURITY-ARCHITECTURE.md` §8) — ils ne sont pas livrés aujourd'hui.
 
@@ -152,7 +167,8 @@ wsl -d Ubuntu
 cd "/mnt/f/je ne sais pas encore/vibed"   # attention aux espaces : garder les guillemets
 
 cargo build --locked      # Cargo.lock est commité (épinglage supply-chain, voir SECURITY.md)
-cargo test                 # 31 tests unitaires + 2 tests d'intégration
+cargo test                 # 71 tests unitaires + 6 tests d'intégration
+                           # (2 politique réelle + 4 MCP bout-en-bout sur socketpair)
 ```
 
 Notes :

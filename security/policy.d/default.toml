@@ -18,10 +18,14 @@
 # BUILT-IN HARD DENYLIST: independently of this file, the engine denies in
 # code, for reads AND writes: /var/lib/vibeos/audit/**, /etc/shadow*,
 # /etc/gshadow*, **/.ssh/**, **/.gnupg/**, /etc/ssh/* (+ /etc/ssh/ssh_host_*),
-# **/.aws/credentials, **/.aws/config, **/.config/gcloud/**,
+# **/.aws/**, **/.config/gcloud/**,
 # /etc/NetworkManager/system-connections/**, **/.docker/config.json,
 # **/.kube/config, **/.netrc, /root/**, /proc/*/environ, /proc/**/environ,
-# /proc/**/cmdline, /run/credentials/**, /boot/** ; and for WRITES only:
+# /proc/**/cmdline, /run/credentials/**, /boot/**, plus the credentials of
+# the AI agents / dev tooling shipped in the image: **/.claude/**,
+# **/.claude.json, **/.config/gh/**, **/.gemini/**, **/.codex/**,
+# **/.local/share/opencode/**, **/.ollama/**, **/.npmrc, **/.git-credentials,
+# **/.config/sops/** ; and for WRITES only:
 # /etc/vibeos/policy.d/** and /var/lib/vibeos/memory/**.
 # fs.write is ADDITIONALLY confined to the calling user's own home directory
 # (resolved from /etc/passwd via SO_PEERCRED) and is symlink-safe (the parent
@@ -59,10 +63,10 @@ reason = "Read-only system introspection; no state change of any kind."
 
 [[rule]]
 id = "fs-read"
-tools = ["fs.read"]
+tools = ["fs.read", "fs.list"]
 tier = "T0"
 action = "allow"
-reason = "Read-only file access outside the audit trail, secret stores and key material."
+reason = "Read-only file access and directory listing outside the audit trail, secret stores and key material (same denylist for both tools)."
 
 # Mirrors the built-in hard denylist (enforced in code even without this list).
 [rule.paths]
@@ -74,8 +78,7 @@ denied = [
   "**/.gnupg/**",              # GnuPG key material, wherever it lives
   "/etc/ssh/*",                # sshd config AND host keys
   "/etc/ssh/ssh_host_*",       # host private keys (explicit)
-  "**/.aws/credentials",       # AWS access keys
-  "**/.aws/config",            # AWS profiles / SSO config
+  "**/.aws/**",                # AWS credentials, config, SSO cache — whole dir
   "**/.config/gcloud/**",      # Google Cloud credentials store
   "/etc/NetworkManager/system-connections/**", # Wi-Fi/VPN PSKs and certs
   "**/.docker/config.json",    # container registry auth tokens
@@ -87,7 +90,34 @@ denied = [
   "/proc/**/cmdline",          # command lines may carry secrets/tokens
   "/run/credentials/**",       # decrypted systemd-creds exposed to services
   "/boot/**",                  # boot chain is none of the agent's business
+  # Credentials of the AI agents / dev tooling shipped in the image — vibed
+  # runs as root and fs.read is not confined to the caller's home, so these
+  # must be unreadable across ALL homes.
+  "**/.claude/**",             # Claude Code state: OAuth token, transcripts
+  "**/.claude.json",           # Claude Code top-level config may carry keys
+  "**/.config/gh/**",          # GitHub CLI hosts.yml (oauth_token)
+  "**/.gemini/**",             # gemini-cli oauth_creds.json
+  "**/.codex/**",              # codex auth.json
+  "**/.local/share/opencode/**", # opencode auth.json + agent-internal state
+  "**/.ollama/**",             # ollama keypair (id_ed25519)
+  "**/.npmrc",                 # npm registry authTokens
+  "**/.git-credentials",       # plaintext git credentials store
+  "**/.config/sops/**",        # SOPS/age private keys (keys.txt)
 ]
+
+[[rule]]
+id = "svc-status"
+tools = ["svc.status"]
+tier = "T0"
+action = "allow"
+reason = "Read-only systemd unit state (systemctl show); no state change, strict unit-name validation in code."
+
+[[rule]]
+id = "sectools-list"
+tools = ["sectools.list"]
+tier = "T0"
+action = "allow"
+reason = "Read-only discovery of the security toolkit manifest; executes no tool. Running a security tool is a separate, policy-gated path (T2/T3 = human approval)."
 
 # --- T1: user-scope mutation ------------------------------------------------
 
@@ -106,8 +136,8 @@ allowed = [
 # Defense in depth: these paths can never match `allowed` above, and the
 # built-in denylist blocks them in code anyway. Kept explicit so the
 # invariant stays visible where policies are edited. The memory volume is
-# not writable via fs.write; memory writes will go through memory.append
-# (Phase 2 target).
+# not writable via fs.write; memory writes go through memory.append
+# (rule below), which takes no path argument.
 denied = [
   "/var/lib/vibeos/memory/**",
   "/var/lib/vibeos/audit/**",
@@ -120,6 +150,13 @@ tools = ["memory.query"]
 tier = "T0"
 action = "allow"
 reason = "Read-only query against the VibeOS memory store."
+
+[[rule]]
+id = "memory-append"
+tools = ["memory.append"]
+tier = "T1"
+action = "allow"
+reason = "Strictly additive, scope-based write into the memory store (journal/knowledge JSONL). No path argument, no delete, no rewrite; identity/hardware stay Genesis-only and vibed stamps the timestamps."
 
 # --- T2: system-scope mutation (human approval is a hard floor) -------------
 

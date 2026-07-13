@@ -90,9 +90,9 @@ Limite honnête de la v0.1 : l'initrd généré localement et la cmdline ne sont
 
 ## 3. Plan système
 
-- **systemd** : orchestrateur unique. Tous les composants VibeOS sont des unités systemd (`vibed.service`, `vibeos-genesis.service`) avec durcissement systématique (`ProtectSystem=strict`, `PrivateTmp=`, `NoNewPrivileges=`, `SystemCallFilter=` seccomp, `RestrictAddressFamilies=`). Le confinement landlock par outil est une cible Phase 3.
+- **systemd** : orchestrateur unique. Tous les composants VibeOS sont des unités systemd. `vibed.service` porte le durcissement complet (`ProtectSystem=strict`, `PrivateTmp=`, `NoNewPrivileges=`, `SystemCallFilter=` seccomp, `RestrictAddressFamilies=`) ; `vibeos-genesis.service` (oneshot du premier boot) n'a volontairement pas ce durcissement. Le confinement landlock par outil est une cible Phase 3.
 - **SELinux enforcing** : politique ciblée héritée de Fedora. Le module dédié `vibed_t` confinant le démon et ses sous-processus d'exécution d'outils est une cible **Phase 4**. Aucun mode permissif, y compris en développement.
-- **Wayland / KDE Plasma 6** : session graphique par défaut (héritage Kinoite). X11 non installé. Les dialogues d'approbation humaine (voir §4) s'afficheront (Phase 2) via une intégration Plasma (portail/notification) parlant à `vibed` par le socket MCP côté privilégié.
+- **Wayland / KDE Plasma 6** : session graphique par défaut (héritage Kinoite). X11 non installé. Les dialogues d'approbation humaine (voir §4) s'afficheront (Phase 4, jalon ROADMAP du flux d'approbation) via une intégration Plasma (portail/notification) parlant à `vibed` par le socket MCP côté privilégié.
 - **Espace utilisateur applicatif** : Flatpak pour les applications graphiques, `toolbox`/conteneurs pour le développement — la racine reste intacte.
 
 ---
@@ -184,7 +184,7 @@ sequenceDiagram
     end
 ```
 
-> En v0.1, le canal d'approbation humaine interactif (dialogue Plasma) n'est pas encore livré : les outils T2/T3 aboutissent à `RequireApproval` et sont refusés faute d'approbateur — comportement volontairement fail-closed jusqu'à la Phase 2.
+> Le canal d'approbation humaine interactif (dialogue Plasma) n'est pas encore livré : les outils T2/T3 aboutissent à `RequireApproval` et sont refusés faute d'approbateur — comportement volontairement fail-closed jusqu'à la Phase 4 (jalon ROADMAP du flux d'approbation).
 
 ---
 
@@ -234,7 +234,7 @@ Aux démarrages suivants (mode persistant), le marqueur `.initialized` existe : 
 
 ## 6. Plan mises à jour
 
-- **Format** : l'OS est une image OCI bootc **multi-architecture** (manifeste `linux/amd64` + `linux/arm64`, voir ADR-009 et [HARDWARE.md](HARDWARE.md)) construite par GitHub Actions et poussée sur `ghcr.io/micka420-collab/vibeos` (`micka420-collab` = placeholder jusqu'à la création du dépôt GitHub). ISO d'installation générée par architecture avec **bootc-image-builder**. Builds locaux : WSL2 Ubuntu + podman (voir [BUILD.md](BUILD.md)).
+- **Format** : l'OS est une image OCI bootc **multi-architecture** (manifeste `linux/amd64` + `linux/arm64`, voir ADR-009 et [HARDWARE.md](HARDWARE.md)) construite par GitHub Actions et poussée sur `ghcr.io/micka420-collab/vibeos` (dépôt GitHub `Micka420-collab/vibeos`, nom normalisé en minuscules pour ghcr). ISO d'installation générée par architecture avec **bootc-image-builder**. Builds locaux : WSL2 Ubuntu + podman (voir [BUILD.md](BUILD.md)).
 - **Signature** : chaque image poussée est signée en CI avec **cosign** (sigstore, keyless — livré v0.1). La **vérification côté client** (bootc/OSTree refuse toute image non signée ; identité du workflow CI épinglée dans la politique embarquée) est une cible **Phase 4** : tant qu'elle n'est pas active, la signature existe mais n'est pas encore imposée localement.
 - **Application atomique** : la mise à jour est un nouveau déploiement OSTree préparé à froid ; bascule au reboot. Il n'existe **aucun état intermédiaire** : soit l'ancienne image, soit la nouvelle.
 - **Rollback** : le déploiement précédent est conservé ; `bootc rollback` (ou le menu de boot) restaure l'état antérieur en un redémarrage. Échec de boot répété → retour automatique possible via boot-counting systemd.

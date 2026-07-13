@@ -1,14 +1,14 @@
 # BUILD.md — Construire, tester et publier VibeOS
 
 Guide de référence pour produire l'image bootc **multi-architecture**
-(`linux/amd64` + `linux/arm64`) `ghcr.io/micka420-collab/vibeos` (`micka420-collab` = placeholder
-tant que le dépôt GitHub n'existe pas), générer les ISO d'installation et les
+(`linux/amd64` + `linux/arm64`) `ghcr.io/micka420-collab/vibeos` (dépôt GitHub
+`Micka420-collab/vibeos`, nom normalisé en minuscules pour ghcr), générer les ISO d'installation et les
 tester en VM depuis un poste **Windows 11**.
 
 ```mermaid
 flowchart LR
-    dev["git push (main)<br/>os/**, memory/**, security/**"] --> gha["GitHub Actions<br/>buildah multi-arch + push"]
-    tag["git tag v*"] --> gha
+    dev["git push (main)<br/>os/**, memory/**, security/**"] --> check["GitHub Actions<br/>build de vérification amd64<br/>(non publié, non signé)"]
+    tag["git tag v*"] --> gha["GitHub Actions<br/>build natif par arch + push"]
     local["Build local<br/>WSL2 Ubuntu + podman<br/>(arm64 via qemu)"] --> ghcr
     gha --> sign["cosign sign<br/>(keyless OIDC)"]
     sign --> ghcr[("ghcr.io/micka420-collab/vibeos<br/>manifest amd64 + arm64")]
@@ -30,15 +30,18 @@ racine.
 Le pipeline officiel est [`.github/workflows/build-os.yml`](../.github/workflows/build-os.yml) :
 
 - **Déclencheurs** :
-  - *push* sur `main` ou *pull request* touchant `os/**`, `memory/**`,
-    `security/**` ou le workflow → **build de vérification amd64 seul**
-    (`bootc container lint`), **sans push ni signature**. Garde-fou rapide.
-  - *tag* `v*` **ou** `workflow_dispatch` (manuel) → **release** : build
-    `amd64 + arm64`, push sur `ghcr.io`, assemblage du manifest multi-arch,
-    signature cosign, **plus** les jobs ISO (une par architecture).
+  - *push* sur `main` ou *pull request* touchant `os/**`, `vibed/**`,
+    `memory/**`, `security/**` ou le workflow → **build de vérification amd64
+    seul** (`bootc container lint`), **sans push ni signature**. Garde-fou
+    rapide. Un `workflow_dispatch` **non confirmé** fait la même chose.
+  - *tag* `v*` **ou** `workflow_dispatch` avec l'entrée `confirm_release`
+    valant exactement `publier` → **release** : build `amd64 + arm64`, push sur
+    `ghcr.io`, assemblage du manifest multi-arch, signature cosign, **plus**
+    les jobs ISO (une par architecture).
 
-  Autrement dit : les commits ordinaires sur `main` sont *validés* mais **non
-  publiés** ; pour publier/signer une image, on **pose un tag `v*`**.
+  Autrement dit : les commits ordinaires sur `main` (et un dispatch non
+  confirmé) sont *validés* mais **non publiés** ; pour publier/signer une
+  image, on **pose un tag `v*`** (ou l'on tape `publier` dans le dispatch).
 - **Runners natifs (pas d'émulation)** : le build est une matrice où chaque
   architecture tourne sur **son propre runner natif** — amd64 sur
   `ubuntu-latest`, arm64 sur `ubuntu-24.04-arm`. Chacun construit
@@ -150,7 +153,7 @@ ls -l /usr/lib/systemd/system/vibed.service \
       /usr/libexec/vibeos/genesis.sh
 # La politique par défaut DOIT être livrée dans l'image (fail-closed sinon) :
 test -f /etc/vibeos/policy.d/default.toml && echo "policy OK" || echo "POLICY MANQUANTE"
-command -v code ollama claude gemini codex opencode rg fd fzf socat
+command -v codium ollama claude gemini codex opencode rg fd fzf socat
 ollama --version            # 0.31.1 (épinglé + sha256 vérifié au build)
 exit
 ```
@@ -255,12 +258,13 @@ avec l'ensemble des outils.
 > puis `wsl --shutdown` avant de relancer. (L'image OS, elle, se construit sans
 > problème à 8 Go — seule l'étape ISO exige cette marge.) En CI, les runners
 > GitHub sont suffisamment dotés : la génération d'ISO y est déclenchée sur
-> tag `v*` / `workflow_dispatch`.
+> tag `v*` (ou un `workflow_dispatch` confirmé par `confirm_release=publier`).
 
 Pour une ISO **arm64** depuis un hôte amd64 (qemu-user-static requis,
 section 2.6) : pull de l'image arm64 (`sudo podman pull --arch arm64 ...` ou
 build local `--arch arm64`), puis ajouter `--target-arch arm64` à la commande
-ci-dessus. C'est exactement ce que fait la matrice `iso` de la CI.
+ci-dessus. En CI, ce détour est inutile : la matrice `iso` tourne sur des
+runners natifs par architecture, sans `--target-arch` (voir §1).
 
 Copier l'ISO côté Windows pour Hyper-V :
 
@@ -304,7 +308,7 @@ Checklist premier boot après installation :
 ```bash
 systemctl status vibeos-genesis.service   # oneshot exécuté, stamp créé
 ls /var/lib/vibeos/memory/.initialized
-systemctl status vibed.service            # "condition failed" attendu (pas de /usr/bin/vibed en Phase 1) — PAS "failed"
+systemctl status vibed.service            # "active (running)" attendu — le binaire /usr/bin/vibed est embarqué dans l'image
 getent passwd vibed; getent group vibeos-agents   # sysusers appliqué
 ls /etc/vibeos/policy.d/default.toml      # politique par défaut livrée
 bootc status                              # image et déploiement actifs
@@ -341,12 +345,14 @@ cosign verify \
   ghcr.io/micka420-collab/vibeos:latest
 ```
 
-- Remplacer `micka420-collab` par le propriétaire réel du dépôt.
+- `micka420-collab` est la forme minuscule du propriétaire du dépôt
+  (`Micka420-collab`) ; adapter l'identité si vous vérifiez un fork.
 - La commande échoue si l'image n'a pas été signée par **ce** workflow de
   **ce** dépôt — c'est le comportement attendu pour tout artefact non issu de
   la CI (dont les builds locaux, jamais signés).
-- Les PR ne poussent ni ne signent rien : seuls `main`, les tags `v*` et les
-  dispatch manuels produisent des images signées.
+- Les push sur `main` et les PR ne poussent ni ne signent rien (build de
+  vérification uniquement) : seuls les tags `v*` et les dispatch manuels
+  confirmés produisent des images publiées et signées.
 
 > La **vérification côté client au moment du `bootc upgrade`** (policy
 > container/signature dans `/etc/containers/`) n'est pas encore câblée en
@@ -396,5 +402,5 @@ sudo bootc upgrade                              # mises à jour atomiques
 | Driver NVIDIA absent au boot sur matériel réel | Secure Boot activé : le kmod n'est **pas signé MOK en v0.1** (Phase 4). Tester Secure Boot désactivé — voir section 3 et `docs/HARDWARE.md`. |
 | `cosign verify` échoue | Image non produite/signée par la CI (build local, publication manuelle) ou `micka420-collab`/workflow différent dans `--certificate-identity-regexp`. |
 | VM Hyper-V ne boote pas l'ISO | Génération 2 + template Secure Boot `MicrosoftUEFICertificateAuthority` requis (ou Secure Boot Off pour isoler le problème). |
-| `vibed.service` en `failed` au boot | Anormal : la garde `ConditionPathExists=/usr/bin/vibed` doit le faire *sauter*. Vérifier que l'overlay `os/rootfs/` est bien copié. |
+| `vibed.service` en `failed` au boot | Anormal : le binaire `/usr/bin/vibed` est embarqué dans l'image et l'unité doit être `active (running)`. Vérifier `ls -l /usr/bin/vibed`, `journalctl -u vibed` (politique invalide = arrêt fail-closed, ligne suivante) et que l'overlay `os/rootfs/` est bien copié. |
 | `vibed` refuse de démarrer (politique invalide) | Comportement **fail-closed** voulu : corriger le TOML fautif dans `/etc/vibeos/policy.d/` (le CI `policy` attrape ça avant la release). |

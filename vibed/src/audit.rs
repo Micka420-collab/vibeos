@@ -89,13 +89,24 @@ impl AuditLog {
         });
         let line = entry.to_string();
 
-        let _guard = self.lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(line.as_bytes())?;
         file.write_all(b"\n")?;
+        // Durability, not just crash-safety: the "audit before execution"
+        // invariant must hold across a power cut too — without this fsync, a
+        // 'started' record could vanish while its tool call DID run. sync_data
+        // costs ~ms per call, negligible at the v0.x tool-call rate.
+        file.sync_data()?;
         Ok(())
     }
 }
@@ -166,8 +177,14 @@ mod tests {
         let second: Value = serde_json::from_str(lines[1]).expect("line 2 is JSON");
         assert_eq!(second["tool"], "pkg.install");
         assert_eq!(second["outcome"], "pending_approval");
-        assert_eq!(second["target"], "htop", "the package name is the audit target");
-        assert!(second["caller_uid"].is_null(), "unknown caller is recorded as null");
+        assert_eq!(
+            second["target"], "htop",
+            "the package name is the audit target"
+        );
+        assert!(
+            second["caller_uid"].is_null(),
+            "unknown caller is recorded as null"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -175,7 +192,10 @@ mod tests {
     #[test]
     fn digest_is_stable_and_input_sensitive() {
         // FNV-1a offset basis for empty input.
-        assert_eq!(fnv1a_64_hex(b""), format!("{:016x}", 0xcbf2_9ce4_8422_2325_u64));
+        assert_eq!(
+            fnv1a_64_hex(b""),
+            format!("{:016x}", 0xcbf2_9ce4_8422_2325_u64)
+        );
         assert_eq!(fnv1a_64_hex(b"abc"), fnv1a_64_hex(b"abc"));
         assert_ne!(fnv1a_64_hex(b"abc"), fnv1a_64_hex(b"abd"));
     }

@@ -87,16 +87,19 @@ c'est le mécanisme, pas un cas particulier.
 |---|---|---|---|---|
 | `identity.toml` | TOML | Genesis uniquement | `memory.query` (T0) | **interdite** |
 | `hardware.json` | JSON | Genesis uniquement | `memory.query` (T0) | **interdite** |
-| `user/` | TOML/MD | `vibed` | `memory.query` (T0) | `memory.append` (T1)* |
-| `projects/index.json` | JSON | `vibed` | `memory.query` (T0) | `memory.append` (T1)* |
-| `journal/*.jsonl` | JSONL | Genesis puis `vibed` | `memory.query` (T0) | `memory.append` (T1, append-only)* |
-| `knowledge/` | JSONL | `vibed` | `memory.query` (T0) | `memory.append` (T1)* |
+| `user/` | TOML/MD | `vibed` | `memory.query` (T0) | `memory.append` (T1)* — scope à venir |
+| `projects/index.json` | JSON | `vibed` | `memory.query` (T0) | `memory.append` (T1)* — scope à venir |
+| `journal/*.jsonl` | JSONL | Genesis puis `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
+| `knowledge/facts.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
 | `.initialized` | texte | Genesis uniquement | — | — |
 
-\* `memory.append` est une **cible Phase 2/3** — non livré en v0.1 (voir §9). En
-v0.1, la mémoire n'est inscriptible via **aucun** outil MCP : `fs.write` est
-confiné à `/home/**`/`/var/home/**` et la mémoire figure dans la denylist
-intégrée au code de `vibed`.
+\* `memory.append` est **livré** pour les scopes append-only `journal` et
+`knowledge` (voir §9) ; les scopes `user` et `projects` (fusion structurée
+TOML/JSON, pas un simple append) restent une **cible Phase 2/3**. La mémoire
+n'est inscriptible par aucun autre outil MCP : `fs.write` est confiné à
+`/home/**`/`/var/home/**` et la mémoire figure dans la denylist intégrée au
+code de `vibed` — `memory.append`, qui ne prend aucun argument de chemin, est
+l'unique canal d'écriture gouverné.
 
 ### 3.1 `identity.toml`
 
@@ -146,7 +149,8 @@ quand le matériel change.
 ### 3.3 `user/`
 
 Ce que la machine sait de **son humain**. Rempli progressivement par `vibed` via
-`memory.append` (cible Phase 2/3 — jamais par Genesis, qui ne pose qu'un `README.md`) :
+`memory.append` (le scope `user` — fusion TOML structurée — reste une cible
+Phase 2/3 ; jamais par Genesis, qui ne pose qu'un `README.md`) :
 `profile.toml` (nom d'usage, langue — le français est détecté dès la locale),
 `preferences.toml` (éditeur, shell, thème, outils préférés), `codestyle.md`
 (conventions observées dans les sessions de vibecoding : indentation, nommage,
@@ -245,8 +249,8 @@ commande** — le chiffrement (LUKS, §6) et le tmpfs amnésique (§5) sont four
 
 ### 4.2 Enrichissement continu (cible Phase 2/3)
 
-Après Genesis, seule `vibed` écrira dans la mémoire, exclusivement via l'outil MCP
-`memory.append` (T1 — cible Phase 2/3, non livré en v0.1, cf. §9) :
+Après Genesis, seule `vibed` écrit dans la mémoire, exclusivement via l'outil MCP
+`memory.append` (T1 — livré pour `journal`/`knowledge`, cf. §9) :
 
 - fin de session agent → `observation` / `decision` dans le journal ;
 - détection de préférences → `user/preferences.toml`, `user/codestyle.md` ;
@@ -328,8 +332,9 @@ documentée ([THREAT-MODEL.md](THREAT-MODEL.md) §7). La cible Phase 3 :
 
 ## 7. Rétention et purge
 
-Valeurs par défaut, configurables dans `/etc/vibeos/policy.d/memory.toml`
-(lu par `vibed`) :
+Valeurs par défaut **cibles**. Le mécanisme visé — un fichier
+`/etc/vibeos/policy.d/memory.toml` lu par `vibed` — n'est **pas implémenté
+aujourd'hui** : `vibed` n'applique encore aucune logique de rétention.
 
 | Donnée | Rétention par défaut | Mécanisme |
 |---|---|---|
@@ -375,29 +380,37 @@ La mémoire est portable — elle appartient à l'humain, pas au matériel.
 
 Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
 `vibed`, désormais **embarqué dans l'image et démarré au boot**).
-`memory.query` (argument unique `query`) est **implémenté, testé et exposé** par le
-démon `vibed` : c'est un outil **livré en v0.1**. `memory.append` (écriture) et les
-arguments `scope`/`limit` de `memory.query` ne sont **pas encore implémentés** dans
-`mcp.rs` — ils restent une **cible Phase 2**.
+`memory.query` (arguments `query`, `scope`, `limit`) et `memory.append`
+(scopes `journal` et `knowledge`) sont **implémentés, testés et exposés** par le
+démon `vibed`. Restent une **cible Phase 2/3** : les scopes `user` et
+`projects` de `memory.append` (fusion structurée TOML/JSON, pas un simple
+append) et la recherche sémantique par embeddings.
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
-| `memory.query` | **T0** (observe) | automatique | lecture seule (argument unique `query`) | ✅ **livré v0.1** (servi par `vibed` embarqué) |
-| `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture additive sur `user`, `projects`, `journal`, `knowledge` | **cible Phase 2** (non implémentée dans `mcp.rs`) |
+| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`) | ✅ **livré** (scope/limit depuis v0.2) |
+| `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`/`knowledge` ; scopes `user`/`projects` = **cible Phase 2/3** |
 
 Points durs :
 
 - `identity` et `hardware` sont **interrogeables mais jamais inscriptibles** via
   MCP — seul Genesis les écrit.
-- En v0.1, la mémoire n'est inscriptible via **aucun** outil MCP (`fs.write` la
-  refuse par denylist intégrée au code) : jusqu'à `memory.append`, seuls Genesis
-  et `vibed` lui-même y écrivent.
-- `memory.append` sera strictement **additif** : pas d'outil `memory.delete` ni
-  `memory.rewrite`. La suppression restera réservée à `vibectl` (T3, humain).
+- La mémoire n'est inscriptible par **aucun autre** outil MCP (`fs.write` la
+  refuse par denylist intégrée au code) : `memory.append` est l'unique canal
+  d'écriture, et il ne prend **aucun argument de chemin** (le fichier cible est
+  dérivé du scope).
+- `memory.append` est strictement **additif** : une ligne JSONL par appel
+  (`O_APPEND` + `O_NOFOLLOW`, plafond 16 KiB/ligne), pas d'outil
+  `memory.delete` ni `memory.rewrite`. La suppression reste réservée à
+  `vibectl` (T3, humain). Les types de journal `genesis`, `boot`, `tool_call`
+  et `purge` sont **réservés au système** : un agent ne peut pas les forger.
+  `ts` (et l'`id` des faits) sont posés par `vibed`, jamais par l'agent ;
+  l'identité authentique de l'appelant vit dans le journal d'audit
+  (`SO_PEERCRED`), le champ `source` n'est qu'une étiquette déclarative.
 - Chaque appel — accepté ou refusé — est audité et produira, à terme, un événement
   `tool_call` dans le journal.
 
-### `memory.query` (T0 — ✅ livré v0.1, servi par `vibed`)
+### `memory.query` (T0 — ✅ livré, `scope`/`limit` inclus)
 
 ```json
 {
@@ -413,15 +426,17 @@ Points durs :
 }
 ```
 
-Dans sa version livrée en v0.1, `query` est l'**unique argument** : filtrage
-lexical (sous-chaîne / clés) sur la mémoire. Réponse : contenu MCP standard
-(`result.content`) portant les entrées trouvées en JSON.
+Trois arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
+sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` | `user` |
+`projects` | `journal` | `knowledge` (restreint la marche à une entrée du
+layout §3 ; un scope inconnu est une erreur explicite) et `limit` (entier ≥ 1,
+plafond de résultats — la réponse porte un drapeau `truncated`). Réponse :
+contenu MCP standard (`result.content`) portant les entrées trouvées en JSON.
+La marche reste bornée en dur (200 fichiers, 64 KiB scannés par fichier).
 
-**Cible Phase 2** : arguments supplémentaires `scope` ∈ `identity` | `hardware` |
-`user` | `projects` | `journal` | `knowledge` et `limit` (plafond de résultats) ;
-la recherche sémantique via `knowledge/embeddings/` viendra ensuite.
+**Cible ultérieure** : la recherche sémantique via `knowledge/embeddings/`.
 
-### `memory.append` (T1 — cible Phase 2/3, non livré en v0.1)
+### `memory.append` (T1 — ✅ livré pour `journal` et `knowledge`)
 
 ```json
 {
@@ -442,8 +457,22 @@ la recherche sémantique via `knowledge/embeddings/` viendra ensuite.
 }
 ```
 
-`vibed` complétera `ts`, validera le schéma selon le scope (événement journal,
-fait knowledge, clé de préférence…), appliquera la politique, écrira, auditera.
+`vibed` valide le schéma selon le scope, pose `ts` lui-même, applique la
+politique, écrit **une ligne JSONL** (`O_APPEND`, `O_NOFOLLOW`, `0600`,
+plafond 16 KiB) et audite :
+
+- **`journal`** → `journal/<AAAA-MM-JJ UTC>.jsonl`. `entry` : `type`
+  (∈ `observation`, `decision`, `preference`, `project_seen`, `error` — les
+  types système `genesis`/`boot`/`tool_call`/`purge` sont refusés), `source`
+  (étiquette `[A-Za-z0-9._-]{1,64}`) et `data` (objet libre).
+- **`knowledge`** → `knowledge/facts.jsonl`. `entry` : `subject` (≤ 256 o),
+  `fact` (≤ 4 096 o), `source`, `confidence` optionnel ∈ [0, 1] ; `vibed`
+  génère l'`id`.
+- **`user`** / **`projects`** → erreur explicite : fusion structurée TOML/JSON,
+  **cible Phase 2/3** — pas un simple append.
+
+Si la mémoire n'existe pas encore (Genesis n'a pas tourné), l'appel échoue
+explicitement — `memory.append` ne crée jamais la racine du store.
 
 ---
 

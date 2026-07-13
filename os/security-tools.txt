@@ -1,0 +1,84 @@
+# os/security-tools.txt — manifeste de la trousse cybersécurité embarquée.
+#
+# Miroir de la couche 1d-bis d'os/Containerfile : uniquement des RPM signés
+# Fedora / RPM Fusion (chaîne d'approvisionnement propre pour un OS immuable).
+# Le catalogue complet (Go/pip/conteneurs, C2, SDR, sécurité IA/LLM) et la
+# gouvernance par tiers sont dans docs/SECURITY-TOOLKIT.md.
+# Le manifeste lu au runtime par vibed (sectools.list) est
+# os/rootfs/usr/share/vibeos/security-tools.tsv (binaire/catégorie/tier).
+# GARDER CES TROIS SOURCES SYNCHRONISÉES.
+
+# --- Reconnaissance & réseau (dig via bind-utils, tshark via wireshark-cli) ---
+nmap
+nmap-ncat
+masscan
+tcpdump
+wireshark-cli
+hping3
+ngrep
+tcpreplay
+arp-scan
+nbtscan
+dnsenum
+bind-utils
+whois
+macchanger
+proxychains-ng
+tor
+dsniff
+ettercap
+
+# --- Mots de passe / cracking (hashcat exploite la couche NVIDIA/CUDA amd64) ---
+hydra
+john
+hashcat
+medusa
+ncrack
+
+# --- Sans-fil ---
+aircrack-ng
+reaver
+pixiewps
+hcxtools
+kismet
+
+# --- Web ---
+whatweb
+wfuzz
+gobuster
+ffuf
+
+# --- Rétro-ingénierie & exploitation ---
+radare2
+rizin
+binwalk
+yara
+gdb
+strace
+ltrace
+patchelf
+upx
+checksec
+python3-pwntools
+python3-impacket
+
+# --- Forensics & DFIR ---
+sleuthkit
+foremost
+scalpel
+testdisk
+chntpw
+steghide
+perl-Image-ExifTool
+
+# --- Défense / audit / conformité ---
+clamav
+rkhunter
+lynis
+chkrootkit
+aide
+openscap
+openscap-scanner
+scap-security-guide
+suricata
+age

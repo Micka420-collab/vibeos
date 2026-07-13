@@ -46,13 +46,24 @@ fn match_segment(pattern: &str, segment: &str) -> bool {
     helper(pattern.as_bytes(), segment.as_bytes())
 }
 
+/// PATH_MAX on Linux: no real filesystem path exceeds this. Longer inputs
+/// cannot name an existing file, so they are policy probes — or DoS attempts
+/// against the glob matcher, whose `**` handling is O(n²) in the number of
+/// segments (fine at ≤ 4096 bytes, catastrophic on a megabyte-long path fed
+/// through the 1 MiB JSON-RPC line budget).
+const MAX_PATH_BYTES: usize = 4096;
+
 /// Lexically normalize an absolute path: collapses `//`, removes `.`,
-/// resolves `..` segments. Returns `None` for relative paths and for paths
-/// that try to climb above `/` (fail-closed: callers must reject the call).
+/// resolves `..` segments. Returns `None` for relative paths, for paths that
+/// try to climb above `/`, and for paths longer than PATH_MAX (fail-closed:
+/// callers must reject the call).
 ///
 /// Symlinks are NOT resolved here; `fs.read` additionally re-checks the
 /// canonicalized path (see `mcp.rs`).
 pub fn normalize_path(path: &str) -> Option<String> {
+    if path.len() > MAX_PATH_BYTES {
+        return None;
+    }
     if !path.starts_with('/') {
         return None;
     }
@@ -85,11 +96,23 @@ mod tests {
 
     #[test]
     fn double_star_crosses_segments_and_matches_zero() {
-        assert!(glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/audit/vibed.jsonl"));
-        assert!(glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/audit/a/b/c"));
+        assert!(glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/audit/vibed.jsonl"
+        ));
+        assert!(glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/audit/a/b/c"
+        ));
         // `**` matches zero segments: the directory itself is covered.
-        assert!(glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/audit"));
-        assert!(!glob_match("/var/lib/vibeos/audit/**", "/var/lib/vibeos/memory/x"));
+        assert!(glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/audit"
+        ));
+        assert!(!glob_match(
+            "/var/lib/vibeos/audit/**",
+            "/var/lib/vibeos/memory/x"
+        ));
     }
 
     #[test]
@@ -113,7 +136,10 @@ mod tests {
     fn mid_segment_wildcards() {
         assert!(glob_match("/proc/*/environ", "/proc/1234/environ"));
         assert!(!glob_match("/proc/*/environ", "/proc/1234/task/1/environ"));
-        assert!(glob_match("/home/*/.claude/credentials*", "/home/dev/.claude/credentials.json"));
+        assert!(glob_match(
+            "/home/*/.claude/credentials*",
+            "/home/dev/.claude/credentials.json"
+        ));
     }
 
     #[test]
@@ -122,20 +148,46 @@ mod tests {
         // `/proc/<pid>/task/<tid>/environ` (variable depth), where the
         // single-segment `/proc/*/environ` does not.
         assert!(glob_match("/proc/**/environ", "/proc/1234/environ"));
-        assert!(glob_match("/proc/**/environ", "/proc/1234/task/5678/environ"));
+        assert!(glob_match(
+            "/proc/**/environ",
+            "/proc/1234/task/5678/environ"
+        ));
         assert!(glob_match("/proc/**/cmdline", "/proc/1234/cmdline"));
-        assert!(glob_match("/proc/**/cmdline", "/proc/1234/task/5678/cmdline"));
+        assert!(glob_match(
+            "/proc/**/cmdline",
+            "/proc/1234/task/5678/cmdline"
+        ));
         // `**` also matches zero intermediate segments.
         assert!(glob_match("/proc/**/environ", "/proc/environ"));
     }
 
     #[test]
     fn normalize_resolves_dots_and_rejects_escapes() {
-        assert_eq!(normalize_path("/home/dev/../dev2/x").as_deref(), Some("/home/dev2/x"));
-        assert_eq!(normalize_path("/home//dev/./x").as_deref(), Some("/home/dev/x"));
-        assert_eq!(normalize_path("/home/dev/../../etc/shadow").as_deref(), Some("/etc/shadow"));
+        assert_eq!(
+            normalize_path("/home/dev/../dev2/x").as_deref(),
+            Some("/home/dev2/x")
+        );
+        assert_eq!(
+            normalize_path("/home//dev/./x").as_deref(),
+            Some("/home/dev/x")
+        );
+        assert_eq!(
+            normalize_path("/home/dev/../../etc/shadow").as_deref(),
+            Some("/etc/shadow")
+        );
         assert_eq!(normalize_path("/").as_deref(), Some("/"));
         assert_eq!(normalize_path("/../etc"), None);
         assert_eq!(normalize_path("relative/path"), None);
+    }
+
+    #[test]
+    fn normalize_rejects_paths_beyond_path_max() {
+        // A path longer than PATH_MAX cannot exist on disk; rejecting it at
+        // the input boundary also caps the glob matcher's O(n²) `**` cost.
+        let deep = format!("/{}", "a/".repeat(4096));
+        assert_eq!(normalize_path(&deep), None);
+        // At sane lengths, deep paths keep working.
+        let ok = format!("/{}", "a/".repeat(100)) + "file";
+        assert!(normalize_path(&ok).is_some());
     }
 }

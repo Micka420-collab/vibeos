@@ -1,12 +1,15 @@
 # Global Theme « VibeOS Dark » (Look-and-Feel Plasma 6) + Kvantum
 
-> Statut : **🛣️ Phase 2** — l'ensemble du Global Theme (layout panneau + dock,
-> `defaults`, style Kvantum) est **conçu maintenant** mais **câblé dans l'image
-> en Phase 2** (voir [docs/DESKTOP.md](../../docs/DESKTOP.md) §2.6 et §9). En v0.1,
-> seul le **schéma de couleurs** `VibeOSDark.colors` est réellement embarqué. Ce
-> paquet applique le langage visuel défini dans
-> [docs/DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md) — accent Mauve `#cba6f7`,
-> profondeur en couches, verre maîtrisé.
+> Statut : **✅ livré et actif par défaut (Phase 2)** — le Global Theme
+> `org.vibeos.dark` est copié dans l'image **et désigné comme défaut système**
+> via le pointeur `/etc/xdg/kdeglobals` (`LookAndFeelPackage=org.vibeos.dark`,
+> cascade KConfig — surchargeable par utilisateur). Le moteur **Kvantum est
+> installé** (couche 1g d'`os/Containerfile`) et le thème `VibeOSDark`
+> sélectionné via `/etc/skel/.config/Kvantum/kvantum.kvconfig`. Restent à
+> venir : le preset **Panel Colorizer** (verre panneau/dock, Phase 2) et le
+> branding SDDM/Plymouth/wallpapers (Phase 5). Ce paquet applique le langage
+> visuel défini dans [docs/DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md) —
+> accent Mauve `#cba6f7`, profondeur en couches, verre maîtrisé.
 
 ---
 
@@ -69,8 +72,11 @@ Le `defaults` fixe la pile du design system (§3.1) :
 
 ## 4. Comment l'activer
 
-Prérequis (Phase 2) : le paquet `kvantum` et le paquet Quickshell déclarés dans
-`os/Containerfile`, et les fichiers ci-dessus présents sous `/usr`.
+**Rien à faire sur une image VibeOS** : le thème est le défaut système
+(`/etc/xdg/kdeglobals`), le moteur Kvantum est installé et le thème Kvantum
+est sélectionné pour tout nouvel utilisateur
+(`/etc/skel/.config/Kvantum/kvantum.kvconfig`). Les commandes ci-dessous
+servent à ré-appliquer le thème après en avoir essayé un autre.
 
 ### 4.1 Global Theme complet (recommandé)
 
@@ -88,8 +94,9 @@ pour appliquer `layout.js`).
 
 ### 4.2 Activer le style Kvantum (fait par le Global Theme)
 
-Le `defaults` pose déjà `widgetStyle=kvantum`. Il reste à désigner **quel** thème
-Kvantum est actif (config séparée, livrée via `/etc/skel` en Phase 2) :
+Le `defaults` pose déjà `widgetStyle=kvantum`. Le thème Kvantum actif est
+désigné par une config séparée, **livrée via `/etc/skel`**
+(`os/rootfs/etc/skel/.config/Kvantum/kvantum.kvconfig`) :
 
 ```sh
 # ~/.config/Kvantum/kvantum.kvconfig
@@ -134,11 +141,10 @@ retombent sur les surfaces opaques équivalentes.
 
 | Élément | Statut | Note |
 |---|---|---|
-| Schéma `VibeOSDark.colors` | ✅ v0.1 | Seule couche bureau réellement embarquée aujourd'hui |
-| Paquet Look-and-Feel `org.vibeos.dark` (ce dossier) | 🛣️ Phase 2 | Copie sous `/usr/share/plasma/look-and-feel/`, activation par défaut |
-| Style + thème Kvantum `VibeOSDark` | 🛣️ Phase 2 | Nécessite le paquet `kvantum` (`os/Containerfile`) ; atlas SVG complet = Phase 5 |
-| Preset Panel Colorizer (verre panneau/dock) | 🛣️ Phase 2 | Le verre `glass-chrome` réel |
-| Application par défaut du thème (kdeglobals `/etc/skel`) | 🛣️ Phase 2 | Pour que la session s'ouvre déjà en VibeOS Dark |
+| Schéma `VibeOSDark.colors` | ✅ v0.1 | Embarqué sous `/usr/share/color-schemes/` |
+| Paquet Look-and-Feel `org.vibeos.dark` (ce dossier) | ✅ Phase 2 | Copié sous `/usr/share/plasma/look-and-feel/`, **défaut système** via `/etc/xdg/kdeglobals` |
+| Style + thème Kvantum `VibeOSDark` | ✅ Phase 2 | Moteur `kvantum` installé (couche 1g) + sélection `/etc/skel/.config/Kvantum/kvantum.kvconfig` ; atlas SVG complet = Phase 5 |
+| Preset Panel Colorizer (verre panneau/dock) | 🛣️ Phase 2 | Le verre `glass-chrome` réel — reste à câbler |
 | Icônes/curseurs VibeOS | 🛣️ Phase 5 | v0.1/Phase 2 : Breeze (design §9) |
 | Wallpapers Genesis/Void, logo, SDDM, Plymouth | 🛣️ Phase 5 | Branding |
 

@@ -179,9 +179,15 @@ pub enum PolicyError {
 impl fmt::Display for PolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PolicyError::Io { path, err } => write!(f, "policy: cannot read {}: {err}", path.display()),
-            PolicyError::Parse { path, err } => write!(f, "policy: invalid TOML in {}: {err}", path.display()),
-            PolicyError::Invalid { path, err } => write!(f, "policy: rejected {}: {err}", path.display()),
+            PolicyError::Io { path, err } => {
+                write!(f, "policy: cannot read {}: {err}", path.display())
+            }
+            PolicyError::Parse { path, err } => {
+                write!(f, "policy: invalid TOML in {}: {err}", path.display())
+            }
+            PolicyError::Invalid { path, err } => {
+                write!(f, "policy: rejected {}: {err}", path.display())
+            }
         }
     }
 }
@@ -228,7 +234,12 @@ impl PolicyEngine {
                 );
                 return Ok(Self::from_rules(Vec::new()));
             }
-            Err(err) => return Err(PolicyError::Io { path: dir.to_path_buf(), err }),
+            Err(err) => {
+                return Err(PolicyError::Io {
+                    path: dir.to_path_buf(),
+                    err,
+                })
+            }
         };
         let mut paths: Vec<_> = entries
             .flatten()
@@ -240,22 +251,36 @@ impl PolicyEngine {
         let mut rules: Vec<Rule> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
         for path in paths {
-            let src = fs::read_to_string(&path)
-                .map_err(|err| PolicyError::Io { path: path.clone(), err })?;
-            let file_rules = parse_and_validate(&src)
-                .map_err(|err| match err {
-                    FileError::Parse(msg) => PolicyError::Parse { path: path.clone(), err: msg },
-                    FileError::Invalid(msg) => PolicyError::Invalid { path: path.clone(), err: msg },
-                })?;
+            let src = fs::read_to_string(&path).map_err(|err| PolicyError::Io {
+                path: path.clone(),
+                err,
+            })?;
+            let file_rules = parse_and_validate(&src).map_err(|err| match err {
+                FileError::Parse(msg) => PolicyError::Parse {
+                    path: path.clone(),
+                    err: msg,
+                },
+                FileError::Invalid(msg) => PolicyError::Invalid {
+                    path: path.clone(),
+                    err: msg,
+                },
+            })?;
             for rule in &file_rules {
                 if !seen_ids.insert(rule.id.clone()) {
                     return Err(PolicyError::Invalid {
                         path: path.clone(),
-                        err: format!("duplicate rule id '{}' (ids must be unique across policy.d)", rule.id),
+                        err: format!(
+                            "duplicate rule id '{}' (ids must be unique across policy.d)",
+                            rule.id
+                        ),
                     });
                 }
             }
-            info!("policy: {} rule(s) from {}", file_rules.len(), path.display());
+            info!(
+                "policy: {} rule(s) from {}",
+                file_rules.len(),
+                path.display()
+            );
             rules.extend(file_rules);
         }
         info!("policy: {} rule(s) active", rules.len());
@@ -337,9 +362,13 @@ fn parse_and_validate(src: &str) -> Result<Vec<Rule>, FileError> {
             return Err(FileError::Invalid("rule with empty 'id'".to_string()));
         }
         if rule.tools.is_empty() {
-            return Err(FileError::Invalid(format!("rule '{}': empty 'tools' list", rule.id)));
+            return Err(FileError::Invalid(format!(
+                "rule '{}': empty 'tools' list",
+                rule.id
+            )));
         }
-        if rule.action == Action::Allow && rule.tier >= Tier::T2 && rule.approval != Approval::Human {
+        if rule.action == Action::Allow && rule.tier >= Tier::T2 && rule.approval != Approval::Human
+        {
             return Err(FileError::Invalid(format!(
                 "rule '{}': tier {} with action=allow requires approval=\"human\" \
                  (the tier is a floor; T2/T3 can never bypass the human)",
@@ -374,7 +403,10 @@ mod tests {
         }
     }
 
-    const NO_CTX: CallContext<'_> = CallContext { path: None, service: None };
+    const NO_CTX: CallContext<'_> = CallContext {
+        path: None,
+        service: None,
+    };
 
     #[test]
     fn rich_schema_parses_with_all_fields() {
@@ -417,23 +449,34 @@ mod tests {
         assert_eq!(paths.allowed.as_ref().map(Vec::len), Some(2));
         assert_eq!(paths.denied.len(), 1);
         assert_eq!(rules[1].approval, Approval::Human);
-        assert_eq!(rules[1].services.as_ref().expect("services").denied.len(), 1);
+        assert_eq!(
+            rules[1].services.as_ref().expect("services").denied.len(),
+            1
+        );
     }
 
     #[test]
     fn unknown_tool_is_denied_even_with_permissive_rules() {
-        let e = engine(
-            "[[rule]]\nid = \"all\"\ntools = [\"*\"]\ntier = \"T0\"\naction = \"allow\"\n",
-        );
+        let e =
+            engine("[[rule]]\nid = \"all\"\ntools = [\"*\"]\ntier = \"T0\"\naction = \"allow\"\n");
         assert_eq!(e.evaluate("shady.tool", None, NO_CTX), Decision::Deny);
     }
 
     #[test]
     fn no_matching_rule_means_deny_whatever_the_tier() {
         let e = PolicyEngine::from_rules(vec![]);
-        assert_eq!(e.evaluate("os.status", Some(Tier::T0), NO_CTX), Decision::Deny);
-        assert_eq!(e.evaluate("fs.write", Some(Tier::T1), NO_CTX), Decision::Deny);
-        assert_eq!(e.evaluate("pkg.install", Some(Tier::T2), NO_CTX), Decision::Deny);
+        assert_eq!(
+            e.evaluate("os.status", Some(Tier::T0), NO_CTX),
+            Decision::Deny
+        );
+        assert_eq!(
+            e.evaluate("fs.write", Some(Tier::T1), NO_CTX),
+            Decision::Deny
+        );
+        assert_eq!(
+            e.evaluate("pkg.install", Some(Tier::T2), NO_CTX),
+            Decision::Deny
+        );
     }
 
     #[test]
@@ -443,13 +486,21 @@ mod tests {
              [[rule]]\nid = \"specific\"\ntools = [\"fs.write\"]\ntier = \"T1\"\naction = \"deny\"\n",
         );
         // fs.* comes first, so the later fs.write deny never fires.
-        assert_eq!(e.evaluate("fs.write", Some(Tier::T1), NO_CTX), Decision::Allow);
+        assert_eq!(
+            e.evaluate("fs.write", Some(Tier::T1), NO_CTX),
+            Decision::Allow
+        );
     }
 
     #[test]
     fn deny_rule_denies() {
-        let e = engine("[[rule]]\nid = \"no\"\ntools = [\"os.status\"]\ntier = \"T0\"\naction = \"deny\"\n");
-        assert_eq!(e.evaluate("os.status", Some(Tier::T0), NO_CTX), Decision::Deny);
+        let e = engine(
+            "[[rule]]\nid = \"no\"\ntools = [\"os.status\"]\ntier = \"T0\"\naction = \"deny\"\n",
+        );
+        assert_eq!(
+            e.evaluate("os.status", Some(Tier::T0), NO_CTX),
+            Decision::Deny
+        );
     }
 
     #[test]
@@ -458,7 +509,10 @@ mod tests {
             "[[rule]]\nid = \"pkg\"\ntools = [\"pkg.install\"]\ntier = \"T2\"\naction = \"allow\"\napproval = \"human\"\n",
         );
         // The tier is a floor: allow on T2 can never mean unattended execution.
-        assert_eq!(e.evaluate("pkg.install", Some(Tier::T2), NO_CTX), Decision::RequireApproval);
+        assert_eq!(
+            e.evaluate("pkg.install", Some(Tier::T2), NO_CTX),
+            Decision::RequireApproval
+        );
     }
 
     #[test]
@@ -466,11 +520,17 @@ mod tests {
         let msg = parse_err(
             "[[rule]]\nid = \"pkg\"\ntools = [\"pkg.install\"]\ntier = \"T2\"\naction = \"allow\"\n",
         );
-        assert!(msg.contains("approval"), "error should mention approval: {msg}");
+        assert!(
+            msg.contains("approval"),
+            "error should mention approval: {msg}"
+        );
         let msg = parse_err(
             "[[rule]]\nid = \"pkg\"\ntools = [\"pkg.install\"]\ntier = \"T3\"\naction = \"allow\"\napproval = \"none\"\n",
         );
-        assert!(msg.contains("approval"), "error should mention approval: {msg}");
+        assert!(
+            msg.contains("approval"),
+            "error should mention approval: {msg}"
+        );
     }
 
     #[test]
@@ -480,7 +540,10 @@ mod tests {
         let e = engine(
             "[[rule]]\nid = \"sneaky\"\ntools = [\"pkg.install\"]\ntier = \"T0\"\naction = \"allow\"\n",
         );
-        assert_eq!(e.evaluate("pkg.install", Some(Tier::T2), NO_CTX), Decision::RequireApproval);
+        assert_eq!(
+            e.evaluate("pkg.install", Some(Tier::T2), NO_CTX),
+            Decision::RequireApproval
+        );
     }
 
     #[test]
@@ -497,14 +560,30 @@ mod tests {
             denied = ["/home/*/.ssh/**"]
             "#,
         );
-        let ctx = |p: &'static str| CallContext { path: Some(p), service: None };
-        assert_eq!(e.evaluate("fs.write", Some(Tier::T1), ctx("/home/dev/notes.md")), Decision::Allow);
-        assert_eq!(e.evaluate("fs.write", Some(Tier::T1), ctx("/var/home/dev/x")), Decision::Allow);
+        let ctx = |p: &'static str| CallContext {
+            path: Some(p),
+            service: None,
+        };
+        assert_eq!(
+            e.evaluate("fs.write", Some(Tier::T1), ctx("/home/dev/notes.md")),
+            Decision::Allow
+        );
+        assert_eq!(
+            e.evaluate("fs.write", Some(Tier::T1), ctx("/var/home/dev/x")),
+            Decision::Allow
+        );
         // Outside the allowed list => deny.
-        assert_eq!(e.evaluate("fs.write", Some(Tier::T1), ctx("/etc/passwd")), Decision::Deny);
+        assert_eq!(
+            e.evaluate("fs.write", Some(Tier::T1), ctx("/etc/passwd")),
+            Decision::Deny
+        );
         // Denied wins even inside the allowed list.
         assert_eq!(
-            e.evaluate("fs.write", Some(Tier::T1), ctx("/home/dev/.ssh/authorized_keys")),
+            e.evaluate(
+                "fs.write",
+                Some(Tier::T1),
+                ctx("/home/dev/.ssh/authorized_keys")
+            ),
             Decision::Deny
         );
     }
@@ -522,11 +601,24 @@ mod tests {
             denied = ["/var/lib/vibeos/audit/**", "/etc/shadow*"]
             "#,
         );
-        let ctx = |p: &'static str| CallContext { path: Some(p), service: None };
-        assert_eq!(e.evaluate("fs.read", Some(Tier::T0), ctx("/etc/os-release")), Decision::Allow);
-        assert_eq!(e.evaluate("fs.read", Some(Tier::T0), ctx("/etc/shadow")), Decision::Deny);
+        let ctx = |p: &'static str| CallContext {
+            path: Some(p),
+            service: None,
+        };
         assert_eq!(
-            e.evaluate("fs.read", Some(Tier::T0), ctx("/var/lib/vibeos/audit/vibed.jsonl")),
+            e.evaluate("fs.read", Some(Tier::T0), ctx("/etc/os-release")),
+            Decision::Allow
+        );
+        assert_eq!(
+            e.evaluate("fs.read", Some(Tier::T0), ctx("/etc/shadow")),
+            Decision::Deny
+        );
+        assert_eq!(
+            e.evaluate(
+                "fs.read",
+                Some(Tier::T0),
+                ctx("/var/lib/vibeos/audit/vibed.jsonl")
+            ),
             Decision::Deny
         );
     }
@@ -545,8 +637,14 @@ mod tests {
             denied = ["vibed.service", "systemd-journald.service"]
             "#,
         );
-        let ctx = |s: &'static str| CallContext { path: None, service: Some(s) };
-        assert_eq!(e.evaluate("svc.restart", Some(Tier::T2), ctx("vibed.service")), Decision::Deny);
+        let ctx = |s: &'static str| CallContext {
+            path: None,
+            service: Some(s),
+        };
+        assert_eq!(
+            e.evaluate("svc.restart", Some(Tier::T2), ctx("vibed.service")),
+            Decision::Deny
+        );
         assert_eq!(
             e.evaluate("svc.restart", Some(Tier::T2), ctx("sshd.service")),
             Decision::RequireApproval
@@ -568,7 +666,9 @@ mod tests {
         // Empty `tools`.
         parse_err("[[rule]]\nid = \"x\"\ntools = []\ntier = \"T0\"\naction = \"allow\"\n");
         // Legacy pre-canonical action value.
-        parse_err("[[rule]]\nid = \"x\"\ntools = [\"a\"]\ntier = \"T0\"\naction = \"require_approval\"\n");
+        parse_err(
+            "[[rule]]\nid = \"x\"\ntools = [\"a\"]\ntier = \"T0\"\naction = \"require_approval\"\n",
+        );
     }
 
     #[test]
@@ -584,7 +684,10 @@ mod tests {
         fs::write(dir.join("20-broken.toml"), "this is [ not TOML").expect("write broken file");
 
         let result = PolicyEngine::load_dir(&dir);
-        assert!(result.is_err(), "an invalid drop-in must abort the load (fail-closed)");
+        assert!(
+            result.is_err(),
+            "an invalid drop-in must abort the load (fail-closed)"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -594,7 +697,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vibed-policy-dup-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create test dir");
-        let rule = "[[rule]]\nid = \"same\"\ntools = [\"os.status\"]\ntier = \"T0\"\naction = \"allow\"\n";
+        let rule =
+            "[[rule]]\nid = \"same\"\ntools = [\"os.status\"]\ntier = \"T0\"\naction = \"allow\"\n";
         fs::write(dir.join("10-a.toml"), rule).expect("write a");
         fs::write(dir.join("20-b.toml"), rule).expect("write b");
 
@@ -611,6 +715,9 @@ mod tests {
         let engine = PolicyEngine::load_dir(&dir).expect("missing dir is not an error");
         assert_eq!(engine.rule_count(), 0);
         // Zero rules = absolute default-deny.
-        assert_eq!(engine.evaluate("os.status", Some(Tier::T0), NO_CTX), Decision::Deny);
+        assert_eq!(
+            engine.evaluate("os.status", Some(Tier::T0), NO_CTX),
+            Decision::Deny
+        );
     }
 }

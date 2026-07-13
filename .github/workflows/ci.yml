@@ -1,9 +1,14 @@
 # ci.yml — Code-level CI for VibeOS:
-#   * rust        vibed daemon (build + tests + clippy -D warnings). The
+#   * rust        vibed daemon (fmt --check + build + tests + clippy
+#                 --all-targets -D warnings, tout en --locked : le Cargo.lock
+#                 commité fait foi, jamais régénéré silencieusement). The
 #                 integration test suite loads the shipped policy file
 #                 security/policy.d/default.toml through the REAL parser, so a
 #                 policy/parser mismatch fails this job.
-#   * shellcheck  memory/genesis.sh (first-boot Genesis script)
+#   * audit       cargo audit (RustSec advisories) sur le Cargo.lock épinglé —
+#                 critère de sortie Phase 2 (ROADMAP.md §4).
+#   * shellcheck  memory/genesis.sh (first-boot Genesis script) and
+#                 os/rootfs/usr/bin/vibeos-hud (HUD launcher)
 #   * policy      quick schema validation of security/policy.d/*.toml with
 #                 Python tomllib (canonical [[rule]] schema: id / tools /
 #                 tier / action / approval), mirroring vibed's fail-closed
@@ -17,65 +22,113 @@ on:
       - "vibed/**"
       - "memory/**"
       - "security/**"
+      - "os/rootfs/usr/bin/**"
+      - "os/rootfs/usr/libexec/**"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "vibed/**"
       - "memory/**"
       - "security/**"
+      - "os/rootfs/usr/bin/**"
+      - "os/rootfs/usr/libexec/**"
       - ".github/workflows/ci.yml"
 
 permissions:
   contents: read
 
+# Un seul run par branche : un push rapproché annule le run précédent (les
+# minutes CI sont comptées, cf. ROADMAP.md §3 garde-fous).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
-    name: vibed — build, test, clippy
+    name: vibed — fmt, build, test, clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: vibed
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-08)
         with:
-          components: clippy
+          components: clippy, rustfmt
 
+      - name: Format (check only)
+        run: cargo fmt --check
+
+      # --locked partout : si Cargo.lock est désynchronisé de Cargo.toml, la CI
+      # échoue au lieu de régénérer le lock et de tester d'autres versions que
+      # celles épinglées (posture supply-chain, SECURITY.md).
       - name: Build
-        run: cargo build
+        run: cargo build --locked
 
       # Includes the integration test that loads the repository's
       # security/policy.d/default.toml with the real policy engine.
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
+      # --all-targets : le code des tests (nombreux tests unitaires +
+      # intégration) est linté au même niveau que le code de production.
       - name: Clippy (deny warnings)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-  shellcheck:
-    name: genesis.sh — shellcheck
+  audit:
+    name: vibed — cargo audit (RustSec)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: vibed
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-08)
+
+      # Prebuilt binary — no from-source recompile of cargo-audit and its ~200
+      # deps on every run (cohérent avec la politique de pins SHA du dépôt).
+      - name: Install cargo-audit (prebuilt)
+        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.9.4
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
+
+  shellcheck:
+    name: scripts shell — shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install shellcheck
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: shellcheck memory/genesis.sh
-        run: shellcheck memory/genesis.sh
+      - name: shellcheck (genesis.sh, vibeos-hud, vibeos-agents-group.sh)
+        run: |
+          shellcheck memory/genesis.sh \
+            os/rootfs/usr/bin/vibeos-hud \
+            os/rootfs/usr/libexec/vibeos/vibeos-agents-group.sh
 
   policy:
     name: policy.d — TOML schema validation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Fast structural check (the deep check is the Rust integration test in
       # the `rust` job, which uses vibed's real parser). Mirrors vibed's

@@ -7,11 +7,11 @@
 # Install target (image build, read-only /usr):
 #   /usr/share/plasma/look-and-feel/org.vibeos.dark/contents/defaults
 #
-# HONESTY / PHASE — the whole Global Theme is a Phase 2 deliverable
-# (DESKTOP.md §2.6, §9). In the v0.1 image ONLY the color scheme
-# (VibeOSDark.colors) ships; this package is authored now and copied into the
-# image + activated in Phase 2. Icons/cursors stay Breeze in v0.1 (design
-# system §9) — the VibeOS icon/cursor set is Phase 5.
+# HONESTY / PHASE — DELIVERED (Phase 2): this package ships in the image AND
+# is the system default, via the one-line pointer in /etc/xdg/kdeglobals
+# (LookAndFeelPackage=org.vibeos.dark — KConfig cascade, user-overridable;
+# see DESKTOP.md §2.6, §9). Icons/cursors stay Breeze for now (design system
+# §9) — the VibeOS icon/cursor set is Phase 5.
 #
 # FORMAT — KConfig "defaults" file. Each top-level [file][Group] header names
 # the config file KDE writes into (kdeglobals, plasmarc, kwinrc, kcminputrc,
@@ -23,9 +23,9 @@
 # Kvantum draws rounded controls (radius family, §4.1) and real blur on the
 # floating chrome only — menus & tooltips = glass-elevated (§6.1). App CONTENT
 # windows stay opaque (design rule: no glass on content, §2/§6).
-# Requires the `kvantum` package (Phase 2, declared in os/Containerfile — a
-# separate track) and the VibeOSDark Kvantum theme
-# (desktop/kvantum/VibeOSDark → /usr/share/Kvantum/VibeOSDark).
+# The `kvantum` engine is installed (os/Containerfile layer 1g) and the
+# VibeOSDark Kvantum theme ships at /usr/share/Kvantum/VibeOSDark, selected
+# per-user by /etc/skel/.config/Kvantum/kvantum.kvconfig.
 # GRACEFUL FALLBACK: if Kvantum is unavailable, set widgetStyle=Breeze — the
 # color scheme below still fully themes the desktop. "kvantum-dark" is the
 # dark-forcing variant for apps that ignore the palette.
@@ -100,6 +100,15 @@ BorderSizeAuto=false
 # a legibility dependency.
 blurEnabled=true
 contrastEnabled=true
+
+# ---- Default wallpaper --------------------------------------------------------
+# Wallpaper package name, resolved against /usr/share/wallpapers (KPackage).
+# "VibeOS" is the official default wallpaper (desktop/wallpapers/VibeOS,
+# PNG 1536x1024, scale-and-crop by Plasma). The alternatives (VibeOSDark
+# "Genesis" and VibeOSVoid) stay selectable in the picker. Users can change
+# it freely — this only sets the OUT-OF-BOX default via the Global Theme.
+[Wallpaper]
+Image=VibeOS
 
 # ---- Cursor (v0.1: Breeze; VibeOS cursor set = Phase 5) ----------------------
 [kcminputrc][Mouse]

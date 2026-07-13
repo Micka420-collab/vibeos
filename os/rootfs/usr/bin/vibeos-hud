@@ -1,0 +1,14 @@
+#!/bin/sh
+# VibeOS HUD launcher — the agent status bar (Quickshell) shipped in the image.
+#
+# The QML config is immutable image content at /usr/share/vibeos/quickshell/;
+# quickshell only resolves *named* configs (-c) from $XDG_CONFIG_HOME, so the
+# HUD is launched by explicit path. Autostarted per-user by
+# /etc/skel/.config/autostart/vibeos-hud.desktop (Plasma sessions only).
+#
+#   relaunch :  vibeos-hud
+#   stop     :  quickshell kill -p /usr/share/vibeos/quickshell
+#
+# To customize, copy the directory into ~/.config/quickshell/vibeos and run
+# `quickshell -c vibeos` instead — the image files are never modified.
+exec /usr/bin/quickshell -p /usr/share/vibeos/quickshell "$@"

@@ -1,6 +1,6 @@
 # Politique de sécurité — VibeOS
 
-> Version : 0.1 (2026-07-03) · Statut : projet en développement actif, **non destiné à la production**.
+> Version : 0.1.1 (2026-07-08) · Statut : projet en développement actif, **non destiné à la production**.
 > Documents associés : [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) · [docs/SECURITY-ARCHITECTURE.md](docs/SECURITY-ARCHITECTURE.md) · [ROADMAP.md](ROADMAP.md)
 
 VibeOS est une distribution Linux immuable, AI-native, dans laquelle des agents IA disposent d'un accès système direct via le daemon `vibed`. Ce modèle rend la sécurité non pas une fonctionnalité, mais **la contrainte structurante de toute l'architecture** : un agent IA est traité comme un *insider non fiable* en permanence.
@@ -17,13 +17,18 @@ Toute contribution, toute décision d'architecture et toute revue de code doiven
 - Aucun composant de VibeOS ne doit écrire dans `/usr`. L'état mutable est confiné à `/etc` (géré) et `/var`.
 
 ### 1.2 Vérifié
-- **Livré en v0.1** : les images OS sont signées avec sigstore/cosign (keyless) en CI, à chaque push sur la branche principale.
-- **Livré en v0.1** : les dépendances sont réellement épinglées — `vibed/Cargo.lock` commité, CLIs npm/pip installées en versions exactes, image de base référencée par digest (`fedora-kinoite:42@sha256:…`).
-- **Cible Phase 4** : chaîne de démarrage mesurée UEFI Secure Boot → UKI → dm-verity/composefs (à terme : ce qui démarre est ce qui a été signé, rien d'autre — la base Fedora bootc apporte déjà Secure Boot via shim et composefs), et vérification de signature exigée côté client avant tout `bootc upgrade`.
+- **Livré en v0.1** : les images OS publiées sont signées avec sigstore/cosign (keyless) en CI — la signature accompagne chaque **release** (tag `v*`, ou dispatch manuel explicitement confirmé) et porte sur le **digest du manifest multi-arch**, celui que référencent les tags de consommation (`latest`, `<sha>`, la version). Les push ordinaires sur la branche principale déclenchent un build de vérification **non publié et non signé**. (Note : les tags par architecture `:<sha>-amd64` / `:<sha>-arm64` poussés pendant une release sont des artefacts intermédiaires du manifest, non signés individuellement ; consommez toujours un tag de manifest et vérifiez sa signature.)
+- **Livré en v0.1** : les dépendances sont réellement épinglées — `vibed/Cargo.lock` commité, CLIs npm installées en versions exactes, image de base référencée par digest (`fedora-kinoite:42@sha256:…`), archives binaires (ollama) et sources compilées (quickshell) vérifiées par sha256 avant usage.
+- **Livré (2026-07-08, suites de l'audit)** :
+  - les **GitHub Actions sont épinglées par SHA de commit** (le tag lisible reste en commentaire ; un tag ne peut plus être déplacé sous la CI) ;
+  - les **dépôts COPR sont désactivés dans l'image livrée** — activés uniquement le temps de l'installation au build ; un système déployé ne fait jamais confiance à un COPR à l'exécution ;
+  - `npm install` s'exécute avec **`--ignore-scripts`** (les scripts de cycle de vie npm — vecteur classique d'exfiltration — ne s'exécutent pas au build), avec **deux exceptions délibérées et tracées**, rejouées via un `npm rebuild` ciblé : `@anthropic-ai/claude-code` (postinstall = binaire natif premier-parti) et `opencode-ai` (postinstall = câblage du binaire de plateforme livré dans ses propres optionalDependencies) — toutes deux détectées par la couche de vérification, comme prévu. Chaque CLI livrée est **prouvée fonctionnelle** (`--version`) dans une couche qui casse le build sinon, et `claude`/`opencode` sont re-prouvés **après purge** des répertoires de build (les binaires vivent bien dans `/usr`, pas dans un `$HOME` de build) ;
+  - un **manifeste NEVRA** (`/usr/share/vibeos/packages-nevra.txt`) enregistre l'inventaire RPM exact de chaque image — diffable entre releases, ré-auditable.
+- **Cible Phase 4** : chaîne de démarrage mesurée UEFI Secure Boot → UKI → dm-verity/composefs (à terme : ce qui démarre est ce qui a été signé, rien d'autre — la base Fedora bootc apporte déjà Secure Boot via shim et composefs), et **vérification de signature exigée côté client** avant tout `bootc upgrade` (politique containers `policy.json` sigstore — intestable tant que le flux d'upgrade n'est pas exercé sur machine réelle).
 
 ### 1.3 Chiffré
 - La mémoire de la machine (`/var/lib/vibeos/memory`) est créée au premier démarrage par `vibeos-genesis.service` (source : [memory/genesis.sh](memory/genesis.sh)). **En v0.1 elle est écrite en clair** : le chiffrement **LUKS** (déverrouillage TPM2 en option) est un livrable de la **Phase 3**, tout comme le mode amnésique qui la reconstruira en tmpfs à chaque boot (generator systemd). Documenté honnêtement — voir [docs/MEMORY.md](docs/MEMORY.md) et [ROADMAP.md](ROADMAP.md).
-- Règle invariable : les secrets (clés API des fournisseurs IA, jetons) ne sont **jamais stockés en clair**, jamais dans `environment.d`, et jamais dans la mémoire VibeOS : ils passent par `systemd-creds` (scellés TPM2 quand disponible) et le kernel keyring — voir [docs/SECURITY-ARCHITECTURE.md](docs/SECURITY-ARCHITECTURE.md), §4.
+- Règle invariable (de conception) : les secrets (clés API des fournisseurs IA, jetons) ne doivent **jamais être stockés en clair**, jamais dans `environment.d`, et jamais dans la mémoire VibeOS. Le mécanisme cible est `systemd-creds` (scellés TPM2 quand disponible) + kernel keyring — voir [docs/SECURITY-ARCHITECTURE.md](docs/SECURITY-ARCHITECTURE.md), §4 — **non câblé à ce stade** : aucun composant VibeOS ne collecte ni ne stocke encore ces secrets (les CLIs IA gèrent les leurs). En attendant, la denylist codée en dur de `vibed` interdit aux agents de lire les magasins de credentials, y compris ceux des agents IA eux-mêmes (`~/.claude/`, `~/.config/gh/`, `~/.gemini/`, `~/.codex/`, opencode, ollama…), pour tous les utilisateurs.
 - Le chiffrement intégral du disque à l'installation est l'objectif par défaut de l'ISO (installateur : Phase 5).
 
 ### 1.4 Audité
@@ -34,6 +39,7 @@ Toute contribution, toute décision d'architecture et toute revue de code doiven
 ### 1.5 Moindre privilège pour les agents IA
 - Aucun agent ne parle directement au système : tout passe par le serveur MCP de `vibed` (`/run/vibed/mcp.sock`, socket `root:vibeos-agents` en `0660`), qui applique le moteur de politiques (`/etc/vibeos/policy.d/*.toml` — la première règle qui matche gagne, chargement fail-closed : une politique invalide empêche `vibed` de servir).
 - Capacités hiérarchisées : **T0** observation (lecture seule) · **T1** modification utilisateur · **T2** modification système · **T3** destructif. **T2 et T3 exigent toujours une approbation humaine** (le tier est un plancher, jamais abaissable par une règle). Le défaut absolu est le refus.
+- **Trousse cybersécurité gouvernée** : VibeOS embarque une trousse de pentest/DFIR professionnelle (voir [docs/SECURITY-TOOLKIT.md](docs/SECURITY-TOOLKIT.md)). Ces outils doubles usage sont classés par tier : tout ce qui agit **activement contre une cible est T2**, le **destructif est T3** — donc soumis à approbation humaine côté agent. Un agent peut **découvrir** la trousse en lecture seule (`sectools.list`, T0) mais **n'exécute aucun outil** : le chemin d'exécution gouverné est lié au flux d'approbation de la Phase 4. Usage strictement autorisé (systèmes propres, engagements mandatés, CTF, recherche) ; aucun malware/ransomware embarqué.
 - **En v0.1, `vibed` tourne en root** — documenté honnêtement ; la bascule vers `User=vibed` avec `CapabilityBoundingSet` en allow-list vide est un livrable **Phase 4**. Le bac à sable d'exécution par outil (systemd-run, seccomp, Landlock) est un livrable **Phase 3**. SELinux est en mode `enforcing` (politique targeted Fedora) ; la politique dédiée à `vibed` est prévue en Phase 4.
 
 ---
@@ -43,8 +49,10 @@ Toute contribution, toute décision d'architecture et toute revue de code doiven
 **Ne créez jamais d'issue GitHub publique pour une vulnérabilité.**
 
 ### Canal de signalement
+> **État présent (dépôt privé)** : tant que le dépôt n'est pas public, seuls ses collaborateurs peuvent le voir — une issue du dépôt (privée de fait) est acceptable pour eux. Les deux canaux ci-dessous décrivent le dispositif à l'ouverture publique ; l'adresse e-mail de contact et la clé PGP seront publiées **dans ce fichier avant** la première release publique (bloquant de la Phase 6).
+
 1. **Préféré** : GitHub Security Advisories — onglet *Security → Report a vulnerability* du dépôt (signalement privé), dès que le dépôt public existe.
-2. **Alternative** : e-mail au mainteneur avec le préfixe de sujet `[VIBEOS-SEC]`. Une clé PGP de contact sera publiée dans ce fichier avant la première release publique.
+2. **Alternative** : e-mail au mainteneur avec le préfixe de sujet `[VIBEOS-SEC]` (adresse et clé PGP publiées ici avant la première release publique).
 
 ### Contenu attendu
 - Description de la vulnérabilité et composant affecté (`vibed`, moteur de politiques, genesis, image, CI…).
@@ -89,8 +97,8 @@ Le projet étant pré-1.0 et maintenu bénévolement, ces délais sont des objec
 
 ## 4. Pratiques de développement sécurisé
 
-- **Rust** pour `vibed` : pas d'`unsafe` sans justification commentée et revue dédiée. La CI livrée (`.github/workflows/ci.yml`) exécute `cargo build`, `cargo test` et `cargo clippy -- -D warnings` en bloquant ; `cargo audit` et `cargo deny` sont une cible Phase 2.
-- Dépendances épinglées — c'est effectif en v0.1 : `vibed/Cargo.lock` commité, paquets npm/pip installés en versions exactes, image de base référencée par digest. Les mises à jour de dépendances sont revues comme du code.
+- **Rust** pour `vibed` : pas d'`unsafe` sans justification commentée et revue dédiée. La CI livrée (`.github/workflows/ci.yml`) exécute en bloquant : `cargo fmt --check`, `cargo build --locked`, `cargo test --locked` (dont les tests d'intégration MCP bout-en-bout sur socket), `cargo clippy --all-targets --locked -- -D warnings` et **`cargo audit`** (advisories RustSec, job dédié) ; `cargo deny` reste une cible.
+- Dépendances épinglées — c'est effectif : `vibed/Cargo.lock` commité, paquets npm installés en versions exactes **avec `--ignore-scripts`**, image de base référencée par digest, GitHub Actions épinglées par SHA, archives/sources tierces vérifiées par sha256, inventaire NEVRA embarqué dans l'image. Les mises à jour de dépendances (dont les bumps de SHA d'Actions et de digest de base) sont revues comme du code, dans des commits dédiés.
 - Toute nouvelle capacité exposée aux agents (nouvel outil MCP) doit déclarer son tier, ses contraintes de chemin et son entrée dans le modèle de menace **avant** merge.
 - Les tests de non-régression sécurité livrés (refus par défaut, outil inconnu refusé, T2/T3 jamais auto-approuvés, chargement effectif de `security/policy.d/default.toml`, denylist de chemins) sont exécutés par la CI et bloquants ; la couverture s'étend à chaque nouvel outil.
 

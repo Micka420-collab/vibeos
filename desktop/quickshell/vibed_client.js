@@ -1,8 +1,9 @@
 // vibed_client.js — HUD-side client stub for the vibed MCP socket.
 //
-// v0.1 STATUS: this module documents the exact wire format and serves MOCK
-// data. No socket is opened anywhere in v0.1 (Phase 1 images have no
-// /usr/bin/vibed). TODO(Phase 2): wire the request builders below to a
+// STATUS: this module documents the exact wire format and serves MOCK data.
+// No socket is opened anywhere yet — /usr/bin/vibed IS shipped in the image
+// and runs at boot (Phase 2), but the HUD live wiring is still to be coded.
+// TODO(Phase 2): wire the request builders below to a
 // Quickshell.Io Socket in shell.qml (see the sketch in shell.qml's header).
 //
 // ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ function mockAgents() {
         { name: "opencode", tier: 0, awaitingApproval: false,
           activity: "fs.read journalctl output (T0)",
           project: "~/projects/api", elapsed: "1m03s" },
-        { name: "aider", tier: approvalPending ? 2 : 0,
+        { name: "opencode", tier: approvalPending ? 2 : 0,
           awaitingApproval: approvalPending,
           activity: approvalPending
               ? "pkg.install ripgrep — EN ATTENTE D'APPROBATION HUMAINE (T2)"

@@ -203,6 +203,8 @@ Un OS immuable déplace la confiance vers le pipeline de build : si le registry 
 - (−) Dépendance à la disponibilité de sigstore (Fulcio/Rekor) pour signer — pas pour booter : une machine installée reste autonome.
 - (−) Le placeholder `micka420-collab` doit être remplacé et l'identité CI épinglée dès la création du dépôt GitHub ; toute rotation d'identité CI = mise à jour coordonnée de la politique de vérification (procédure dans [BUILD.md](BUILD.md)).
 
+> **Recalage 2026-07-13** : la vérification côté client, notée « cible Phase 2 » ci-dessus, est **recalée en Phase 4** ([ROADMAP.md](../ROADMAP.md) fait foi) — la Phase 2 a livré `vibed` + MCP sans câbler la politique de vérification, qui rejoint le durcissement de la chaîne de mise à jour. Par ailleurs, le dépôt GitHub `Micka420-collab/vibeos` existe désormais : `micka420-collab` n'est plus un placeholder mais la forme minuscule du propriétaire réel.
+
 ---
 
 ## ADR-009 — Multi-architecture amd64 + arm64, couche NVIDIA limitée à amd64
@@ -226,3 +228,5 @@ VibeOS vise du matériel de développement réel. La machine de référence n°1
 - (−) Builds arm64 émulés via qemu-user-static : CI sensiblement plus lente ; à surveiller, avec bascule possible vers des runners arm64 natifs.
 - (−) Le kmod NVIDIA est lié à la version du noyau de l'image : chaque bump de noyau exige un rebuild complet (le pattern akmods au build le garantit).
 - (−) Sous Secure Boot, le module NVIDIA non signé ne se charge pas : jusqu'à la signature MOK (Phase 4), le GPU NVIDIA exige Secure Boot désactivé ou l'enrôlement manuel d'une clé — limite documentée dans [HARDWARE.md](HARDWARE.md).
+
+> **Évolution 2026-07-03 — runners natifs** : la CI ne passe plus par l'émulation qemu-user-static ; chaque architecture est construite sur son **runner natif** (`ubuntu-latest` pour amd64, `ubuntu-24.04-arm` pour arm64), jobs ISO compris. La conséquence « CI sensiblement plus lente » est levée ; le build local arm64 depuis un hôte amd64 reste possible via qemu ([BUILD.md](BUILD.md) §2.6).

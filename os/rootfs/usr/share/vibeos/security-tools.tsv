@@ -1,0 +1,85 @@
+# VibeOS security toolkit manifest — read by vibed's `sectools.list` (T0).
+# Format (TAB-separated): binary<TAB>category<TAB>tier<TAB>description
+# Tier = the VibeOS capability tier that gates AGENT invocation of the tool
+# (T0 passive/read, T1 local, T2 active-against-target [human approval],
+# T3 destructive/high-risk [human approval]). The human operator uses these
+# freely in the shell; the tier governs the (Phase 4) AI-invocation path.
+# Keep in strict sync with os/Containerfile (layer 1d-bis) and
+# docs/SECURITY-TOOLKIT.md. Lines starting with # and blank lines are ignored.
+#
+# --- Reconnaissance & OSINT ---
+dig	recon	T0	DNS lookups (bind-utils): resolve records, zone data
+whois	recon	T0	Domain/IP registration (WHOIS) lookups
+exiftool	recon	T0	Read file/image metadata (EXIF, authorship, GPS)
+dnsenum	recon	T2	DNS enumeration + zone-transfer / brute against a target
+#
+# --- Network scanning & traffic ---
+nmap	network	T2	Port/service/OS scanning + NSE scripts against a target
+ncat	network	T2	Netcat: arbitrary TCP/UDP connections, listeners, relays
+masscan	network	T2	Internet-scale asynchronous port scanner
+tcpdump	network	T1	Packet capture/analysis on a local interface
+tshark	network	T1	Wireshark CLI: capture and dissect traffic
+ngrep	network	T1	grep across live network traffic
+hping3	network	T2	Crafted TCP/IP packets, port scanning, path probing
+tcpreplay	network	T2	Replay captured traffic onto a network
+arp-scan	network	T2	Discover hosts via ARP on the local segment
+nbtscan	network	T2	Scan NetBIOS name information on a network
+macchanger	network	T1	View/change a local interface MAC address
+proxychains4	network	T1	Force any TCP tool through a proxy chain
+tor	network	T1	Anonymizing overlay network client
+dsniff	network	T3	Network sniffing/MITM suite (arpspoof, dnsspoof…)
+ettercap	network	T3	Man-in-the-middle framework (ARP poisoning, filters)
+#
+# --- Web application security ---
+whatweb	web	T2	Fingerprint web technologies of a target site
+wfuzz	web	T2	Web content/parameter fuzzer
+gobuster	web	T2	Directory/DNS/vhost brute-forcing
+ffuf	web	T2	Fast web fuzzer (content discovery, parameters)
+#
+# --- Password attacks & cracking ---
+hydra	passwords	T2	Online brute-force of network login services
+john	passwords	T1	Offline password hash cracking (John the Ripper)
+hashcat	passwords	T1	GPU-accelerated offline hash cracking (CUDA layer)
+medusa	passwords	T2	Parallel online login brute-forcer
+ncrack	passwords	T2	High-speed network authentication cracker
+#
+# --- Wireless ---
+aircrack-ng	wireless	T2	Wi-Fi WEP/WPA analysis and key recovery suite
+reaver	wireless	T2	WPS PIN brute-force attack
+pixiewps	wireless	T1	Offline WPS pixie-dust computation
+hcxpcapngtool	wireless	T1	Convert/extract Wi-Fi captures for hashcat
+kismet	wireless	T1	Passive wireless sniffer / IDS
+#
+# --- Reverse engineering & binary analysis ---
+radare2	reverse	T1	Reverse-engineering framework (disasm, debug)
+rizin	reverse	T1	radare2 fork: RE framework
+binwalk	reverse	T1	Firmware/blob analysis and extraction
+yara	reverse	T1	Pattern-matching engine for malware classification
+gdb	reverse	T1	GNU debugger (dynamic analysis)
+strace	reverse	T1	Trace system calls of a local process
+ltrace	reverse	T1	Trace library calls of a local process
+patchelf	reverse	T1	Modify ELF interpreter/rpath of a binary
+upx	reverse	T1	Executable packer/unpacker
+checksec	reverse	T1	Report binary hardening (RELRO, NX, PIE, canary)
+pwn	exploitation	T1	pwntools: CTF/exploit development framework
+#
+# --- Exploitation & post-exploitation ---
+impacket-secretsdump	exploitation	T2	Impacket suite: SMB/AD network protocol tooling
+#
+# --- Forensics & DFIR ---
+fls	forensics	T1	Sleuth Kit: list files in a disk image
+foremost	forensics	T1	File carving/recovery from images
+scalpel	forensics	T1	Fast file carver
+testdisk	forensics	T1	Partition recovery and repair
+chntpw	forensics	T1	Offline Windows registry / password editor
+steghide	forensics	T1	Hide/extract data in images and audio (steganography)
+#
+# --- Defensive / audit ---
+clamscan	defense	T0	ClamAV antivirus file scanning (read-only)
+rkhunter	defense	T1	Rootkit hunter (local system audit)
+lynis	defense	T1	Security auditing / hardening assessment
+chkrootkit	defense	T1	Local rootkit detection
+aide	defense	T1	File integrity checking (AIDE)
+oscap	defense	T1	OpenSCAP: SCAP compliance scanning
+suricata	defense	T1	High-performance network IDS/IPS
+age	defense	T0	Modern file encryption (local)

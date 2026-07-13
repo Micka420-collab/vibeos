@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vibeos": {
+      "command": "socat",
+      "args": ["STDIO", "UNIX-CONNECT:/run/vibed/mcp.sock"]
+    }
+  }
+}

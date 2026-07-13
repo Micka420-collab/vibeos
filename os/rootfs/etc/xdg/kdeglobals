@@ -1,0 +1,10 @@
+# VibeOS — system-wide KDE defaults (KConfig cascade via XDG_CONFIG_DIRS).
+# ONE pointer only: the Global Theme package org.vibeos.dark carries every
+# other default in its contents/defaults file (single source of truth —
+# desktop/look-and-feel/org.vibeos.dark). Users override freely in
+# ~/.config/kdeglobals; the OSTree 3-way /etc merge preserves local admin
+# edits to this file across image updates.
+# Guarded in os/Containerfile: the build fails if the base image ever starts
+# shipping its own /etc/xdg/kdeglobals, so a conflict is merged deliberately.
+[KDE]
+LookAndFeelPackage=org.vibeos.dark

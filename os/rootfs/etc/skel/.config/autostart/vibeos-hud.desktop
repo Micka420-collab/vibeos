@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VibeOS HUD
+Name[fr]=HUD VibeOS
+Comment=Agent status bar (policy tiers, vibed, ollama) — Quickshell
+Comment[fr]=Barre d'état des agents (tiers de policy, vibed, ollama) — Quickshell
+Exec=/usr/bin/vibeos-hud
+TryExec=quickshell
+Icon=org.quickshell
+OnlyShowIn=KDE;
+X-KDE-StartupNotify=false
