@@ -153,7 +153,12 @@ async fn main() -> std::io::Result<()> {
                         let audit = Arc::clone(&audit);
                         let limiter = Arc::clone(&limiter);
                         tokio::spawn(mcp::handle_connection(
-                            stream, policy, audit, limiter, caller,
+                            stream,
+                            policy,
+                            audit,
+                            limiter,
+                            caller,
+                            std::path::PathBuf::from(vibed::approval::APPROVAL_DIR),
                         ));
                     }
                     Err(e) => {

@@ -38,6 +38,7 @@ struct Server {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
     audit_dir: PathBuf,
+    approval_dir: PathBuf,
     scratch: PathBuf,
 }
 
@@ -57,6 +58,7 @@ impl Server {
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch).expect("create scratch dir");
         let audit_dir = scratch.join("audit");
+        let approval_dir = scratch.join("approvals");
 
         let policy =
             Arc::new(PolicyEngine::load_dir(&repo_policy_dir()).expect("shipped policy must load"));
@@ -70,7 +72,12 @@ impl Server {
 
         let (client, server) = UnixStream::pair().expect("unix socketpair");
         tokio::spawn(mcp::handle_connection(
-            server, policy, audit, limiter, caller,
+            server,
+            policy,
+            audit,
+            limiter,
+            caller,
+            approval_dir.clone(),
         ));
 
         let (read_half, write_half) = client.into_split();
@@ -78,6 +85,7 @@ impl Server {
             reader: BufReader::new(read_half),
             writer: write_half,
             audit_dir,
+            approval_dir,
             scratch,
         }
     }
@@ -301,6 +309,91 @@ async fn t2_refusal_and_builtin_denylist_are_explicit_and_audited() {
     for record in &records {
         assert_eq!(record["caller_uid"], TEST_UID);
     }
+
+    srv.cleanup();
+}
+
+/// Full T2 human-approval chain over the real socket: an agent's `svc.restart`
+/// is refused (tier floor), the operator grants it out of band (as `vibectl
+/// approve` does), the agent re-issues the SAME call, the one-shot grant flips
+/// the decision to Allow, the backend runs, and the audit trail records WHO
+/// approved. This is the "agent asks -> human approves -> action executes ->
+/// audit proves it" demonstration, minus the real systemctl success (asserted
+/// hermetically in the `svc_restart_actually_invokes_systemctl` unit test — a
+/// non-root test process cannot restart a real unit).
+#[tokio::test]
+async fn t2_svc_restart_human_approval_chain_end_to_end() {
+    let mut srv = Server::start("svc-restart-approval");
+    let unit = "vibeos-approval-e2e.service";
+
+    // 1. No grant yet: the T2 floor refuses and records a pending request.
+    let (is_error, text) = srv.tool_call(1, "svc.restart", json!({"unit": unit})).await;
+    assert!(is_error, "a T2 svc.restart without a grant must be refused");
+    assert!(
+        text.contains("requires human approval"),
+        "the refusal must explain why: {text}"
+    );
+
+    // 2. Operator approves out of band — exactly what `vibectl approve <id>`
+    //    does: read the one pending request and mint a one-shot grant for it.
+    let pending = vibed::approval::list_pending(&srv.approval_dir);
+    assert_eq!(
+        pending.len(),
+        1,
+        "one pending approval expected: {pending:?}"
+    );
+    let id = pending[0]["id"].as_str().expect("pending id").to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    const OPERATOR_UID: u32 = 0;
+    vibed::approval::approve(&srv.approval_dir, &id, Some(OPERATOR_UID), now)
+        .expect("operator approve mints a grant");
+
+    // 3. Agent re-issues the identical call. The one-shot grant is consumed and
+    //    the decision flips to Allow (we do not assert on the systemctl outcome:
+    //    a non-root process cannot restart a real unit — the governance chain is
+    //    the claim here).
+    let _ = srv.tool_call(2, "svc.restart", json!({"unit": unit})).await;
+
+    // 4. The audit trail proves every link of the chain.
+    let records = srv.audit_records();
+    let svc: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["tool"] == "svc.restart")
+        .collect();
+
+    assert!(
+        svc.iter()
+            .any(|r| r["decision"] == "require_approval" && r["outcome"] == "pending_approval"),
+        "first call must be audited require_approval/pending_approval: {svc:?}"
+    );
+
+    let started = svc
+        .iter()
+        .find(|r| {
+            r["decision"] == "allow"
+                && r["outcome"]
+                    .as_str()
+                    .is_some_and(|o| o.starts_with("started_approved"))
+        })
+        .expect("the approved re-issue must audit an allow/started_approved record");
+    assert!(
+        started["outcome"].as_str().unwrap().contains("by_uid=0"),
+        "the approver uid (0) must be recorded in the audit outcome: {started:?}"
+    );
+
+    for r in &svc {
+        assert_eq!(r["target"], unit, "the unit is the audit target");
+        assert_eq!(r["caller_uid"], TEST_UID, "the agent uid is stamped");
+    }
+
+    // One-shot: the grant was consumed, nothing lingers in the store.
+    assert!(
+        vibed::approval::list_pending(&srv.approval_dir).is_empty(),
+        "no pending request should remain once approved and consumed"
+    );
 
     srv.cleanup();
 }
