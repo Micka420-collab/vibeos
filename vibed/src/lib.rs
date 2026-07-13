@@ -8,3 +8,4 @@ pub mod glob;
 pub mod mcp;
 pub mod policy;
 pub mod sha256;
+pub mod vibectl;

@@ -40,8 +40,9 @@ FROM registry.fedoraproject.org/fedora:42 AS vibed-builder
 RUN dnf -y install cargo && dnf clean all
 COPY vibed/ /src/vibed/
 WORKDIR /src/vibed
+# Builds both binaries of the crate: vibed (daemon) and vibectl (operator CLI).
 RUN cargo build --release --locked \
- && strip target/release/vibed
+ && strip target/release/vibed target/release/vibectl
 
 # -----------------------------------------------------------------------------
 # PHASE 2: build Quickshell from source (multi-stage). Fedora 42 has no
@@ -537,6 +538,8 @@ COPY desktop/quickshell /usr/share/vibeos/quickshell
 # (fail-closed on invalid policy) and writes the audit log under StateDirectory
 # /var/lib/vibeos. See vibed/README.md and docs/ARCHITECTURE.md.
 COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed
+# vibectl — read-only operator CLI (memory status, audit-chain verification).
+COPY --from=vibed-builder /src/vibed/target/release/vibectl /usr/bin/vibectl
 
 # --- PHASE 2: install quickshell from the builder stage -----------------------
 # bin/qs + bin/quickshell, the Quickshell QML modules (lib64/qt6/qml) and the
