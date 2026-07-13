@@ -1,0 +1,31 @@
+# vibeos-agents-group.service — enroll human administrators (wheel) into the
+# vibeos-agents group, so the vibed MCP socket (root:vibeos-agents 0660) is
+# usable out of the box on a fresh install. See the script for the policy
+# rationale (wheel members already hold sudo: strictly no escalation).
+#
+# Oneshot at every boot, idempotent. Group membership becomes effective at
+# the user's next login, so running once per boot (before graphical logins)
+# is the right cadence.
+
+[Unit]
+Description=VibeOS: enroll wheel administrators into vibeos-agents
+Documentation=https://github.com/Micka420-collab/vibeos
+# The vibeos-agents group is created by sysusers.d (vibeos.conf).
+After=systemd-sysusers.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/vibeos/vibeos-agents-group.sh
+# usermod rewrites /etc/group and needs root; keep the rest locked down.
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

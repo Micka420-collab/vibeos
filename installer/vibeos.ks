@@ -102,6 +102,10 @@ rootpw --lock
 # (or switch to --sshkey) before any real deployment.
 # (Official test ISOs inject the user via bootc-image-builder config.toml
 # [[customizations.user]] instead — docs/BUILD.md §4.1.)
+# NOTE vibeos-agents : inutile de le lister dans --groups — au premier boot,
+# vibeos-agents-group.service enrôle automatiquement tous les membres de
+# wheel dans vibeos-agents (accès au socket MCP de vibed). Le mentionner ici
+# reste correct mais redondant.
 #user --name=vibe --groups=wheel --password=changeme --plaintext
 #sshkey --username=vibe "ssh-ed25519 AAAA... you@machine"
 
@@ -113,12 +117,16 @@ set -eu
 #    The image already ships /usr/lib/systemd/system-preset/50-vibeos.preset
 #    and presets are applied at image build; re-running here is
 #    belt-and-suspenders for units the installer environment may have
-#    touched. Note the v0.1 semantics (docs/ARCHITECTURE.md §4.1):
+#    touched. Semantics (docs/ARCHITECTURE.md §4.1):
 #      * vibeos-genesis.service runs at FIRST BOOT only
 #        (ConditionPathExists=!/var/lib/vibeos/memory/.initialized)
-#      * vibed.service is enabled but SKIPPED while /usr/bin/vibed does not
-#        exist (Phase 1) — "condition failed" is the expected, healthy state.
-systemctl preset vibeos-genesis.service vibed.service || true
+#      * vibed.service starts at boot: /usr/bin/vibed is embedded in the
+#        image (multi-stage build) since Phase 2. Its ConditionPathExists
+#        guard remains as a safety belt.
+#      * vibeos-agents-group.service enrolls wheel members into vibeos-agents
+#        at every boot (idempotent), making the MCP socket usable out of the
+#        box.
+systemctl preset vibeos-genesis.service vibed.service vibeos-agents-group.service || true
 
 # 2) Install stamp — /etc is the writable config layer (NEVER write /usr:
 #    it is immutable image content).

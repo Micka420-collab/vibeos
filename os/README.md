@@ -17,7 +17,7 @@ détaillées dans [`docs/HARDWARE.md`](../docs/HARDWARE.md).
 |---|---|
 | `Containerfile` | Recette bootc complète (paquets, VS Code, couche NVIDIA amd64, ollama vérifié par sha256, CLIs IA épinglées, overlay, politiques, lint). **Contexte de build = racine du dépôt.** |
 | `rootfs/` | Overlay copié tel quel à la racine de l'image (`COPY os/rootfs/ /`). Miroir exact de l'arborescence cible. |
-| `rootfs/usr/lib/systemd/system/` | Unités `vibed.service` et `vibeos-genesis.service`. |
+| `rootfs/usr/lib/systemd/system/` | Unités `vibed.service`, `vibeos-genesis.service` et `vibeos-agents-group.service` (enrôle les membres de `wheel` dans `vibeos-agents` à chaque boot — socket MCP utilisable sans `usermod` manuel). |
 | `rootfs/usr/lib/systemd/system-preset/50-vibeos.preset` | Activation des unités par *preset* (appliqué au premier boot, jamais de `systemctl enable` au build). |
 | `rootfs/usr/lib/sysusers.d/vibeos.conf` | Création au premier boot de l'utilisateur système `vibed` et du groupe `vibeos-agents` (accès au socket MCP `root:vibeos-agents 0660`). |
 | `rootfs/usr/lib/vibeos/image-info.json` | Identité de l'image (nom, version, variante, architectures, date). |

@@ -23,6 +23,7 @@ on:
       - "memory/**"
       - "security/**"
       - "os/rootfs/usr/bin/**"
+      - "os/rootfs/usr/libexec/**"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
@@ -30,6 +31,7 @@ on:
       - "memory/**"
       - "security/**"
       - "os/rootfs/usr/bin/**"
+      - "os/rootfs/usr/libexec/**"
       - ".github/workflows/ci.yml"
 
 permissions:
@@ -110,8 +112,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: shellcheck (genesis.sh, vibeos-hud)
-        run: shellcheck memory/genesis.sh os/rootfs/usr/bin/vibeos-hud
+      - name: shellcheck (genesis.sh, vibeos-hud, vibeos-agents-group.sh)
+        run: |
+          shellcheck memory/genesis.sh \
+            os/rootfs/usr/bin/vibeos-hud \
+            os/rootfs/usr/libexec/vibeos/vibeos-agents-group.sh
 
   policy:
     name: policy.d — TOML schema validation

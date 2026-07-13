@@ -8,9 +8,11 @@
 //   │ (claude / opencode / ...)  │  vibed audit log   │
 //   └────────────────────────────┴────────────────────┘
 //
-// v0.1 honesty note: the vibed daemon ships in Phase 2. Until it writes
-// /var/lib/vibeos/audit/vibed.jsonl, the log pane shows a clean "offline"
-// message and retries quietly — it never crashes.
+// The vibed daemon ships in the image and starts at boot. Its audit journal
+// (/var/lib/vibeos/audit/vibed.jsonl) is root-only BY DESIGN (agents must
+// never read it), so the pane shows the daemon's live status and the sudo
+// hint instead — and tails the journal when it IS readable (e.g. zellij run
+// from a root session during forensics).
 
 layout {
     default_tab_template {
@@ -38,10 +40,11 @@ layout {
                     args "-c" "if command -v lazygit >/dev/null 2>&1; then exec lazygit; else echo; echo '  lazygit est introuvable dans cette session.'; echo '  Utilisez git directement dans ce pane.'; exec ${SHELL:-bash}; fi"
                 }
 
-                // vibed audit trail — graceful when the daemon is offline
-                // (file absent in Phase 1, or not readable by this user).
-                pane name="vibed audit" size="45%" command="bash" {
-                    args "-c" "AUDIT=/var/lib/vibeos/audit/vibed.jsonl; while true; do if [ -r $AUDIT ]; then clear; echo '  ── journal d’audit vibed ──'; tail -n 40 -F $AUDIT; else clear; echo; echo '  [vibed hors ligne]'; echo; echo '  Journal d’audit indisponible :'; echo '  /var/lib/vibeos/audit/vibed.jsonl'; echo; echo '  Le démon vibed arrive en Phase 2.'; echo '  Nouvelle tentative dans 15 s…'; fi; sleep 15; done"
+                // vibed status pane — tails the audit journal when readable
+                // (root session), otherwise shows the daemon's live state and
+                // the sudo hint. Graceful when vibed is stopped.
+                pane name="vibed" size="45%" command="bash" {
+                    args "-c" "AUDIT=/var/lib/vibeos/audit/vibed.jsonl; while true; do clear; if [ -r $AUDIT ]; then echo '  ── journal d’audit vibed ──'; tail -n 40 -F $AUDIT; elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet vibed 2>/dev/null; then echo; echo '  [vibed actif] — MCP : /run/vibed/mcp.sock'; echo; echo '  Le journal d’audit est réservé à root (par conception) :'; echo '  sudo tail -f /var/lib/vibeos/audit/vibed.jsonl'; echo; echo '  Accès agents : groupe vibeos-agents (wheel enrôlé au boot).'; else echo; echo '  [vibed hors ligne]'; echo; echo '  systemctl status vibed   # diagnostic'; echo; echo '  Nouvelle tentative dans 15 s…'; fi; sleep 15; done"
                 }
             }
         }

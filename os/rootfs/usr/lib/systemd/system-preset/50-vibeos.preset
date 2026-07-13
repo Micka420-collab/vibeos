@@ -3,9 +3,13 @@
 # Image-based enablement: systemd applies presets automatically on first boot
 # (when /etc/machine-id is uninitialized), so the build never runs
 # `systemctl enable` and /etc stays free of build-time side effects.
-# Both units carry their own runtime guards:
-#   * vibed.service          ConditionPathExists=/usr/bin/vibed (Phase 2 binary)
-#   * vibeos-genesis.service ConditionPathExists=!/var/lib/vibeos/memory/.initialized
+# The units carry their own runtime guards:
+#   * vibed.service            ConditionPathExists=/usr/bin/vibed (binaire
+#                              embarqué depuis la Phase 2 ; la garde reste une
+#                              ceinture de sécurité)
+#   * vibeos-genesis.service   ConditionPathExists=!/var/lib/vibeos/memory/.initialized
+#   * vibeos-agents-group.service  idempotent (oneshot à chaque boot)
 
 enable vibed.service
 enable vibeos-genesis.service
+enable vibeos-agents-group.service

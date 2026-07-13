@@ -24,9 +24,12 @@ Agents en ligne de commande : `claude`, `opencode`, `gemini`,
 
 - **Premier `nvim`** : les plugins s'installent automatiquement — réseau
   requis **une seule fois**, tout fonctionne hors ligne ensuite.
-- **v0.1, en toute honnêteté** : le démon `vibed` (policy tiers T0–T3,
-  journal d'audit) arrive en **Phase 2**. Le pane « vibed audit » du layout
-  `vibe` affiche « hors ligne » d'ici là — c'est prévu, pas un bug.
+- **Le démon `vibed` tourne** : embarqué dans l'image, il démarre au boot
+  (politique tiers T0–T3 fail-closed, journal d'audit, serveur MCP sur
+  `/run/vibed/mcp.sock`). Les administrateurs (groupe `wheel`) sont enrôlés
+  automatiquement dans `vibeos-agents` — l'accès au socket est effectif à la
+  connexion suivante. Le journal d'audit est réservé à root, par conception :
+  `sudo tail -f /var/lib/vibeos/audit/vibed.jsonl`.
 - **OS immuable** : `npm i -g` installe dans `~/.npm-global`, `mise` gère
   vos toolchains dans `$HOME`, `distrobox` couvre le reste. Rien ne touche
   jamais `/usr`.
