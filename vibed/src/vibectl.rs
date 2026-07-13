@@ -65,7 +65,12 @@ pub fn approve(id: &str) -> (Value, bool) {
     if let Err(e) = require_root(euid) {
         return (e, false);
     }
-    match approval::approve(Path::new(approval::APPROVAL_DIR), id, euid, now_epoch_secs()) {
+    match approval::approve(
+        Path::new(approval::APPROVAL_DIR),
+        id,
+        euid,
+        now_epoch_secs(),
+    ) {
         Ok(grant) => (json!({"approved": id, "grant": grant}), true),
         Err(e) => (json!({"error": e.to_string(), "id": id}), false),
     }

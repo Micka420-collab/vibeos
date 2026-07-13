@@ -8,5 +8,6 @@ pub mod audit;
 pub mod glob;
 pub mod mcp;
 pub mod policy;
+pub mod ratelimit;
 pub mod sha256;
 pub mod vibectl;

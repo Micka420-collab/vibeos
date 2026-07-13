@@ -24,6 +24,7 @@ use tracing::{error, info, warn};
 use vibed::audit::{self, Caller};
 use vibed::mcp;
 use vibed::policy;
+use vibed::ratelimit;
 
 /// MCP unix socket. Parent directory is normally provided by systemd
 /// (`RuntimeDirectory=vibed`); we create it as a fallback for dev runs.
@@ -82,6 +83,9 @@ async fn main() -> std::io::Result<()> {
         }
     };
     let audit = Arc::new(audit::AuditLog::open_default());
+    // Process-wide per-uid rate limiter, shared across all connections so an
+    // agent cannot multiply its budget by opening many sockets.
+    let limiter = Arc::new(ratelimit::RateLimiter::default());
 
     // Socket setup: create runtime dir if needed, remove a stale socket left
     // by a previous unclean shutdown, then bind and restrict permissions.
@@ -147,7 +151,10 @@ async fn main() -> std::io::Result<()> {
                         };
                         let policy = Arc::clone(&policy);
                         let audit = Arc::clone(&audit);
-                        tokio::spawn(mcp::handle_connection(stream, policy, audit, caller));
+                        let limiter = Arc::clone(&limiter);
+                        tokio::spawn(mcp::handle_connection(
+                            stream, policy, audit, limiter, caller,
+                        ));
                     }
                     Err(e) => {
                         warn!("accept error: {e}");

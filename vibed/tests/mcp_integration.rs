@@ -46,6 +46,12 @@ impl Server {
     /// main.rs does after accept(): shipped policy, JSONL audit log, caller
     /// identity captured at accept time.
     fn start(tag: &str) -> Self {
+        // Generous limiter so the e2e handshake + a few calls never trip it.
+        Self::start_with_limiter(tag, vibed::ratelimit::RateLimiter::default())
+    }
+
+    /// Like `start`, but with a caller-provided rate limiter (for the flood test).
+    fn start_with_limiter(tag: &str, limiter: vibed::ratelimit::RateLimiter) -> Self {
         let scratch =
             std::env::temp_dir().join(format!("vibed-mcp-e2e-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
@@ -55,6 +61,7 @@ impl Server {
         let policy =
             Arc::new(PolicyEngine::load_dir(&repo_policy_dir()).expect("shipped policy must load"));
         let audit = Arc::new(AuditLog::new(audit_dir.clone()));
+        let limiter = Arc::new(limiter);
         let caller = Caller {
             uid: Some(TEST_UID),
             gid: Some(TEST_UID),
@@ -62,7 +69,9 @@ impl Server {
         };
 
         let (client, server) = UnixStream::pair().expect("unix socketpair");
-        tokio::spawn(mcp::handle_connection(server, policy, audit, caller));
+        tokio::spawn(mcp::handle_connection(
+            server, policy, audit, limiter, caller,
+        ));
 
         let (read_half, write_half) = client.into_split();
         Self {
@@ -292,6 +301,46 @@ async fn t2_refusal_and_builtin_denylist_are_explicit_and_audited() {
     for record in &records {
         assert_eq!(record["caller_uid"], TEST_UID);
     }
+
+    srv.cleanup();
+}
+
+#[tokio::test]
+async fn per_uid_rate_limit_refuses_a_flood_and_audits_it() {
+    // Capacity 2, no refill: the third tool call in the burst is over-limit.
+    let mut srv =
+        Server::start_with_limiter("ratelimit", vibed::ratelimit::RateLimiter::new(2.0, 0.0));
+
+    // The handshake methods are not tools/call, so they cost no tokens.
+    let _ = srv.request(1, "initialize", json!({})).await;
+
+    // Two T0 calls fit in the burst.
+    let (e1, _) = srv.tool_call(2, "os.status", json!({})).await;
+    let (e2, _) = srv.tool_call(3, "os.status", json!({})).await;
+    assert!(!e1 && !e2, "the first two calls are within the burst");
+
+    // The third is refused BY THE LIMITER — before policy/execution.
+    let (e3, text3) = srv.tool_call(4, "os.status", json!({})).await;
+    assert!(e3, "the third call must be rate-limited");
+    assert!(
+        text3.contains("rate limit exceeded"),
+        "the refusal must name the rate limit: {text3}"
+    );
+
+    // The rejection is a security signal: it lands in the tamper-evident audit.
+    let records = srv.audit_records();
+    let limited: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["outcome"] == "rate_limited")
+        .collect();
+    assert_eq!(limited.len(), 1, "exactly one rate-limited record");
+    assert_eq!(limited[0]["tool"], "os.status");
+    assert_eq!(limited[0]["decision"], "deny");
+    assert_eq!(limited[0]["caller_uid"], TEST_UID);
+    // The two allowed calls produced started+ok; the limited one did NOT execute
+    // (no 'ok' for the third), so os.status has 2*2 + 1 = 5 records total.
+    let os_status = records.iter().filter(|r| r["tool"] == "os.status").count();
+    assert_eq!(os_status, 5, "2 allowed (started+ok) + 1 rate-limited");
 
     srv.cleanup();
 }

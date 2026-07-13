@@ -6,12 +6,14 @@
 //!
 //! Call pipeline — no exceptions:
 //!   1. path/service arguments are extracted and lexically normalized;
-//!   2. the BUILT-IN hard denylist is checked in code, regardless of policy;
-//!   3. `policy::evaluate(tool, tier, ctx)` -> Allow | Deny | RequireApproval
+//!   2. per-uid rate limiting (token bucket, SO_PEERCRED): over-limit calls are
+//!      refused fail-closed and audited (`rate_limited`), never executed;
+//!   3. the BUILT-IN hard denylist is checked in code, regardless of policy;
+//!   4. `policy::evaluate(tool, tier, ctx)` -> Allow | Deny | RequireApproval
 //!      (first matching rule wins, absolute default-deny, T2/T3 floor);
-//!   4. `audit::record(...)` with the caller identity (SO_PEERCRED) —
+//!   5. `audit::record(...)` with the caller identity (SO_PEERCRED) —
 //!      fail-closed on the Allow path;
-//!   5. execution (only if allowed), then a second audit record with the
+//!   6. execution (only if allowed), then a second audit record with the
 //!      final outcome.
 //!
 //! v0.1 honesty note: tools run in-process under `spawn_blocking`. Per-tool
@@ -192,6 +194,7 @@ pub async fn handle_connection(
     stream: UnixStream,
     policy: Arc<PolicyEngine>,
     audit: Arc<AuditLog>,
+    limiter: Arc<crate::ratelimit::RateLimiter>,
     caller: Caller,
 ) {
     info!(
@@ -247,7 +250,7 @@ pub async fn handle_connection(
         let response = match serde_json::from_str::<Request>(line) {
             Ok(request) => {
                 let is_notification = request.id.is_none();
-                let response = dispatch(request, &policy, &audit, caller).await;
+                let response = dispatch(request, &policy, &audit, &limiter, caller).await;
                 if is_notification {
                     None
                 } else {
@@ -319,6 +322,7 @@ async fn dispatch(
     request: Request,
     policy: &Arc<PolicyEngine>,
     audit: &AuditLog,
+    limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
 ) -> Value {
     debug!("dispatch method={}", request.method);
@@ -340,7 +344,7 @@ async fn dispatch(
         "notifications/initialized" => result_response(id, json!({})),
         "ping" => result_response(id, json!({})),
         "tools/list" => result_response(id, json!({ "tools": list_tools() })),
-        "tools/call" => handle_tools_call(id, request.params, policy, audit, caller).await,
+        "tools/call" => handle_tools_call(id, request.params, policy, audit, limiter, caller).await,
         other => error_response(id, -32601, &format!("method not found: {other}")),
     }
 }
@@ -350,6 +354,7 @@ async fn handle_tools_call(
     params: Value,
     policy: &Arc<PolicyEngine>,
     audit: &AuditLog,
+    limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
 ) -> Value {
     let name = params
@@ -394,6 +399,30 @@ async fn handle_tools_call(
     // action's subject (which file / unit / package) is recoverable in
     // forensics — never any file content or secret argument.
     let target = audit_target(&name, normalized_path.as_deref(), service, &args);
+
+    // Per-uid rate limiting: bound a runaway or compromised agent BEFORE any
+    // execution, memory write or approval-store growth. Over-limit calls are
+    // refused fail-closed and audited (the rejection itself is a security
+    // signal), never executed. Keyed by the unforgeable SO_PEERCRED uid.
+    if !limiter.check(caller.uid, now_epoch_secs()) {
+        try_audit(
+            audit,
+            &name,
+            &args,
+            target.as_deref(),
+            Decision::Deny,
+            "rate_limited",
+            caller,
+        );
+        return tool_result(
+            id,
+            format!(
+                "policy: rate limit exceeded for uid {:?}; slow down and retry shortly",
+                caller.uid
+            ),
+            true,
+        );
+    }
 
     // BUILT-IN hard denylist: checked in code, before and regardless of the
     // loaded policy. A policy file can never open these paths back up.

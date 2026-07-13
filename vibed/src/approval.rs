@@ -199,10 +199,7 @@ pub fn check_and_consume_grant(
                         .get("granted_by_uid")
                         .and_then(Value::as_u64)
                         .map(|u| u as u32),
-                    id: grant
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    id: grant.get("id").and_then(Value::as_str).map(str::to_string),
                 });
             }
         }
@@ -310,26 +307,44 @@ mod tests {
         assert_eq!(list_pending(&root).len(), 1);
 
         // No grant yet: a matching call is not authorized.
-        assert!(check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
-            .is_none());
+        assert!(check_and_consume_grant(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            Some(1000),
+            now
+        )
+        .is_none());
 
         // Operator (uid 0) approves.
         approve(&root, &id, Some(0), now).expect("approve");
         assert_eq!(list_pending(&root).len(), 0, "request moves out of pending");
 
         // A DIFFERENT call is not covered by this grant.
-        assert!(
-            check_and_consume_grant(&root, "svc.restart", Some("nginx.service"), Some(1000), now)
-                .is_none()
-        );
-        assert!(
-            check_and_consume_grant(&root, "pkg.install", Some("sshd.service"), Some(1000), now)
-                .is_none()
-        );
-        assert!(
-            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1001), now)
-                .is_none()
-        );
+        assert!(check_and_consume_grant(
+            &root,
+            "svc.restart",
+            Some("nginx.service"),
+            Some(1000),
+            now
+        )
+        .is_none());
+        assert!(check_and_consume_grant(
+            &root,
+            "pkg.install",
+            Some("sshd.service"),
+            Some(1000),
+            now
+        )
+        .is_none());
+        assert!(check_and_consume_grant(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            Some(1001),
+            now
+        )
+        .is_none());
 
         // The exact call is authorized — ONCE — and carries the approver identity.
         let consumed =
@@ -359,7 +374,8 @@ mod tests {
         // Well after expiry: refused and pruned.
         let later = now + GRANT_TTL_SECS + 1;
         assert!(
-            check_and_consume_grant(&root, "pkg.install", Some("htop"), Some(1000), later).is_none()
+            check_and_consume_grant(&root, "pkg.install", Some("htop"), Some(1000), later)
+                .is_none()
         );
         // Even at `now` it would be gone now (pruned by the expired check above).
         assert!(
@@ -383,10 +399,14 @@ mod tests {
         .expect("request");
         deny(&root, &id).expect("deny");
         assert_eq!(list_pending(&root).len(), 0);
-        assert!(
-            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
-                .is_none()
-        );
+        assert!(check_and_consume_grant(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            Some(1000),
+            now
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -402,8 +422,15 @@ mod tests {
     fn identical_requests_are_deduplicated() {
         let root = store("dedup");
         let now = 5_000_000;
-        let id1 = request_approval(&root, "svc.restart", Some("sshd.service"), "T2", Some(1000), now)
-            .expect("first");
+        let id1 = request_approval(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            "T2",
+            Some(1000),
+            now,
+        )
+        .expect("first");
         // Same (tool, target, uid) while still fresh: no new file, same id.
         let id2 = request_approval(
             &root,
@@ -418,8 +445,15 @@ mod tests {
         assert_eq!(list_pending(&root).len(), 1, "no duplicate pending file");
 
         // A different uid is a distinct request (grants are uid-scoped).
-        request_approval(&root, "svc.restart", Some("sshd.service"), "T2", Some(1001), now + 6)
-            .expect("other uid");
+        request_approval(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            "T2",
+            Some(1001),
+            now + 6,
+        )
+        .expect("other uid");
         assert_eq!(list_pending(&root).len(), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -434,7 +468,11 @@ mod tests {
         let later = now + PENDING_TTL_SECS + 1;
         request_approval(&root, "pkg.install", Some("btop"), "T2", Some(1000), later).expect("new");
         let pending = list_pending(&root);
-        assert_eq!(pending.len(), 1, "stale request pruned, only the fresh one remains");
+        assert_eq!(
+            pending.len(),
+            1,
+            "stale request pruned, only the fresh one remains"
+        );
         assert_eq!(
             pending[0].get("target").and_then(Value::as_str),
             Some("btop")
@@ -455,8 +493,15 @@ mod tests {
         assert_eq!(list_pending(&root).len(), MAX_PENDING);
         // One more distinct request is refused — the store cannot grow past the cap.
         assert!(
-            request_approval(&root, "svc.restart", Some("overflow.service"), "T2", Some(1000), now)
-                .is_err(),
+            request_approval(
+                &root,
+                "svc.restart",
+                Some("overflow.service"),
+                "T2",
+                Some(1000),
+                now
+            )
+            .is_err(),
             "request beyond MAX_PENDING is refused (fail-closed)"
         );
         assert_eq!(list_pending(&root).len(), MAX_PENDING, "store did not grow");
