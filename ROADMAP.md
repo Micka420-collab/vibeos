@@ -389,6 +389,36 @@ gantt
 
 ---
 
+## 9 bis. Initiative parallèle — « VibeOS pour Zed »
+
+**Objectif** : porter la gouvernance VibeOS (moteur de politiques `vibed`, tiers
+T0–T3, audit, approbation) à l'**éditeur [Zed](https://zed.dev)**, dont le panneau
+agent parle **ACP**. On **cible l'adaptateur** `@zed-industries/claude-code-acp`
+(qui fait tourner Claude Code comme agent ACP), **jamais le cœur de Zed**. Décision
+et invariants : [docs/DECISIONS.md](docs/DECISIONS.md) **ADR-014**.
+
+> **Statut : proposé (investigation en cours, 2026-07-13)**. Périmètre gouverné par
+> les mêmes invariants que le reste du projet : **plancher T2/T3 jamais levé**, aucun
+> chemin ne touche `approval.rs`, pas d'auto-approbation, toute surface d'écriture
+> ⇒ `THREAT-MODEL.md` dans le même commit.
+
+| Couche | Livrable | Fork ? | Statut |
+|---|---|---|---|
+| **0** | `settings.json` VibeOS pour Zed (`/etc/skel/.config/zed/`) : `context_servers` → `vibed` (MCP `vibeos:*`) + `tool_permissions` par tier | Non (config) | Proposé |
+| **1** | Fork ciblé de l'adaptateur : Read/Write/Edit natifs **désactivés** et **routés** vers `vibeos:fs.read`/`fs.write`/`memory.query` — toute action fichier passe par la politique + l'audit | Oui | Proposé |
+| **2** | **Mode auto gouverné** : le prompt de permission ACP est remplacé par la décision de `vibed` — `Allow` (T0/T1) sans prompt, `RequireApproval` (T2/T3) **jamais** auto-accepté (flux d'approbation existant) | Oui | Proposé |
+| **3** | Intégrations éditeur : raisonnement (ADR-012) visible dans Zed, indicateurs de tier, journal de session | Oui | Proposé |
+
+**Contrainte de méthode** : **investigation avant fork** — cartographier le code réel
+de l'adaptateur (exposition des outils, hook d'élicitation/permission, config MCP,
+mode de permission) et la consigner dans ADR-014 § « Structure de l'adaptateur »
+**avant** le premier patch de la couche 1. Le fork reste **minimal, chirurgical et
+rebasable** (l'amont évolue vite).
+
+**Durée indicative** : couche 0 en jours ; couches 1–2 en semaines ; couche 3 au fil de l'eau.
+
+---
+
 ## 10. Gouvernance de la feuille de route
 
 - **Versionnement** : `v0.x` = phases de construction (une version par phase) ; `v1.0` = premier contrat public ; ensuite versions mineures trimestrielles visées, correctifs de sécurité au fil de l'eau.

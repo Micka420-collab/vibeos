@@ -413,3 +413,59 @@ du contrat de capacités existant**, sans jamais toucher au plancher :
 - (−) L'agent peut rester « bloqué » sur une tâche qui *exige* un T2/T3 non encore
   approuvé ; il doit alors basculer sur d'autres travaux T0/T1 (comportement à cadrer
   côté superviseur).
+
+## ADR-014 — VibeOS pour Zed : gouverner l'agent hébergé via l'adaptateur ACP, jamais le cœur de Zed — *proposé, initiative parallèle*
+
+**Statut** : proposé (investigation en cours le 2026-07-13). La cartographie du
+code réel de l'adaptateur est menée avant tout patch (« pas de fork à l'aveugle »)
+et sera consignée en § « Structure de l'adaptateur » ci-dessous.
+
+**Contexte.** [Zed](https://zed.dev) est un éditeur rapide dont le panneau agent
+parle **ACP** (Agent Client Protocol, `zed-industries/agent-client-protocol`).
+L'adaptateur **`@zed-industries/claude-code-acp`** (`zed-industries/claude-code-acp`,
+TypeScript/Node) fait tourner **Claude Code comme agent ACP** dans Zed : il expose
+les outils de Claude Code (Read/Write/Edit/Bash…) côté éditeur et gère les
+demandes de permission via le flux ACP. Sur VibeOS, on ne veut **pas** d'un agent
+éditeur à l'accès fichier natif illimité : on veut que **toute action système de
+l'agent passe par le moteur de politiques de `vibed`** (tiers T0–T3, audit,
+approbation), comme pour Claude Code en terminal. Et on veut un **mode auto** qui
+supprime le *prompt de permission de l'éditeur* — mais **uniquement** pour ce que
+la politique classe déjà `Allow` (T0/T1), jamais pour T2/T3.
+
+**Décision.** Cibler **l'adaptateur** (`claude-code-acp`), pas le cœur de Zed
+(qu'on ne fork jamais). Livraison en **couches** (ROADMAP § Initiative) :
+
+| Couche | Livrable | Fork ? |
+|---|---|---|
+| **0** | `settings.json` VibeOS pour Zed dans `/etc/skel/.config/zed/` : `context_servers` déclarant `vibed` (serveur MCP `vibeos:*`) + `tool_permissions` par tier. L'agent hébergé voit et appelle `vibeos:*` sans config manuelle | Non (config) |
+| **1** | Fork ciblé : **désactiver** les Read/Write/Edit natifs de l'adaptateur et les **router vers** `vibeos:fs.read`/`fs.write`/`memory.query` de `vibed` — toute action fichier passe par la politique + l'audit | Oui (adaptateur) |
+| **2** | **Mode auto gouverné** : remplacer le prompt de permission ACP par la décision de `vibed`. Un appel classé `Allow` (T0/T1) s'exécute **sans prompt** ; un appel `RequireApproval` (T2/T3) **n'est jamais auto-accepté** — il suit le flux d'approbation existant (`vibed` renvoie `pending`, l'humain approuve hors bande). Le mode auto **consulte** la politique, il ne la remplace jamais | Oui (adaptateur) |
+| **3** | Intégrations éditeur : capture du raisonnement (ADR-012) visible dans Zed, indicateurs de tier, journal de session | Oui (adaptateur) |
+
+**INVARIANTS (repris de la demande, non négociables).**
+1. Le **plancher T2/T3 n'est jamais levé**. Le mode auto ne saute le prompt ACP
+   **que** pour ce que `policy.evaluate()` a déjà classé `Allow` (T0/T1). **Aucun
+   chemin de code du mode auto ne touche `approval.rs`** — l'approbation reste
+   entièrement du ressort de `vibed`.
+2. **Aucune auto-approbation** : un agent ne peut jamais s'auto-approuver, côté
+   éditeur comme côté terminal (store root-only + denylist, cf. F3).
+3. Toute **nouvelle surface d'écriture** ⇒ mise à jour de `THREAT-MODEL.md` dans le
+   même commit.
+4. Rien décrit au présent tant que non implémenté **et testé**.
+
+**Conséquences.**
+- (+) Un seul point de gouvernance (`vibed`) pour l'agent, qu'il tourne en terminal
+  ou dans l'éditeur — même politique, même audit, même approbation.
+- (+) Le mode auto améliore l'ergonomie **sans** affaiblir la sécurité : il ne fait
+  que déléguer la décision de prompt à un moteur qui refuse déjà le T2/T3 sans humain.
+- (−) On maintient un **fork** d'un adaptateur amont qui évolue vite : le fork doit
+  rester **minimal et chirurgical** (points d'interception précis), rebasable, et son
+  périmètre documenté ici pour survivre aux montées de version.
+- (−) Le schéma des outils/permissions de l'adaptateur n'est **pas contractuel** ;
+  d'où l'investigation préalable (§ Structure de l'adaptateur).
+
+### Structure de l'adaptateur (investigation)
+
+*À compléter par la cartographie du code réel de `claude-code-acp` avant le premier
+patch de la couche 1 (points d'exposition des outils, hook de permission/élicitation,
+config MCP/context-servers, mode de permission). En cours le 2026-07-13.*
