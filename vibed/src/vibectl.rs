@@ -16,15 +16,21 @@ use serde_json::{json, Value};
 use crate::{approval, audit};
 
 /// Current effective uid, parsed from `/proc/self/status` (no libc), for the
-/// `granted_by` field of an approval. `None` if it cannot be read.
+/// `granted_by` field of an approval and the `require_root` check. `None` if it
+/// cannot be read.
 fn current_euid() -> Option<u32> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_effective_uid(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// Extract the EFFECTIVE uid (2nd field of the `Uid:` line) from the contents of
+/// a `/proc/<pid>/status`. Fail-closed: returns `None` if the line or the field
+/// is absent — it never falls back to the real uid, so a privilege-dropped
+/// process (real=0, euid≠0) can never be read as root.
+fn parse_effective_uid(status: &str) -> Option<u32> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             // Uid: <real> <effective> <saved> <fs>
-            let mut fields = rest.split_whitespace();
-            let _real = fields.next();
-            return fields.next().or(_real).and_then(|s| s.parse().ok());
+            return rest.split_whitespace().nth(1).and_then(|s| s.parse().ok());
         }
     }
     None
@@ -372,5 +378,25 @@ mod tests {
         assert!(err["error"].as_str().unwrap().contains("must be root"));
         // Fail-closed when euid is unknown.
         assert!(require_root(None).is_err(), "refuse when euid unknown");
+    }
+
+    #[test]
+    fn parse_effective_uid_picks_the_effective_field_fail_closed() {
+        // Normal status: effective uid is the 2nd field, not the real one.
+        assert_eq!(
+            parse_effective_uid("Name:\tx\nUid:\t1000\t0\t0\t1000\nGid:\t0\t0\t0\t0\n"),
+            Some(0),
+            "returns the effective uid, not the real uid"
+        );
+        // Privilege-dropped process (real root, dropped euid): must NOT read as root.
+        assert_eq!(
+            parse_effective_uid("Uid:\t0\t1000\t1000\t1000\n"),
+            Some(1000),
+            "euid wins over a real uid of 0"
+        );
+        // Malformed line without an effective field -> fail closed, never real.
+        assert_eq!(parse_effective_uid("Uid:\t1000\n"), None);
+        // No Uid line at all -> None.
+        assert_eq!(parse_effective_uid("Gid:\t0\t0\t0\t0\n"), None);
     }
 }

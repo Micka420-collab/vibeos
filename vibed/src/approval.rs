@@ -23,8 +23,16 @@
 //! presentation layer (Phase 4).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde_json::{json, Value};
+
+/// Serializes the read-check-write of `request_approval` so the `MAX_PENDING`
+/// cap and the dedup are strict even when several connections request approval
+/// concurrently (handle_tools_call is async and runs across tasks). The
+/// critical section is short (a directory scan + one small write) and approval
+/// requests are rare and rate-limited upstream, so contention is negligible.
+static REQUEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Approval store root (contains `pending/` and `granted/`).
 pub const APPROVAL_DIR: &str = "/var/lib/vibeos/approvals";
@@ -79,6 +87,11 @@ pub fn request_approval(
     caller_uid: Option<u32>,
     now: u64,
 ) -> std::io::Result<String> {
+    // Hold the lock across the whole read-check-write so the cap and dedup are
+    // race-free: two concurrent callers can no longer both pass the cap gate,
+    // nor both mint a file for the same (tool, target, uid).
+    let _guard = REQUEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     let dir = pending_dir(root);
     std::fs::create_dir_all(&dir)?;
 
@@ -505,6 +518,44 @@ mod tests {
             "request beyond MAX_PENDING is refused (fail-closed)"
         );
         assert_eq!(list_pending(&root).len(), MAX_PENDING, "store did not grow");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cap_is_strict_under_concurrent_requests() {
+        // Without the serializing lock this would race past MAX_PENDING. Many
+        // threads request DISTINCT targets at the same instant; exactly
+        // MAX_PENDING must succeed, the rest must be refused, and the store must
+        // hold exactly MAX_PENDING files — never more.
+        let root = store("cap-race");
+        std::fs::create_dir_all(&root).unwrap();
+        let now = 8_000_000;
+        let attempts = MAX_PENDING * 2;
+        let ok = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for i in 0..attempts {
+                let root = &root;
+                let ok = &ok;
+                s.spawn(move || {
+                    let svc = format!("svc{i}.service");
+                    if request_approval(root, "svc.restart", Some(&svc), "T2", Some(1000), now)
+                        .is_ok()
+                    {
+                        ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            ok.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_PENDING,
+            "exactly MAX_PENDING requests succeed under concurrency"
+        );
+        assert_eq!(
+            list_pending(&root).len(),
+            MAX_PENDING,
+            "store never grows past the hard cap"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
