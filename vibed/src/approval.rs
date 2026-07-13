@@ -16,8 +16,11 @@
 //! Security: the store lives under `/var/lib/vibeos/approvals`, root-only and
 //! on the built-in denylist (agents can neither read nor forge grants). A grant
 //! matches only the precise (tool, target, uid) of the request, is single-use
-//! (deleted on consumption), and expires quickly. This is the plumbing; the
-//! Plasma approval dialog / HUD live wiring is the presentation layer (Phase 4).
+//! (deleted on consumption), and expires quickly. The pending side is **bounded**
+//! (dedup of identical requests, age-based pruning, hard cap) so a compromised
+//! agent cannot fill the memory volume by spamming un-approvable T2/T3 calls.
+//! This is the plumbing; the Plasma approval dialog / HUD live wiring is the
+//! presentation layer (Phase 4).
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +30,13 @@ use serde_json::{json, Value};
 pub const APPROVAL_DIR: &str = "/var/lib/vibeos/approvals";
 /// A grant is valid for this long after the operator approves it.
 pub const GRANT_TTL_SECS: u64 = 300;
+/// A pending request the operator never acts on is stale after this long and is
+/// pruned. Bounds the store against an agent that spams T2/T3 calls.
+pub const PENDING_TTL_SECS: u64 = 3600;
+/// Hard cap on simultaneously-pending requests. Fail-closed: once reached, new
+/// requests are refused (bounded disk) until the operator triages or they age
+/// out. A flood is already audited per call, so it cannot pass unnoticed.
+pub const MAX_PENDING: usize = 64;
 
 fn pending_dir(root: &Path) -> PathBuf {
     root.join("pending")
@@ -51,6 +61,16 @@ fn safe_id(id: &str) -> Option<String> {
 }
 
 /// Record a pending approval request; returns its id. `now` is epoch seconds.
+///
+/// The pending store is bounded so an agent cannot fill the disk by spamming
+/// T2/T3 calls that never get approved:
+///  - expired requests (older than `PENDING_TTL_SECS`) are pruned first;
+///  - an identical still-fresh request `(tool, target, caller_uid)` is
+///    deduplicated — its existing id is returned, no new file is written (this
+///    is also the common case of an agent re-issuing the same call while it
+///    waits for the operator);
+///  - once `MAX_PENDING` distinct requests are outstanding, new ones are
+///    refused (fail-closed) rather than growing the store without limit.
 pub fn request_approval(
     root: &Path,
     tool: &str,
@@ -59,13 +79,54 @@ pub fn request_approval(
     caller_uid: Option<u32>,
     now: u64,
 ) -> std::io::Result<String> {
+    let dir = pending_dir(root);
+    std::fs::create_dir_all(&dir)?;
+
+    // Prune stale requests, then scan what remains for a duplicate and a count.
+    let mut live = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(req) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let ts = req.get("ts_unix").and_then(Value::as_u64).unwrap_or(0);
+            if now.saturating_sub(ts) >= PENDING_TTL_SECS {
+                let _ = std::fs::remove_file(&path); // prune stale pending
+                continue;
+            }
+            live += 1;
+            // Deduplicate an identical, still-fresh request.
+            let r_tool = req.get("tool").and_then(Value::as_str);
+            let r_target = req.get("target").and_then(Value::as_str);
+            let r_uid = req
+                .get("caller_uid")
+                .and_then(Value::as_u64)
+                .map(|u| u as u32);
+            if r_tool == Some(tool) && r_target == target && r_uid == caller_uid {
+                if let Some(existing) = req.get("id").and_then(Value::as_str) {
+                    return Ok(existing.to_string());
+                }
+            }
+        }
+    }
+    if live >= MAX_PENDING {
+        return Err(std::io::Error::other(
+            "approval store full: too many pending requests",
+        ));
+    }
+
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!("{now}-{}-{n}", std::process::id());
 
-    let dir = pending_dir(root);
-    std::fs::create_dir_all(&dir)?;
     let record = json!({
         "id": id,
         "ts_unix": now,
@@ -336,5 +397,70 @@ mod tests {
         assert!(approve(&root, "../etc/passwd", Some(0), 1).is_err());
         assert!(approve(&root, "no-such-id", Some(0), 1).is_err());
         assert!(deny(&root, "bad/id").is_err());
+    }
+
+    #[test]
+    fn identical_requests_are_deduplicated() {
+        let root = store("dedup");
+        let now = 5_000_000;
+        let id1 = request_approval(&root, "svc.restart", Some("sshd.service"), "T2", Some(1000), now)
+            .expect("first");
+        // Same (tool, target, uid) while still fresh: no new file, same id.
+        let id2 = request_approval(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            "T2",
+            Some(1000),
+            now + 5,
+        )
+        .expect("second");
+        assert_eq!(id1, id2, "identical fresh request reuses the same id");
+        assert_eq!(list_pending(&root).len(), 1, "no duplicate pending file");
+
+        // A different uid is a distinct request (grants are uid-scoped).
+        request_approval(&root, "svc.restart", Some("sshd.service"), "T2", Some(1001), now + 6)
+            .expect("other uid");
+        assert_eq!(list_pending(&root).len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stale_pending_is_pruned_when_a_new_request_arrives() {
+        let root = store("prune");
+        let now = 6_000_000;
+        request_approval(&root, "pkg.install", Some("htop"), "T2", Some(1000), now).expect("old");
+        assert_eq!(list_pending(&root).len(), 1);
+        // A new, unrelated request well after the stale window prunes the old one.
+        let later = now + PENDING_TTL_SECS + 1;
+        request_approval(&root, "pkg.install", Some("btop"), "T2", Some(1000), later).expect("new");
+        let pending = list_pending(&root);
+        assert_eq!(pending.len(), 1, "stale request pruned, only the fresh one remains");
+        assert_eq!(
+            pending[0].get("target").and_then(Value::as_str),
+            Some("btop")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pending_store_is_capped() {
+        let root = store("cap");
+        let now = 7_000_000;
+        // Fill the store with MAX_PENDING distinct requests.
+        for i in 0..MAX_PENDING {
+            let svc = format!("svc{i}.service");
+            request_approval(&root, "svc.restart", Some(&svc), "T2", Some(1000), now)
+                .unwrap_or_else(|_| panic!("request {i} within cap"));
+        }
+        assert_eq!(list_pending(&root).len(), MAX_PENDING);
+        // One more distinct request is refused — the store cannot grow past the cap.
+        assert!(
+            request_approval(&root, "svc.restart", Some("overflow.service"), "T2", Some(1000), now)
+                .is_err(),
+            "request beyond MAX_PENDING is refused (fail-closed)"
+        );
+        assert_eq!(list_pending(&root).len(), MAX_PENDING, "store did not grow");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
