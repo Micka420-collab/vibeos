@@ -418,9 +418,10 @@ Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
 `vibed`, désormais **embarqué dans l'image et démarré au boot**).
 `memory.query` (arguments `query`, `scope`, `limit`) et `memory.append`
 (scopes `journal`, `knowledge`, `user`, `projects` — tous append-only) sont
-**implémentés, testés et exposés** par le démon `vibed`. Reste une **cible
-Phase 3+** : la matérialisation du *fold* (vue courante profil/index) côté
-`memory.query`/`vibectl` et la recherche sémantique par embeddings.
+**implémentés, testés et exposés** par le démon `vibed`. La **vue courante**
+(fold last-write-wins des scopes `user`/`projects`) est matérialisée par
+`vibectl memory profile` et `vibectl memory projects` (**livré**). Reste une
+**cible ultérieure** : la recherche sémantique par embeddings.
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|

@@ -178,7 +178,7 @@ wsl -d Ubuntu
 cd "/mnt/f/je ne sais pas encore/vibed"   # attention aux espaces : garder les guillemets
 
 cargo build --locked      # Cargo.lock est commité (épinglage supply-chain, voir SECURITY.md)
-cargo test                 # 94 tests unitaires + 6 tests d'intégration
+cargo test                 # 96 tests unitaires + 6 tests d'intégration
                            # (2 politique réelle + 4 MCP bout-en-bout sur socketpair)
 # le crate produit deux binaires : vibed (démon) et vibectl (CLI admin)
 ```

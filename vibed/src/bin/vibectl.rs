@@ -22,6 +22,8 @@ fn usage() -> ExitCode {
          USAGE:\n\
          \x20 vibectl memory status         memory store summary (JSON)\n\
          \x20 vibectl memory mode           current memory mode (amnesic|persistent)\n\
+         \x20 vibectl memory profile        current user profile (fold of updates)\n\
+         \x20 vibectl memory projects       current project index (fold of updates)\n\
          \x20 vibectl audit verify [DIR]    verify the tamper-evident audit chain\n\
          \x20 vibectl approvals list        pending T2/T3 human-approval requests\n\
          \x20 vibectl approve <ID>          grant a pending request (root)\n\
@@ -57,6 +59,16 @@ fn main() -> ExitCode {
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown")
             );
+            ExitCode::SUCCESS
+        }
+        ["memory", "profile"] => {
+            let out = vibectl::memory_profile_at(Path::new(MEMORY_DIR));
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            ExitCode::SUCCESS
+        }
+        ["memory", "projects"] => {
+            let out = vibectl::memory_projects_at(Path::new(MEMORY_DIR));
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             ExitCode::SUCCESS
         }
         ["audit", "verify"] | ["audit", "verify", _] => {

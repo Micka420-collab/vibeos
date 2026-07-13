@@ -159,6 +159,48 @@ pub fn memory_status_at(root: &Path, marker_path: &Path) -> Value {
     })
 }
 
+/// Read a memory-store JSONL file into parsed records (empty if absent).
+fn read_jsonl(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .map(|c| {
+            c.lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `vibectl memory profile` — the CURRENT user profile, materialized as the
+/// fold of the append-only `user/updates.jsonl` (last-write-wins per `key`).
+/// This is the read side of the P1 append-only design (docs/MEMORY.md §3.3).
+pub fn memory_profile_at(root: &Path) -> Value {
+    let mut profile = serde_json::Map::new();
+    for rec in read_jsonl(&root.join("user").join("updates.jsonl")) {
+        if let Some(key) = rec.get("key").and_then(Value::as_str) {
+            // Later lines overwrite earlier ones — append-only, fold on read.
+            profile.insert(
+                key.to_string(),
+                rec.get("value").cloned().unwrap_or(Value::Null),
+            );
+        }
+    }
+    json!({ "profile": Value::Object(profile) })
+}
+
+/// `vibectl memory projects` — the CURRENT project index, materialized as the
+/// fold of `projects/updates.jsonl` (last-write-wins per `path`), sorted by
+/// path (docs/MEMORY.md §3.4).
+pub fn memory_projects_at(root: &Path) -> Value {
+    let mut by_path: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for rec in read_jsonl(&root.join("projects").join("updates.jsonl")) {
+        if let Some(path) = rec.get("path").and_then(Value::as_str) {
+            by_path.insert(path.to_string(), rec);
+        }
+    }
+    json!({ "projects": by_path.into_values().collect::<Vec<_>>() })
+}
+
 /// `vibectl audit verify [dir]` — verify the tamper-evident audit chain across
 /// all daily files in `dir`. Returns `(json_report, ok)`; the caller maps `ok`
 /// to the process exit code.
@@ -238,6 +280,56 @@ mod tests {
         // Without the marker, mode falls back to identity.toml.
         let v = memory_status_at(&root, Path::new("/nonexistent-marker"));
         assert_eq!(v["mode"], "persistent");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_profile_folds_user_updates_last_write_wins() {
+        let root = scratch("profile");
+        std::fs::create_dir_all(root.join("user")).unwrap();
+        // Append-only updates; the later editor value must win.
+        let lines = [
+            r#"{"ts":"t1","key":"preferences.editor","value":"neovim","source":"x"}"#,
+            r#"{"ts":"t2","key":"profile.lang","value":"fr","source":"x"}"#,
+            r#"{"ts":"t3","key":"preferences.editor","value":"helix","source":"x"}"#,
+        ];
+        std::fs::write(
+            root.join("user").join("updates.jsonl"),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
+        let v = memory_profile_at(&root);
+        assert_eq!(
+            v["profile"]["preferences.editor"], "helix",
+            "last write wins"
+        );
+        assert_eq!(v["profile"]["profile.lang"], "fr");
+        // Absent store → empty profile, no panic.
+        let empty = memory_profile_at(&scratch("profile-empty"));
+        assert!(empty["profile"].as_object().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_projects_folds_by_path_sorted() {
+        let root = scratch("projects");
+        std::fs::create_dir_all(root.join("projects")).unwrap();
+        let lines = [
+            r#"{"ts":"t1","path":"/home/dev/b","name":"b-old","source":"x"}"#,
+            r#"{"ts":"t2","path":"/home/dev/a","name":"a","source":"x"}"#,
+            r#"{"ts":"t3","path":"/home/dev/b","name":"b-new","source":"x"}"#,
+        ];
+        std::fs::write(
+            root.join("projects").join("updates.jsonl"),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
+        let v = memory_projects_at(&root);
+        let projs = v["projects"].as_array().unwrap();
+        assert_eq!(projs.len(), 2, "folded by path");
+        assert_eq!(projs[0]["path"], "/home/dev/a", "sorted by path");
+        assert_eq!(projs[1]["path"], "/home/dev/b");
+        assert_eq!(projs[1]["name"], "b-new", "last write wins per path");
         let _ = std::fs::remove_dir_all(&root);
     }
 
