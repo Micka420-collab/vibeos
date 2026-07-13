@@ -22,7 +22,7 @@ flowchart TB
         POLICY -->|allow T0/T1| SANDBOX[Exécution outil<br/>v0.1 : in-process — sandbox<br/>systemd-run + seccomp + Landlock : Phase 3]
         POLICY -->|T2/T3| APPROVAL{{Approbation humaine}}
         APPROVAL --> SANDBOX
-        VIBED --> AUDIT[(Audit JSONL append-only + chaîné SHA-256<br/>/var/lib/vibeos/audit/vibed.jsonl<br/>ancrage TPM/Rekor + journald : Phase 4)]
+        VIBED --> AUDIT[(Audit JSONL append-only + chaîné SHA-256<br/>/var/lib/vibeos/audit/ (par jour)<br/>ancrage TPM/Rekor + journald : Phase 4)]
     end
     subgraph DATA["Données"]
         LUKS[(/var/lib/vibeos/memory<br/>v0.1 : en clair — LUKS : Phase 3)]

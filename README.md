@@ -69,7 +69,7 @@ Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance*
 | Binaire `vibed` embarqué dans l'image (démarre au boot) | ✅ Livré v0.1 |
 | Serveur MCP `vibed` sur `/run/vibed/mcp.sock` | ✅ Livré v0.1 |
 | Chargement / application des politiques par `vibed` (fail-closed) | ✅ Livré v0.1 |
-| Journal d'audit JSONL (`/var/lib/vibeos/audit/vibed.jsonl`) avec identité de l'appelant | ✅ Livré v0.1 |
+| Journal d'audit JSONL chaîné SHA-256 (`/var/lib/vibeos/audit/`, un fichier par jour) avec identité de l'appelant | ✅ Livré v0.1 |
 | Genesis au premier boot (mémoire créée **en clair**, unité + `genesis.sh`) | ✅ Livré v0.1 |
 | Global Theme **VibeOS Dark par défaut** (`/etc/xdg/kdeglobals` + Kvantum) | ✅ Livré (Phase 2) |
 | **HUD Quickshell** installé + auto-démarré (runtime compilé dans l'image) | ✅ Livré (Phase 2) — données mockées |
@@ -101,7 +101,7 @@ flowchart LR
     subgraph VIBED["vibed — démon système (Rust)"]
         MCP["Serveur MCP · JSON-RPC 2.0<br/>/run/vibed/mcp.sock"]
         POL["Moteur de politiques<br/>/etc/vibeos/policy.d/*.toml<br/>T0 → T3"]
-        AUD["Journal d'audit JSONL<br/>/var/lib/vibeos/audit/vibed.jsonl"]
+        AUD["Journal d'audit JSONL<br/>/var/lib/vibeos/audit/ (par jour)"]
     end
     subgraph OS["VibeOS immuable (bootc/OSTree)"]
         SYS["Services · paquets · fichiers"]

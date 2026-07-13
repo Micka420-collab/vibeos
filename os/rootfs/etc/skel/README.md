@@ -45,7 +45,7 @@ Pour revoir le message de bienvenue : `rm ~/.local/state/vibeos/welcome-shown`.
   pastille « vibed hors ligne » : le branchement live du QML sur le socket
   est le reste du chantier Phase 2 (`desktop/quickshell/README.md` §4).
 - Le pane « vibed audit » du layout `vibe` se remplit dès que des appels
-  d'outils MCP sont audités dans `/var/lib/vibeos/audit/vibed.jsonl`
+  d'outils MCP sont audités dans `/var/lib/vibeos/audit/ (par jour)`
   (le démon `vibed` démarre au boot depuis la v0.1).
 - Le **premier lancement de `nvim`** télécharge les plugins du preset VibeVim :
   il faut le réseau **une fois**. Ensuite, tout fonctionne hors ligne

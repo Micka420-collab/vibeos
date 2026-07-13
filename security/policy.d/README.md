@@ -1,6 +1,6 @@
 # `policy.d/` — Politiques de capacités des agents IA
 
-Ce répertoire contient les politiques que le moteur de `vibed` charge depuis **`/etc/vibeos/policy.d/*.toml`** sur le système installé. Les fichiers de ce répertoire du dépôt sont copiés dans l'image OS à cet emplacement par le `Containerfile` (`COPY security/policy.d/ /etc/vibeos/policy.d/`) — ils font donc partie de l'image immuable. Chaque appel d'outil MCP reçu sur `/run/vibed/mcp.sock` est évalué contre ces politiques **avant** toute exécution, et la décision est journalisée dans `/var/lib/vibeos/audit/vibed.jsonl`.
+Ce répertoire contient les politiques que le moteur de `vibed` charge depuis **`/etc/vibeos/policy.d/*.toml`** sur le système installé. Les fichiers de ce répertoire du dépôt sont copiés dans l'image OS à cet emplacement par le `Containerfile` (`COPY security/policy.d/ /etc/vibeos/policy.d/`) — ils font donc partie de l'image immuable. Chaque appel d'outil MCP reçu sur `/run/vibed/mcp.sock` est évalué contre ces politiques **avant** toute exécution, et la décision est journalisée dans `/var/lib/vibeos/audit/ (par jour)`.
 
 **Règle d'or : le refus par défaut est absolu.** Un outil qui ne correspond à aucune règle est rejeté ; un outil inconnu est rejeté. Ce comportement est câblé dans le moteur — il ne dépend pas de la règle attrape-tout `default-deny` de `default.toml` (qui existe uniquement pour rendre le refus explicite et documenté dans l'audit) et il n'existe aucun mécanisme pour le désactiver.
 

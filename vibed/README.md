@@ -243,7 +243,7 @@ EOF
 Comportements attendus :
 
 - `pkg.install` répond `isError: true` avec `requires human approval` **et** laisse une ligne `pending_approval` dans l'audit ;
-- `fs.read` sur `/etc/shadow` ou `/var/lib/vibeos/audit/vibed.jsonl` est refusé par la denylist codée en dur, politique ou pas ;
+- `fs.read` sur `/etc/shadow` ou un fichier de `/var/lib/vibeos/audit/` est refusé par la denylist codée en dur (`/var/lib/vibeos/audit/**`), politique ou pas ;
 - `fs.write` hors de `/home/**` et `/var/home/**` est refusé ;
 - chaque ligne d'audit porte l'uid/gid/pid du client qui a émis l'appel.
 

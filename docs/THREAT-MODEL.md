@@ -60,7 +60,7 @@ Tout ce qui traverse la frontière `AGENT → VIBED` est traité comme une entr�
 | A2 | **Clés API et secrets** (Anthropic, GitHub, etc.) | `systemd-creds` / kernel keyring, jamais en clair | Usurpation d'identité, coûts, pivot vers services distants |
 | A3 | **Intégrité du système** (image OS, binaires, unités systemd, politiques) | `/usr` (RO, vérifié), `/etc/vibeos/policy.d/` | Persistance d'un attaquant, désactivation silencieuse des défenses |
 | A4 | **Données des projets utilisateur** (code, dépôts, données de vibecoding) | `/home` | Vol de propriété intellectuelle, injection de code malveillant dans les projets |
-| A5 | **Journal d'audit** | `/var/lib/vibeos/audit/vibed.jsonl` (+ journald en Phase 4) | Perte de traçabilité ; falsification = dissimulation d'une compromission |
+| A5 | **Journal d'audit** | `/var/lib/vibeos/audit/ (par jour)` (+ journald en Phase 4) | Perte de traçabilité ; falsification = dissimulation d'une compromission |
 | A6 | **Identité machine** (clés SSH, identité réseau, credentials matériels) | `/etc`, TPM | Usurpation, mouvement latéral |
 
 ## 4. Acteurs de menace
