@@ -6,6 +6,34 @@
 
 ## ✅ Fait (livré, testé, poussé)
 
+**Session étendue (16h → 23h, 2026-07-13)** :
+- **Correctifs auto-signalés** : approval fs I/O (`check_and_consume_grant`/
+  `request_approval`) déplacée sur `tokio::spawn_blocking` ; grant-consommé-
+  avant-audit **tranché et documenté** (garde la garantie one-shot).
+- **ADR-012 implémenté** : module `reasoning` (store `memory/reasoning/
+  <session>.jsonl`, `safe_session_id` anti-traversal), outil MCP **T0
+  `agent.thinking`**, Genesis crée `reasoning/`.
+- **ADR-012/013 — superviseur** `vibectl agent run/stop/thinking` : tap
+  `stream-json` → store, budgets wall-clock + nb d'appels, kill-switch
+  opérateur (marqueur `.stop`), type de journal réservé `autonomous_session`,
+  groupe de processus + group-kill + drain borné (ne se suspend jamais).
+  **N'approche jamais `approval.rs`** ; T2/T3 restent gérés par vibed.
+- **Revue adversariale indépendante** (sous-agent) : aucun bug high ; 5 items
+  durcis (lecture stdout bornée anti-OOM, `count_tool_use` parallèles, cleanup
+  petits-enfants, `read_thinking` borné, budget invalide → erreur).
+- **Durcissement systemd** : genesis + agents-group (options non-mount-namespace,
+  contraintes respectées) ; generator amnésique déjà durci.
+- **Initiative « VibeOS pour Zed »** : **ADR-014** (décision + invariants +
+  **cartographie réelle** de `claude-code-acp` via investigation — 2 seams :
+  `canUseTool` + options de `createSession`), ROADMAP §9 bis (couches 0-3),
+  **couche 0** livrée en scaffolding (`/etc/skel/.config/zed/settings.json`).
+- **README multilingue** (FR canonique + EN/ES/DE).
+- **Hygiène PR** : PR #5 (branche→main) mergée à l'état du matin ; ~44 commits
+  d'après-midi orphelins → nouvelle **PR draft #11 (branche → main)** pour les
+  rapatrier. Sort de PR #4 (empilée) laissé à l'humain.
+- **État** : **137 tests vibed verts** (130 unit + 5 e2e MCP + 2 politique),
+  clippy `--locked` + fmt propres.
+
 **Analyse + améliorations (matin)** — analyse ultracode (6 agents), revue
 adversariale (24 agents, 15 findings corrigés), et une **trousse cybersécurité
 gouvernée** (≈ 60 outils pentest/DFIR embarqués + catalogue `docs/SECURITY-TOOLKIT.md`
