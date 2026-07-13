@@ -328,9 +328,22 @@ implémentation attend la revue de l'allowlist et du rédacteur.
 `safe_session_id` anti-traversal), l'outil MCP **T0 `agent.thinking`**, le
 superviseur `vibectl agent run` qui tape le flux `stream-json` et extrait les
 blocs `thinking` (`supervisor::extract_thinking`), et le composant HUD
-`ReasoningPanel.qml`. **Reste** : le schéma `stream-json` exact par fournisseur
-n'est pas contractuel — l'extraction est défensive et doit être vérifiée contre
-la version packagée du CLI à l'intégration ; rétention/purge du store à trancher.
+`ReasoningPanel.qml` **branché en live** (`shell.qml` via `Quickshell.Io.Socket`).
+**Reste** : le schéma `stream-json` exact par fournisseur n'est pas contractuel —
+l'extraction est défensive et doit être vérifiée contre la version packagée du CLI
+à l'intégration ; rétention/purge du store à trancher.
+
+**Outil `agent.sessions` (T0, ajouté 2026-07-14).** Découverte de session : liste
+les ids ayant un fichier de raisonnement (`reasoning/*.jsonl`) pour qu'un
+observateur (le HUD) trouve une session à passer à `agent.thinking`. **Retour** :
+`{ sessions: [id...], count, latest }` (ordre lexical, `latest` = dernier id).
+**Sans argument**, lecture seule (aucune écriture, aucune exécution). **Mêmes
+disciplines anti-DoS que tout outil** : atteint via `handle_tools_call`, donc le
+**rate-limiter par uid s'applique en amont** (avant dispatch, agnostique à
+l'outil) et l'appel est audité ; **sortie bornée** (un id court par session
+captée, aucun contenu de raisonnement — c'est `agent.thinking` qui rend le
+contenu, lui-même borné par `tail`/`READ_TAIL_CAP`). Ne crée jamais le store
+(fail-closed si Genesis n'a pas tourné).
 
 **Contexte.** Le raisonnement affiché par les CLI IA (Claude Code compris) n'est,
 pour les modèles actuels, pas persisté sur disque par le CLI lui-même — seule une
@@ -625,7 +638,12 @@ autres installs npm du `Containerfile`.
    **pas** l'extension (un marqueur `NOT-INSTALLED.txt` documente l'état) ; le
    builder npm est alors **hors du graphe** (podman le saute — coût CI nul). On
    ne ship pas ~148 paquets non éprouvés dans l'image immuable avant la validation
-   E2E (voir `BLOCKERS.md`). Décision assumée, pas un oubli.
+   E2E (voir `BLOCKERS.md`). **Décision assumée, pas un oubli — à NE PAS « corriger »
+   par défaut.** Un `WITH_ZED_AGENT=1` par défaut (ou toute PR qui l'active) est une
+   **régression de sécurité** tant que le Tier B Zed n'est pas validé : il ferait
+   entrer une surface npm non éprouvée dans l'image immuable. Le flag ne passe à `1`
+   qu'accompagné d'une preuve de Tier B (session Zed réelle, checklist
+   `scripts/e2e-zed.sh` verte).
 
 **Conséquences.** Chaîne npm **reproductible, vérifiable et build-time seulement**
 (le bundle est le seul artefact shippé), alignée sur la discipline de l'OS ;
