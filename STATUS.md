@@ -1,13 +1,13 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-08** (lots Phase 2 : HUD/thème/MCP client · memory.append + scope/limit · durcissement supply-chain).
+> Dernière mise à jour : **2026-07-13** (journée d'amélioration continue : CI durcie, sécurité vibed, `svc.status`/`fs.list`, chaîne agent→vibed out-of-box, wallpaper officiel par défaut, recalage documentaire — PR #4).
 
 ## Vue d'ensemble
 
 | | |
 |---|---|
-| **Phase actuelle** | Phase 0 « Fondation » ✅ → Phase 1 « Première ISO » (en cours) |
+| **Phase actuelle** | Phase 1 « Première ISO » (reste : validation VM + NVIDIA) · Phase 2 « vibed + MCP » 🔄 bien avancée |
 | **Version** | 0.1.0-dev (pré-alpha) |
 | **Dépôt GitHub** | [`Micka420-collab/vibeos`](https://github.com/Micka420-collab/vibeos) (privé) ✅ en ligne |
 | **Image OS** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — **manifest multi-arch amd64+arm64 PUBLIÉ + SIGNÉ cosign** ✅ (Rekor #2062451740) |
@@ -50,17 +50,26 @@
 
 - **2026-07-08** — **Lot supply-chain livré (suites de l'audit)** : **GitHub Actions épinglées par SHA de commit** (11 occurrences, tag en commentaire — `ci.yml` + `build-os.yml`) ; **dépôts COPR désactivés dans l'image livrée** (activés uniquement le temps de l'install au build : un système déployé ne fait jamais confiance à un COPR à l'exécution) ; **`npm install --ignore-scripts`** avec **deux exceptions délibérées** (postinstalls de `@anthropic-ai/claude-code` — binaire natif — et `opencode-ai` — câblage du binaire de plateforme — rejoués via `npm rebuild` ciblé ; les deux cassures détectées par la couche de vérification, comme prévu) et **double vérification** : `claude/gemini/codex/opencode --version` au build **puis `claude`/`opencode` re-prouvés après purge** (les binaires vivent dans `/usr`) ; **manifeste NEVRA** `/usr/share/vibeos/packages-nevra.txt` (inventaire RPM exact, diffable entre releases) ; **`SECURITY.md` recalé** (§1.2 « Vérifié » + pratiques). Restent Phase 4 : `CapabilityBoundingSet` vide et vérification cosign côté client (intestables sans système démarré).
 
+- **2026-07-13** — **Analyse ultracode complète + journée d'amélioration continue** ([PR #4](https://github.com/Micka420-collab/vibeos/pull/4), empilée sur #3). Analyse : 6 agents en parallèle (crate vibed, build réel WSL, image OS, CI, docs, périphériques) — a notamment révélé que les 3 lots Phase 2 du 2026-07-08 dormaient en draft PRs non mergées. Livré ensuite :
+  - **CI** : `cargo fmt --check` (crate rustfmt-é), `--locked` partout, `clippy --all-targets`, **job `cargo audit`** (critère Phase 2), `timeout-minutes` + `concurrency`, déclencheur `vibed/**` sur build-os, **garde sur `workflow_dispatch`** (taper `publier` pour une release), permissions par job, `bootc-image-builder` épinglé par digest, Dependabot (pins SHA + Cargo.lock).
+  - **Sécurité vibed** : denylist étendue aux **credentials des agents IA** (`~/.claude/**`, `.claude.json`, `gh`, `gemini`, `codex`, opencode, ollama, `.npmrc`, `.git-credentials`, SOPS — vibed root pouvait les lire pour tous les utilisateurs) ; `memory.query` : scan réellement borné + walk sans suivi de symlinks ; `fs.read` : atténuation TOCTOU (dev/ino + `O_NOFOLLOW`).
+  - **Nouveaux outils T0** : **`svc.status`** (état d'unité systemd, validation anti-injection, env vidé) et **`fs.list`** (listing borné 500 entrées, même denylist que `fs.read`, symlinks jamais suivis). **Tests d'intégration MCP bout-en-bout** sur socketpair réel (handshake, refus T2/denylist audités) — critère de sortie Phase 2. **72 tests verts**.
+  - **Chaîne agent→vibed out-of-box** : `vibeos-agents-group.service` enrôle les membres de `wheel` dans `vibeos-agents` à chaque boot (le socket 0660 était inutilisable sans `usermod` manuel).
+  - **Wallpaper officiel** : `VibeOS.png` devient le **fond d'écran par défaut** (Global Theme `[Wallpaper] Image=VibeOS`) ; `desktop/wallpapers` restructuré en 3 **paquets Plasma valides** (l'ancien format à plat était inaffichable) avec rendus 4K des SVG Genesis/Void.
+  - **Docs** : ~40 incohérences corrigées (SECURITY.md « signé à chaque push », systemd-creds au présent, NVIDIA « validée », qemu vs runners natifs, HUD « offline »…) ; jalons tranchés partout : vérif cosign client = **Phase 4**, approbation humaine T2 = **Phase 4** ; THREAT-MODEL §6 complété pour la surface du jour ; interview Genesis : `umask 077` (0700/0600 vérifiés en réel).
+
 ## 📋 Reste à faire (court terme)
 
-1. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (désormais : thème VibeOS Dark + HUD au premier login) ; valider NVIDIA sur le PC de référence.
-2. **Brancher le HUD en live** : câbler le QML sur le socket (`Quickshell.Io` `Socket` + `SplitParser` ↔ `/run/vibed/mcp.sock`) — le HUD est installé et auto-démarré mais affiche des données mockées (« vibed hors ligne »).
-3. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
-4. Mettre à jour ce fichier + README à chaque jalon.
+1. **Merger les 4 draft PRs empilées** (côté utilisateur, dans l'ordre) : [#1 HUD/thème/MCP client](https://github.com/Micka420-collab/vibeos/pull/1) → [#2 memory.append](https://github.com/Micka420-collab/vibeos/pull/2) → [#3 supply-chain](https://github.com/Micka420-collab/vibeos/pull/3) → [#4 améliorations 2026-07-13](https://github.com/Micka420-collab/vibeos/pull/4).
+2. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (désormais : thème VibeOS Dark, wallpaper officiel, HUD au premier login) ; valider NVIDIA sur le PC de référence.
+3. **Brancher le HUD en live** : câbler le QML sur le socket (`Quickshell.Io` `Socket` + `SplitParser` ↔ `/run/vibed/mcp.sock`) — le HUD est installé et auto-démarré mais affiche des données mockées (« vibed hors ligne »).
+4. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
+5. Mettre à jour ce fichier + README à chaque jalon.
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
 - **Phase 1 (v0.1)** : CI verte sur GitHub Actions, ISO amd64+arm64 bootables en VM, validation NVIDIA sur le PC de référence.
-- **Phase 2 (v0.2)** : `vibed` embarqué ✅ · HUD installé + auto-démarré ✅ · Global Theme par défaut ✅ · config MCP client ✅ · `memory.append` + `scope`/`limit` ✅ — restent les **outils T1 réels** supplémentaires, les scopes `user`/`projects` de `memory.append`, le **branchement live du HUD** et le preset **Panel Colorizer**.
+- **Phase 2 (v0.2)** : `vibed` embarqué ✅ · HUD installé + auto-démarré ✅ · Global Theme par défaut ✅ · config MCP client ✅ · `memory.append` + `scope`/`limit` ✅ · tests d'intégration MCP e2e en CI ✅ · `svc.status` + `fs.list` (T0) ✅ · groupe `vibeos-agents` automatique ✅ — restent les **outils T1 réels** supplémentaires, les scopes `user`/`projects` de `memory.append`, la **lecture du journal** (T0, à concevoir contre la fuite de secrets via logs), le **branchement live du HUD** et le preset **Panel Colorizer**.
 - **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée, **sandbox par outil (systemd-run, seccomp, landlock)**.
 - **Phase 4 (v0.4)** : durcissement (UKI / boot mesuré, SELinux dédiée `vibed_t`, hash-chaining audit, `User=vibed`).
 - **Phase 5 (v0.5)** : installateur brandé + identité visuelle complète.
