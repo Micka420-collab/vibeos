@@ -11,4 +11,5 @@ pub mod policy;
 pub mod ratelimit;
 pub mod reasoning;
 pub mod sha256;
+pub mod supervisor;
 pub mod vibectl;

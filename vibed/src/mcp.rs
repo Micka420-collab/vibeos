@@ -64,8 +64,9 @@ const MAX_MEMORY_FILES: usize = 200;
 /// an agent cannot balloon the memory store with a single call).
 const MAX_APPEND_BYTES: usize = 16 * 1024;
 /// Journal event types an AGENT may append via memory.append. The remaining
-/// types of docs/MEMORY.md §3.5 (`genesis`, `boot`, `tool_call`, `purge`) are
-/// reserved for the system itself (genesis.sh, vibed, vibectl) and refused.
+/// types of docs/MEMORY.md §3.5 (`genesis`, `boot`, `tool_call`, `purge`,
+/// `autonomous_session`) are reserved for the system itself (genesis.sh, vibed,
+/// the agent supervisor) and refused to agents.
 const JOURNAL_AGENT_TYPES: [&str; 5] = [
     "observation",
     "decision",
@@ -73,7 +74,13 @@ const JOURNAL_AGENT_TYPES: [&str; 5] = [
     "project_seen",
     "error",
 ];
-const JOURNAL_RESERVED_TYPES: [&str; 4] = ["genesis", "boot", "tool_call", "purge"];
+const JOURNAL_RESERVED_TYPES: [&str; 5] = [
+    "genesis",
+    "boot",
+    "tool_call",
+    "purge",
+    "autonomous_session",
+];
 /// Memory sub-scopes addressable by memory.query's `scope` argument, mapped to
 /// their location in the store (relative path, is_directory). Keep in sync
 /// with the layout in docs/MEMORY.md §3.
@@ -2112,13 +2119,13 @@ fn utc_civil(epoch_secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 }
 
 /// `AAAA-MM-JJ` (UTC) — the journal's one-file-per-day naming (MEMORY.md §3.5).
-fn utc_date_string(epoch_secs: u64) -> String {
+pub fn utc_date_string(epoch_secs: u64) -> String {
     let (year, month, day, ..) = utc_civil(epoch_secs);
     format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// ISO 8601 UTC timestamp with a `Z` suffix.
-fn utc_iso8601(epoch_secs: u64) -> String {
+pub fn utc_iso8601(epoch_secs: u64) -> String {
     let (year, month, day, hour, minute, second) = utc_civil(epoch_secs);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
