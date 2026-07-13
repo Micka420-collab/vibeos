@@ -17,29 +17,32 @@ valide donc **sans Zed ni display** :
   (17 tests vitest, dont la preuve de déterminisme + le client MCP socket contre
   un faux vibed).
 
-- ⛔ **Reste bloqué : le end-to-end complet** (un vrai prompt → la SDK spawn le
-  binaire Claude natif → un appel d'outil → `canUseTool` → `vibeos:policy.check`
-  → `vibed`). Ce qui manque, précisément :
-  1. **Le binaire natif du Claude Agent SDK** n'est pas présent dans cet
-     environnement (l'adaptateur le résout via `pathToClaudeCodeExecutable` /
-     `claudeCliPath()` ; il n'est spawné qu'au `session/new`, pas à `initialize`
-     — d'où le smoke qui passe quand même).
-  2. **Un `vibed` démarré** avec le socket `/run/vibed/mcp.sock` ET l'outil
-     `policy.check` servi (nécessite l'OS booté ou un vibed lancé localement).
-  3. **Un client ACP complet** qui pilote un `session/new` + un `prompt` avec un
-     appel d'outil réel — soit **Zed** (non installé ici : `which zed` → absent ;
-     Zed est un éditeur GPU/Wayland, pas prévu pour tourner headless en WSL), soit
-     un harnais ACP maison qui rejoue la séquence.
-  4. **Nommage exact `mcp__vibeos__*`** + **expansion de `CLAUDE_CONFIG_DIR`** dans
-     l'`env` de Zed : à confirmer sur une vraie session (le fail-safe fait que si
-     le nommage diffère, on prompte — jamais d'auto-allow erroné).
+- ✅ **Tier A validé sur socket vibed LIVE (2026-07-13)** : `scripts/e2e-live-policy.mjs`
+  fait tourner le **vrai `checkPolicy`** de l'extension (celui qu'appelle le
+  `canUseTool` patché) contre un `vibed` réellement démarré, et prouve le contrat
+  de gouvernance de bout en bout côté décision : `fs.read`/`fs.list` (T0) →
+  `allow` → auto-allow (pas de prompt éditeur) ; `pkg.install`/`svc.restart` (T2)
+  → `require_approval` → **jamais** auto-allow (l'éditeur prompte) ; outil inconnu
+  → `deny`. Lançable rootless via les overrides `VIBED_SOCKET`/`VIBED_POLICY_DIR`/
+  `VIBED_AUDIT_DIR` — voir `scripts/e2e-zed.sh`.
 
-**Prochaine étape recommandée** : sur une machine avec Zed + un `vibed` local
-(ou l'OS booté), lancer une session, déclencher un appel `vibeos:fs.read` (T0) et
-un `pkg.install` (T2), vérifier que le premier ne prompte pas et le second si.
-Le harnais headless (`scripts/smoke-acp.mjs`) peut être étendu en client ACP
-complet pour automatiser ça sans éditeur, une fois le binaire Claude + un vibed
-disponibles.
+- ⛔ **Reste bloqué : le Tier B (round-trip éditeur complet)** — un vrai prompt →
+  la SDK spawn le binaire Claude natif → un appel d'outil → `canUseTool` →
+  `vibeos:policy.check` → `vibed`, avec **Zed qui supprime réellement le prompt**
+  pour un Allow et l'affiche pour un `require_approval`. Ce qui manque, précisément :
+  1. **Le binaire natif du Claude Agent SDK** (spawné au `session/new`, pas à
+     `initialize` — d'où le smoke + le Tier A qui passent sans lui).
+  2. **Zed** (éditeur GPU/Wayland, pas prévu headless en WSL) pour piloter la
+     session — ou un client ACP maison rejouant `session/new` + `prompt`.
+  3. **Nommage exact `mcp__vibeos__*`** + **expansion de `CLAUDE_CONFIG_DIR`** dans
+     l'`env` de Zed : à confirmer sur une vraie session (fail-safe : si le nommage
+     diffère, on prompte — jamais d'auto-allow erroné).
+
+**Turnkey — prochaine étape** : sur une machine avec Zed, lancer
+`zed/vibeos-claude-acp/scripts/e2e-zed.sh` tel quel. Il exécute le Tier A
+automatiquement (build + bundle + décisions live) puis écrit un `settings.json`
+Zed et imprime la checklist Tier B (ouvrir Zed, session, `fs.read` sans prompt,
+`pkg.install` qui prompte, vérif via `vibectl approvals`/audit).
 
 ## Rappels (blocages connus, non régressés)
 
