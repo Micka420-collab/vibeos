@@ -651,3 +651,69 @@ l'extension reste hors TCB sous la même hygiène ; le coût est un lockfile à
 maintenir et un étage de build gardé. **Vérifié** : les deux chemins
 (`WITH_ZED_AGENT=0` → marqueur, `=1` → bundle + smoke ACP dans le build)
 construisent (podman, 2026-07-13).
+
+---
+
+## ADR-016 — `pkg.install` (T2) sur OS immuable : allowlist de cibles AVANT tout backend — *décision : reporté (stub), allowlist non tranchée*
+
+**Statut** : **backend reporté volontairement (2026-07-14)** — `pkg.install` reste
+un **stub** (`requires_approval`, n'installe rien). Cet ADR documente *pourquoi*,
+en appliquant la même exigence qu'à `svc.restart` (ADR/politique) : **pas
+d'exécution réelle sans une allowlist de cibles**, pas seulement une validation de
+syntaxe.
+
+**Contexte — l'installation de paquet n'est pas triviale sur un OS immuable.**
+VibeOS est bootc/OSTree : la racine `/usr` est **en lecture seule** au runtime.
+`dnf install` classique n'existe pas. Trois voies réelles, aux sémantiques très
+différentes :
+1. **`rpm-ostree install <pkg>`** — *package layering* : modifie le **déploiement**
+   (une nouvelle image dérivée), **exige un reboot** pour prendre effet, et
+   persiste à travers les mises à jour. C'est un changement d'**état système
+   durable**, pas une action locale réversible.
+2. **`toolbox`/`distrobox` + `rpm-ostree`-free** : conteneur mutable pour les
+   outils de développement de l'utilisateur — **hors** de l'image immuable, pas un
+   changement système. C'est la voie recommandée pour « installer un paquet »
+   côté utilisateur (docs/ECOSYSTEM.md : mise + distrobox).
+3. **overlay transient** (`rpm-ostree install --apply-live` / transient) — fragile,
+   non persistant, cas limites nombreux.
+
+**La question à trancher (comme le point « allowlist » de `svc.restart`).** *Quels
+paquets, depuis quels dépôts, un agent peut-il installer ?* Sous-questions non
+résolues :
+- **Layering vs conteneur** : un agent doit-il pouvoir *layerer* dans l'image
+  immuable (change le système, reboot) ou seulement installer dans un
+  `distrobox` (n'affecte pas le système gouverné) ? Le second est bien plus sûr
+  et cohérent avec l'immutabilité, mais alors `pkg.install` (T2 système) n'est
+  peut-être **pas le bon outil** — ce serait un `container.pkg.install` (T1 ?).
+- **Allowlist de paquets** : globs sur les noms (`[rule.packages].allowed/denied`,
+  même patron que `[rule.paths]`/`[rule.services]`), ou allowlist de **dépôts**
+  signés seulement, ou les deux ?
+- **Dépôts** : seulement les repos Fedora/RPM Fusion épinglés et signés de l'image,
+  jamais un repo arbitraire fourni par l'agent (sinon = vecteur supply-chain).
+- **Reboot** : `pkg.install` par layering ne « marche » qu'au prochain boot —
+  quelle UX/sémantique d'audit pour une action à effet différé ?
+
+**Décision.** **Ne pas implémenter le backend cette nuit.** La réponse à « quelle
+allowlist » n'est **pas claire** (le choix layering-vs-conteneur change la nature
+même de l'outil et son tier). Implémenter une exécution `rpm-ostree` réelle sans
+cette allowlist violerait l'invariant « aucune nouvelle capacité d'exécution réelle
+sans allowlist de cibles ». Le stub reste ; `pkg.install` (T2) est déjà **refusé
+sans approbation humaine** par la politique, donc rien n'est exposé.
+
+**Chemin quand ce sera repris (Phase 4).**
+1. Trancher **layering (système, T2) vs distrobox (utilisateur, T1)** — probablement
+   les deux outils distincts, pas un seul `pkg.install` ambigu.
+2. Ajouter un champ `package` à `CallContext` (comme `path`/`service`) et une
+   sous-table `[rule.packages]` (allowlist de noms + allow-list de **dépôts signés**
+   uniquement), évaluée **avant** le floor T2 — un paquet/dépôt hors allowlist =
+   `Deny`, pas même une file d'approbation (exactement comme `svc.restart`).
+3. Backend `rpm-ostree` par **chemin absolu, env vidé, nom de paquet validé**
+   (anti-injection, `--`), sémantique de reboot explicite dans le retour et l'audit.
+4. Test sur la politique livrée : un paquet hors allowlist / un dépôt non signé →
+   `Deny` ; un paquet allowlisté → `RequireApproval`.
+
+**Conséquences.** (+) On ne ship pas une capacité d'installation système à demi
+gouvernée. (+) La cohérence avec `svc.restart` (allowlist de cibles avant le floor)
+est préservée pour le jour de l'implémentation. (−) `pkg.install` reste non
+fonctionnel — mais il l'était déjà (stub), et l'alternative utilisateur (distrobox)
+existe hors gouvernance système.
