@@ -19,9 +19,9 @@
 | Phase | Version | Nom | Statut | Durée indicative |
 |---|---|---|---|---|
 | 0 | — | Fondation | ✅ Fait (2026-07-03) | 2–3 semaines (effectué) |
-| 1 | v0.1 | Première ISO | 🔜 Prochaine | 6–10 semaines |
-| 2 | v0.2 | vibed + MCP | 🔄 En cours (vibed + HUD + thème + config MCP client livrés) | 3–4 mois |
-| 3 | v0.3 | Genesis & mémoire | Planifiée | 2–3 mois |
+| 1 | v0.1 | Première ISO | 🔄 En cours (reste : validation VM + NVIDIA) | 6–10 semaines |
+| 2 | v0.2 | vibed + MCP | 🔄 Bien avancée (vibed + HUD + thème + MCP client + memory.append complet + svc.status/fs.list/sectools.list + audit chaîné) | 3–4 mois |
+| 3 | v0.3 | Genesis & mémoire | 🔄 Démarrée (generator amnésique + hardware.json schema 2 livrés) | 2–3 mois |
 | 4 | v0.4 | Durcissement | Planifiée | 4–6 mois |
 | 5 | v0.5 | Installateur & identité | Planifiée | 2–3 mois |
 | 6 | v1.0 | Release publique | Planifiée | 3–4 mois |
