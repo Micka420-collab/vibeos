@@ -137,7 +137,7 @@ fn svc_restart_with(args: &Value, systemctl: &str) -> Result<String, String> {
 /// `template@instance.service`, `dbus.socket`, systemd-escaped names (`\x2d`);
 /// appends `.service` when no type suffix is present (systemctl's own
 /// convention). Refuses anything that could be an option or a path.
-fn validate_unit_name(raw: &str) -> Result<String, String> {
+pub(crate) fn validate_unit_name(raw: &str) -> Result<String, String> {
     // Tool-agnostic messages: shared by svc.status (T0) and svc.restart (T2).
     if raw.is_empty() {
         return Err("'unit' must not be empty".to_string());

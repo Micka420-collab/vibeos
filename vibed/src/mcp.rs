@@ -413,7 +413,20 @@ async fn handle_tools_call(
         },
         None => None,
     };
-    let service = args.get("unit").and_then(Value::as_str);
+    let raw_service = args.get("unit").and_then(Value::as_str);
+    // Canonicalize the unit name for svc.* tools BEFORE the policy decision, so
+    // the deny-list (which lists fully-qualified units like "sshd.service")
+    // matches a bare "sshd" too. Without this an agent bypasses the deny-list by
+    // dropping the ".service" suffix: the tool canonicalizes the name only
+    // internally, AFTER the decision, so "vibed"/"sshd" would slip past the deny
+    // rule and reach the T2 approval queue instead of an outright Deny. An
+    // invalid unit falls through to the raw name (execution rejects it anyway).
+    let canonical_unit: Option<String> = if name.starts_with("svc.") {
+        raw_service.and_then(|u| crate::tools::svc::validate_unit_name(u).ok())
+    } else {
+        None
+    };
+    let service = canonical_unit.as_deref().or(raw_service);
 
     // Human-readable, non-secret target recorded in the audit trail so an
     // action's subject (which file / unit / package) is recoverable in

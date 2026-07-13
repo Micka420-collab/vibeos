@@ -313,6 +313,55 @@ async fn t2_refusal_and_builtin_denylist_are_explicit_and_audited() {
     srv.cleanup();
 }
 
+/// Regression for the deny-list bypass: a BARE critical unit name (no
+/// `.service` suffix) must be DENIED outright by the shipped policy, not merely
+/// queued for approval. The dispatcher canonicalizes the unit (`sshd` ->
+/// `sshd.service`) BEFORE the policy decision, so the fully-qualified deny-list
+/// matches it. Without that, an agent evaded the deny-list by dropping the
+/// suffix and could then have `vibed`/`sshd` restarted via an approval that
+/// looked routine. Exercised over the REAL socket (the canonicalization lives
+/// in handle_tools_call, not in policy.evaluate).
+#[tokio::test]
+async fn svc_restart_bare_critical_unit_is_denied_not_merely_pending() {
+    let mut srv = Server::start("svc-restart-bare-deny");
+
+    for bare in ["vibed", "sshd", "polkit"] {
+        let (is_error, text) = srv
+            .tool_call(1, "svc.restart", json!({ "unit": bare }))
+            .await;
+        assert!(is_error, "restart of bare '{bare}' must be refused");
+        assert!(
+            text.contains("denied"),
+            "bare '{bare}' must be DENIED outright, not queued for approval; got: {text}"
+        );
+        assert!(
+            !text.contains("requires human approval"),
+            "bare '{bare}' must NOT reach the approval queue (deny-list bypass): {text}"
+        );
+    }
+
+    // The audit trail confirms the decision was `deny` (not require_approval),
+    // and the canonicalized unit is the recorded target.
+    let records = srv.audit_records();
+    let svc: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["tool"] == "svc.restart")
+        .collect();
+    assert_eq!(svc.len(), 3, "three svc.restart attempts audited");
+    for r in &svc {
+        assert_eq!(
+            r["decision"], "deny",
+            "must be denied, not require_approval: {r}"
+        );
+    }
+    assert!(
+        svc.iter().any(|r| r["target"] == "vibed.service"),
+        "the canonicalized unit (vibed.service) must be the audit target: {svc:?}"
+    );
+
+    srv.cleanup();
+}
+
 /// Full T2 human-approval chain over the real socket: an agent's `svc.restart`
 /// is refused (tier floor), the operator grants it out of band (as `vibectl
 /// approve` does), the agent re-issues the SAME call, the one-shot grant flips

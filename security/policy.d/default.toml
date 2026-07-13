@@ -161,6 +161,13 @@ action = "allow"
 reason = "Read-only, bounded tail of an autonomous session's captured reasoning (memory/reasoning/, written by the supervisor). session_id is charset-validated; no path argument."
 
 [[rule]]
+id = "agent-observability"
+tools = ["agent.sessions", "agents.list"]
+tier = "T0"
+action = "allow"
+reason = "Read-only HUD observability. agent.sessions lists reasoning-session ids (discovery for agent.thinking). agents.list is a per-uid roster derived from the audit trail, CONFINED to the caller's own uid (never another user's activity). Bounded output, rate-limited like any tool."
+
+[[rule]]
 id = "policy-check"
 tools = ["policy.check"]
 tier = "T0"
@@ -214,9 +221,13 @@ denied = [
   "display-manager.service",    # the graphical session where approval happens
   "sddm.service",               # the shipped display manager (concrete alias)
   "systemd-logind.service",     # login/session management
+  "user@*.service",             # the per-user systemd manager — restarting it
+                                # tears down the operator's session, i.e. the very
+                                # place `vibectl approve` / the HUD run
   # System bus — the machine (and vibed's own D-Bus calls) depend on it.
   "dbus-broker.service",        # Fedora 42 system bus
   "dbus.service",               # alternative bus implementation
+  "dbus.socket",                # the bus is socket-activated: deny the socket too
 ]
 
 # --- Catch-all: everything not explicitly allowed above is denied -----------
