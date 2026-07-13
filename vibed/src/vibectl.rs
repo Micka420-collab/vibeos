@@ -852,6 +852,39 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_returns_even_when_a_grandchild_holds_the_pipe() {
+        // Review finding C2: on the CLEAN-exit path, a backgrounded grandchild
+        // can inherit and hold the stdout pipe open, blocking the reader thread.
+        // `sh` exits 0 immediately but leaves `sleep` holding the pipe; agent_run
+        // must still RETURN (bounded drain -> group-kill cleanup), never hang.
+        // The test completing at all IS the assertion (a regression would hang
+        // until `sleep` exits, ~20s, past the harness timeout).
+        let mem = mem_scratch("agentgc-mem");
+        let run = scratch("agentgc-run");
+        let start = std::time::Instant::now();
+        let (summary, ok) = agent_run(
+            &mem,
+            &run,
+            AgentRunOpts {
+                command: vec!["sh".into(), "-c".into(), "sleep 20 & exit 0".into()],
+                budget_secs: Some(60),
+                max_calls: None,
+                session_id: Some("gc-sess".into()),
+                provider: "fake".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(summary["reason"], "completed", "sh exited cleanly");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "must return via the bounded drain, not block on the grandchild"
+        );
+        assert!(!run.join("gc-sess.pid").exists(), "markers cleaned up");
+        let _ = std::fs::remove_dir_all(&mem);
+        let _ = std::fs::remove_dir_all(&run);
+    }
+
+    #[test]
     fn agent_stop_writes_marker_and_rejects_bad_id() {
         let run = scratch("agentstop");
         let (ok_v, ok) = agent_stop(&run, "sess1");

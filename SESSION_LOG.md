@@ -18,9 +18,21 @@
   opérateur (marqueur `.stop`), type de journal réservé `autonomous_session`,
   groupe de processus + group-kill + drain borné (ne se suspend jamais).
   **N'approche jamais `approval.rs`** ; T2/T3 restent gérés par vibed.
-- **Revue adversariale indépendante** (sous-agent) : aucun bug high ; 5 items
-  durcis (lecture stdout bornée anti-OOM, `count_tool_use` parallèles, cleanup
-  petits-enfants, `read_thinking` borné, budget invalide → erreur).
+- **Revue adversariale indépendante** (sous-agent) : **aucun bug high/medium**,
+  contrat de sécurité intact (traversal, denylist, type réservé, plancher T2/T3,
+  surface opérateur-only). 5 items availability/robustesse durcis — **traçabilité
+  finding → commit → test** :
+
+  | # | Finding (sévérité) | Correctif | Commit | Test qui le couvre |
+  |---|---|---|---|---|
+  | C1 | Lecture stdout NON bornée → OOM du superviseur (med-low) | `read_capped_line` (cap = `REASONING_MAX_LINE_BYTES`, ligne trop longue = drop) | `7e1f0c3` | `read_capped_line_drops_oversized_lines` (vibectl.rs) |
+  | A | `--calls` sous-compte les `tool_use` **parallèles** (low) | `supervisor::count_tool_use` (compte les blocs, pas « any ») | `7e1f0c3` | `count_tool_use_counts_parallel_calls` (supervisor.rs) |
+  | C2 | Petit-enfant tenant le pipe → fuite thread lecteur sur sortie **propre** (low) | `terminate_group` après drain si le lecteur traîne (pid capturé avant reap) | `7e1f0c3` (+ test dédié ajouté après) | `agent_run_returns_even_when_a_grandchild_holds_the_pipe` (vibectl.rs) |
+  | B | `read_thinking` slurpe tout le fichier pour un tail (low) | `read_tail_string` (lecture bornée ≤ 4 MiB depuis la fin, drapeau `window_bounded`) | `7e1f0c3` | `read_tail_string_bounds_large_files` (reasoning.rs) |
+  | C3 | Budget illimité par défaut / valeur invalide silencieusement illimitée (low) | `--budget`/`--calls` invalides → **erreur** (plus de fallback silencieux) + WARNING si run illimité | `7e1f0c3` | `parse_duration_forms` (supervisor.rs — rejette `0`/`abc`/`8x`/`8h30`→None ; le bin transforme None→erreur, glue triviale) |
+
+  Le grant-consommé-si-audit-échoue (relevé low) est **laissé tel quel à dessein** :
+  c'est le sens fail-closed voulu du one-shot (documenté en commentaire, `5a165e8`).
 - **Durcissement systemd** : genesis + agents-group (options non-mount-namespace,
   contraintes respectées) ; generator amnésique déjà durci.
 - **Initiative « VibeOS pour Zed »** (**ADR-014**, cible l'adaptateur
@@ -36,13 +48,15 @@
   - **Couche 2 (le fork)** : paquet `zed/vibeos-claude-acp` (TypeScript) qui
     patche `canUseTool` → `vibeos:policy.check` (Allow T0/T1 sans prompt, T2/T3
     jamais auto, fail-safe). **Vérifié** : `tsc` compile contre les vrais types
-    amont + **8 tests vitest**. Innovation : mode auto piloté par MOTEUR DE
-    POLITIQUES (pas classifieur LLM). Reste : install image + intégration Zed live.
+    amont + **12 tests vitest** (logique du mode auto + mapping d'outils + client
+    MCP socket testé contre un faux vibed). Innovation : mode auto piloté par
+    MOTEUR DE POLITIQUES (pas classifieur LLM). Reste : install image + Zed live.
 - **README multilingue** (FR canonique + EN/ES/DE).
 - **Hygiène PR** : PR #5 (branche→main) mergée à l'état du matin ; ~44 commits
   d'après-midi orphelins → nouvelle **PR draft #11 (branche → main)** pour les
   rapatrier. Sort de PR #4 (empilée) laissé à l'humain.
-- **État** : **137 tests vibed verts** (130 unit + 5 e2e MCP + 2 politique),
+- **État** : **139 tests vibed verts** (132 unit + 5 e2e MCP + 2 politique) +
+  outil T0 `policy.check` (groundwork Zed) + **12 tests vitest** de l'extension ;
   clippy `--locked` + fmt propres.
 
 **Analyse + améliorations (matin)** — analyse ultracode (6 agents), revue
