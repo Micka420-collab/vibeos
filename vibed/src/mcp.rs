@@ -866,6 +866,21 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                 "since": {"type": "integer", "minimum": 0}
             }}),
         ),
+        (
+            "policy.check",
+            Tier::T0,
+            "Classify a HYPOTHETICAL tool call WITHOUT executing it: returns the \
+             policy decision (allow/deny/require_approval) and tier for a (tool, \
+             target) pair. Read-only — never executes, never approves, never \
+             touches the approval store. A HINT for a governed editor auto-mode \
+             (ADR-014): real enforcement (denylist, home confinement, T2/T3 floor) \
+             always happens at execution, so a wrong hint can never bypass approval.",
+            json!({"type": "object", "required": ["tool"],
+            "properties": {
+                "tool": {"type": "string"},
+                "target": {"type": "string"}
+            }}),
+        ),
     ]
 }
 
@@ -920,8 +935,70 @@ fn execute_tool(
         "memory.query" => memory_query(args),
         "memory.append" => memory_append(args),
         "agent.thinking" => agent_thinking(args),
+        "policy.check" => policy_check(args, policy),
         _ => Err(format!("unknown tool: {name}")),
     }
+}
+
+/// policy.check (T0): classify a HYPOTHETICAL `(tool, target)` call — return the
+/// policy `Decision` (allow / deny / require_approval) and tier WITHOUT executing
+/// it, consuming a grant, or touching the approval store. This is what an
+/// editor's governed auto-mode (ADR-014, couche 2) queries to decide "prompt or
+/// not". It is a HINT: the real enforcement (built-in denylist, per-caller home
+/// confinement, T2/T3 approval floor) always happens at execution in vibed, so a
+/// wrong hint can never let a T2/T3 call through without approval — at worst the
+/// editor shows or omits a prompt in error, and the real call is still gated.
+fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+    let tool = args
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "policy.check: missing 'tool' argument".to_string())?;
+    let target = args.get("target").and_then(Value::as_str);
+
+    let note = "hint; real enforcement (denylist, home confinement, T2/T3 floor) \
+                happens at execution in vibed";
+
+    // Path tools: normalize the target and apply the built-in denylist FIRST,
+    // mirroring the real pipeline's ordering (a denied path is denied whatever
+    // the policy says).
+    let normalized = if tool.starts_with("fs.") {
+        target.and_then(normalize_path)
+    } else {
+        None
+    };
+    if let Some(path) = normalized.as_deref() {
+        if let Some(pattern) = builtin_denied(path, tool == "fs.write") {
+            return Ok(json!({
+                "tool": tool, "target": target, "decision": "deny",
+                "by": "builtin_denylist", "pattern": pattern, "note": note
+            })
+            .to_string());
+        }
+    }
+
+    let tier = tool_tier(tool);
+    let service = if tool.starts_with("svc.") {
+        target
+    } else {
+        None
+    };
+    let ctx = CallContext {
+        path: normalized.as_deref(),
+        service,
+    };
+    let decision = match policy.evaluate(tool, tier, ctx) {
+        Decision::Allow => "allow",
+        Decision::Deny => "deny",
+        Decision::RequireApproval => "require_approval",
+    };
+    Ok(json!({
+        "tool": tool,
+        "target": target,
+        "tier": tier.map(Tier::as_str),
+        "decision": decision,
+        "note": note,
+    })
+    .to_string())
 }
 
 /// agent.thinking (T0): read a bounded tail of a session's captured reasoning
@@ -3592,5 +3669,34 @@ mod tests {
         assert!(err.contains("session_id"), "unexpected error: {err}");
         // agent.thinking is T0 in the catalog.
         assert_eq!(tool_tier("agent.thinking"), Some(Tier::T0));
+    }
+
+    #[test]
+    fn policy_check_classifies_without_executing() {
+        let policy = policy_from_toml(
+            "[[rule]]\nid=\"os\"\ntools=[\"os.status\"]\ntier=\"T0\"\naction=\"allow\"\n\
+             [[rule]]\nid=\"pkg\"\ntools=[\"pkg.install\"]\ntier=\"T2\"\naction=\"allow\"\napproval=\"human\"\n\
+             [[rule]]\nid=\"fsread\"\ntools=[\"fs.read\"]\ntier=\"T1\"\naction=\"allow\"\n\
+             [[rule]]\nid=\"deny-all\"\ntools=[\"*\"]\ntier=\"T0\"\naction=\"deny\"\n",
+        );
+        let check = |args: Value| -> Value {
+            serde_json::from_str(&policy_check(&args, &policy).unwrap()).unwrap()
+        };
+        // T0 allowed.
+        assert_eq!(check(json!({"tool": "os.status"}))["decision"], "allow");
+        // T2 floor: an `allow` at T2 is classified as require_approval.
+        assert_eq!(
+            check(json!({"tool": "pkg.install", "target": "htop"}))["decision"],
+            "require_approval"
+        );
+        // Built-in denylist wins over policy, whatever the tier.
+        let shadow = check(json!({"tool": "fs.read", "target": "/etc/shadow"}));
+        assert_eq!(shadow["decision"], "deny");
+        assert_eq!(shadow["by"], "builtin_denylist");
+        // Unknown tool -> catch-all deny.
+        assert_eq!(check(json!({"tool": "disk.wipe"}))["decision"], "deny");
+        // Missing tool -> error; policy.check is T0.
+        assert!(policy_check(&json!({}), &policy).is_err());
+        assert_eq!(tool_tier("policy.check"), Some(Tier::T0));
     }
 }

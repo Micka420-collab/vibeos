@@ -161,6 +161,13 @@ action = "allow"
 reason = "Read-only, bounded tail of an autonomous session's captured reasoning (memory/reasoning/, written by the supervisor). session_id is charset-validated; no path argument."
 
 [[rule]]
+id = "policy-check"
+tools = ["policy.check"]
+tier = "T0"
+action = "allow"
+reason = "Read-only classification of a hypothetical (tool, target) call — returns the policy decision + tier without executing, approving, or touching the approval store. A hint for the governed editor auto-mode (ADR-014); real enforcement stays at execution."
+
+[[rule]]
 id = "memory-append"
 tools = ["memory.append"]
 tier = "T1"
