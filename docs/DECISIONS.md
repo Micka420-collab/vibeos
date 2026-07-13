@@ -1,8 +1,10 @@
 # Registre des décisions d'architecture (ADR)
 
 > Format : **Contexte / Décision / Alternatives considérées / Conséquences**.
-> Statut de toutes les ADR ci-dessous : **acceptée** (2026-07-03).
-> Une ADR n'est jamais modifiée après acceptation : elle est remplacée par une nouvelle ADR qui la référence. Architecture détaillée : [ARCHITECTURE.md](ARCHITECTURE.md).
+> **ADR-001 à 009** : décisions fondatrices **acceptées** (2026-07-03). **ADR-010+**
+> (ouvertes le 2026-07-13) portent chacune leur propre statut en tête — *proposé* /
+> *implémenté (mécanisme)* / *plan* — mis à jour au fil des livraisons.
+> Une ADR n'est jamais modifiée sur le fond après acceptation : elle est remplacée par une nouvelle ADR qui la référence (le statut, lui, est tenu à jour). Architecture détaillée : [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -414,11 +416,17 @@ du contrat de capacités existant**, sans jamais toucher au plancher :
   approuvé ; il doit alors basculer sur d'autres travaux T0/T1 (comportement à cadrer
   côté superviseur).
 
-## ADR-014 — VibeOS pour Zed : gouverner l'agent hébergé via l'adaptateur ACP, jamais le cœur de Zed — *proposé, initiative parallèle*
+## ADR-014 — VibeOS pour Zed : gouverner l'agent hébergé via l'adaptateur ACP, jamais le cœur de Zed — *cœur implémenté & vérifié (hors Zed), initiative parallèle*
 
-**Statut** : proposé (investigation en cours le 2026-07-13). La cartographie du
-code réel de l'adaptateur est menée avant tout patch (« pas de fork à l'aveugle »)
-et sera consignée en § « Structure de l'adaptateur » ci-dessous.
+**Statut** : **cœur implémenté et vérifié sans Zed** (2026-07-13). Investigation du
+code réel menée avant tout patch (§ « Structure de l'adaptateur »), forme de fork
+verrouillée (patch de prototype `canUseTool`). Livré : outil T0 `vibeos:policy.check`
+(vibed), config couches 0/1 (Zed-only), et le paquet `zed/vibeos-claude-acp`
+(couche 2) — `tsc` compile contre l'amont, 17 tests vitest (dont la preuve de
+déterminisme et le client MCP socket), boot ACP headless vérifié (`npm run smoke`).
+**Reste** : câblage dans l'image (plan supply-chain ADR-015) et le **test
+d'intégration E2E en conditions réelles** (voir `BLOCKERS.md` — binaire Claude natif
++ `vibed` démarré + client ACP/Zed).
 
 **Contexte.** [Zed](https://zed.dev) est un éditeur rapide dont le panneau agent
 parle **ACP** (Agent Client Protocol, `zed-industries/agent-client-protocol`).

@@ -21,7 +21,7 @@
 | 0 | — | Fondation | ✅ Fait (2026-07-03) | 2–3 semaines (effectué) |
 | 1 | v0.1 | Première ISO | 🔄 En cours (reste : validation VM + NVIDIA) | 6–10 semaines |
 | 2 | v0.2 | vibed + MCP | 🔄 Bien avancée (vibed + HUD + thème + MCP client + memory.append complet + svc.status/fs.list/sectools.list + audit chaîné + **fs.read/list confinés** + **memory.query extraits** + **plomberie d'approbation T2/T3** + **rate-limiting par uid**) | 3–4 mois |
-| 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | Proposée (superviseur d'agent budgété + **mode autonome always-on** T0/T1 avec T2/T3 en file asynchrone + kill-switch humain, auth abonnement scellée TPM2, allowlist egress par unité, **capture du raisonnement** — périmètre figé T0/T1, plancher T2/T3 non levé) | 3–5 semaines |
+| 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | 🔄 Mécanisme implémenté (superviseur `vibectl agent run/stop/thinking`, **kill-switch mesuré 2,6 s**, **capture du raisonnement**, `policy.check`) ; reste auth abonnement TPM2 + allowlist egress + unité always-on. Périmètre figé T0/T1, plancher T2/T3 non levé | 3–5 semaines |
 | 3 | v0.3 | Genesis & mémoire | 🔄 Démarrée (generator amnésique + hardware.json schema 2 + ébauche vibectl livrés) | 2–3 mois |
 | 4 | v0.4 | Durcissement | 🔄 Amorcée (audit chaîné SHA-256 + rotation ; reste : ancrage TPM/Rekor, User=vibed, SELinux) | 4–6 mois |
 | 5 | v0.5 | Installateur & identité | Planifiée | 2–3 mois |
@@ -397,7 +397,10 @@ agent parle **ACP**. On **cible l'adaptateur** `@zed-industries/claude-code-acp`
 (qui fait tourner Claude Code comme agent ACP), **jamais le cœur de Zed**. Décision
 et invariants : [docs/DECISIONS.md](docs/DECISIONS.md) **ADR-014**.
 
-> **Statut : proposé (investigation en cours, 2026-07-13)**. Périmètre gouverné par
+> **Statut : cœur implémenté & vérifié sans Zed (2026-07-13)** — couches 0/1/2
+> livrées (config Zed-only + fork `vibeos-claude-acp`, `tsc` + 17 tests + boot
+> headless), reste le E2E en session Zed réelle (voir `BLOCKERS.md`) et le câblage
+> image (ADR-015). Périmètre gouverné par
 > les mêmes invariants que le reste du projet : **plancher T2/T3 jamais levé**, aucun
 > chemin ne touche `approval.rs`, pas d'auto-approbation, toute surface d'écriture
 > ⇒ `THREAT-MODEL.md` dans le même commit.
@@ -406,7 +409,7 @@ et invariants : [docs/DECISIONS.md](docs/DECISIONS.md) **ADR-014**.
 |---|---|---|---|
 | **0** | `settings.json` VibeOS pour Zed (`/etc/skel/.config/zed/`) : `agent_servers` (adaptateur ACP) + `context_servers` → `vibed` (MCP `vibeos:*`) | Non (config) | 🔶 Scaffolding livré (à valider sur Zed réel) |
 | **1** | Read/Write/Edit natifs **désactivés par CONFIG** (`permissions.deny` dans un `CLAUDE_CONFIG_DIR` **Zed-only**) et l'agent routé vers `vibeos:fs.*`/`memory.query` — décision Zed-only (le terminal garde ses outils) | Non (config) | 🔶 Config livrée (`/etc/skel/.config/vibeos/zed-claude/`), à valider Zed |
-| **2** | **Mode auto gouverné** (le fork) : `zed/vibeos-claude-acp` patche `canUseTool` → `vibeos:policy.check` ; `Allow` (T0/T1) sans prompt, `RequireApproval` (T2/T3) **jamais** auto-accepté. Ne touche jamais `approval.rs`. Groundwork vibed : outil T0 **`policy.check`** livré | Oui (extension) | 🔶 Cœur livré (`tsc` OK + 8 tests) ; intégration Zed live à valider |
+| **2** | **Mode auto gouverné** (le fork) : `zed/vibeos-claude-acp` patche `canUseTool` → `vibeos:policy.check` ; `Allow` (T0/T1) sans prompt, `RequireApproval` (T2/T3) **jamais** auto-accepté. Ne touche jamais `approval.rs`. Groundwork vibed : outil T0 **`policy.check`** livré | Oui (extension) | ✅ Cœur livré & vérifié (`tsc` + **17 tests** + boot ACP headless) ; E2E Zed live à valider |
 | **3** | Intégrations éditeur : raisonnement (ADR-012) visible dans Zed, indicateurs de tier, journal de session | Oui | Proposé |
 
 **Contrainte de méthode** : **investigation avant fork** — cartographier le code réel
