@@ -404,7 +404,7 @@ et invariants : [docs/DECISIONS.md](docs/DECISIONS.md) **ADR-014**.
 
 | Couche | Livrable | Fork ? | Statut |
 |---|---|---|---|
-| **0** | `settings.json` VibeOS pour Zed (`/etc/skel/.config/zed/`) : `context_servers` → `vibed` (MCP `vibeos:*`) + `tool_permissions` par tier | Non (config) | Proposé |
+| **0** | `settings.json` VibeOS pour Zed (`/etc/skel/.config/zed/`) : `agent_servers` (adaptateur ACP) + `context_servers` → `vibed` (MCP `vibeos:*`) | Non (config) | 🔶 Scaffolding livré (à valider sur Zed réel) |
 | **1** | Fork ciblé de l'adaptateur : Read/Write/Edit natifs **désactivés** et **routés** vers `vibeos:fs.read`/`fs.write`/`memory.query` — toute action fichier passe par la politique + l'audit | Oui | Proposé |
 | **2** | **Mode auto gouverné** : le prompt de permission ACP est remplacé par la décision de `vibed` — `Allow` (T0/T1) sans prompt, `RequireApproval` (T2/T3) **jamais** auto-accepté (flux d'approbation existant) | Oui | Proposé |
 | **3** | Intégrations éditeur : raisonnement (ADR-012) visible dans Zed, indicateurs de tier, journal de session | Oui | Proposé |

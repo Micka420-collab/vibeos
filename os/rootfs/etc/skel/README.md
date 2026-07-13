@@ -15,6 +15,7 @@ Ces fichiers sont copiés automatiquement dans le dossier personnel de chaque
 | `.config/vibeos/welcome.md` | Mot de bienvenue affiché au tout premier terminal |
 | `.config/autostart/vibeos-hud.desktop` | Autostart du **HUD agents** (Quickshell) en session Plasma — lance `/usr/bin/vibeos-hud` ; supprimez ce fichier de votre `$HOME` pour désactiver le HUD |
 | `.claude.json` | Config MCP de **Claude Code** : serveur `vibeos` pré-déclaré (pont `socat` → socket `/run/vibed/mcp.sock`) — voir `agent/README.md` |
+| `.config/zed/settings.json` | Config **Zed** (couche 0 de « VibeOS pour Zed », ADR-014) : agent ACP `claude-code-acp` + serveur MCP `vibed` (`context_servers`). Scaffolding à valider contre la version Zed packagée ; le fork gouverné (Read/Write/Edit → vibed, mode auto) est couche 1–2 |
 
 ## Réinitialiser / régénérer ses dotfiles
 

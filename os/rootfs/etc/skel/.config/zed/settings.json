@@ -1,0 +1,60 @@
+// VibeOS — configuration Zed (couche 0 de l'initiative « VibeOS pour Zed »).
+//
+// Objectif : quand un utilisateur ouvre le panneau agent de Zed, l'agent tourne
+// via l'adaptateur ACP `claude-code-acp` (Claude Code comme agent ACP) et voit
+// les outils gouvernés `vibeos:*` de `vibed` — SANS configuration manuelle.
+// Décision et invariants : docs/DECISIONS.md ADR-014 ; couches : ROADMAP.md §9 bis.
+//
+// STATUT (honnêteté du projet) : COUCHE 0 = config uniquement, AUCUN fork.
+//   - Le pont MCP vers `vibed` est déjà livré côté Claude Code (`~/.claude.json`,
+//     socat → /run/vibed/mcp.sock) : l'agent hébergé hérite donc de `vibeos:*`.
+//   - Le remplacement des Read/Write/Edit natifs par `vibeos:fs.*`/`memory.query`
+//     et le mode auto gouverné (prompt sauté pour Allow T0/T1, jamais T2/T3) sont
+//     les COUCHES 1–2 (fork ciblé de l'adaptateur) — pas encore livrées.
+//   - Les clés ci-dessous doivent être VALIDÉES contre la version de Zed et de
+//     l'adaptateur réellement packagées avant d'être considérées fonctionnelles
+//     (Zed fait évoluer son schéma de settings). Rien ici n'est décrit comme
+//     acquis tant que non testé sur une session Zed réelle.
+//
+// Zed accepte les commentaires (JSONC).
+{
+  // --- Agent ACP : Claude Code via l'adaptateur ---------------------------
+  // `agent_servers` déclare des agents ACP externes lançables depuis le panneau
+  // agent de Zed. On lance l'adaptateur ; il spawn le binaire du Claude Agent SDK
+  // et lit la config MCP de Claude Code (dont le serveur `vibeos`).
+  // NOTE couche 1 : remplacer cette commande par le binaire du FORK VibeOS de
+  // l'adaptateur (Read/Write/Edit routés vers vibed) une fois livré.
+  "agent_servers": {
+    "VibeOS (Claude Code)": {
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+      "env": {}
+    }
+  },
+
+  // --- Serveur MCP `vibed` pour l'agent natif de Zed ----------------------
+  // Même pont que ~/.claude.json : socat relaie STDIO ↔ le socket unix de vibed
+  // (root:vibeos-agents 0660 — l'utilisateur doit être dans le groupe
+  // vibeos-agents, enrôlement automatique pour wheel). Donne à l'agent natif de
+  // Zed le même accès gouverné que l'agent ACP.
+  "context_servers": {
+    "vibed": {
+      "source": "custom",
+      "command": "socat",
+      "args": ["STDIO", "UNIX-CONNECT:/run/vibed/mcp.sock"],
+      "env": {}
+    }
+  },
+
+  // --- Gouvernance des permissions ----------------------------------------
+  // Sur VibeOS, l'autorisation d'un outil n'est PAS un réglage d'éditeur : elle
+  // est décidée par le moteur de politiques de `vibed` (tiers T0–T3, audit,
+  // approbation humaine T2/T3). La couche 2 (fork) branchera le hook de
+  // permission de l'adaptateur (`canUseTool`) sur cette décision : Allow (T0/T1)
+  // sans prompt, RequireApproval (T2/T3) TOUJOURS soumis à l'humain — le plancher
+  // T2/T3 n'est jamais levé (ADR-013/014). En couche 0, on garde le mode manuel
+  // par défaut de l'adaptateur (chaque action sensible est confirmée).
+  "agent": {
+    "always_allow_tool_actions": false
+  }
+}
