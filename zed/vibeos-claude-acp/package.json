@@ -10,8 +10,10 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/vibeos-claude-acp.mjs",
     "test": "vitest run",
     "smoke": "npm run build && node scripts/smoke-acp.mjs",
+    "smoke:bundle": "npm run bundle && node scripts/smoke-acp.mjs dist/vibeos-claude-acp.mjs",
     "start": "node dist/index.js"
   },
   "dependencies": {
@@ -20,7 +22,8 @@
   "devDependencies": {
     "typescript": "^5.6.0",
     "vitest": "^2.1.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0"
   },
   "engines": {
     "node": ">=22"

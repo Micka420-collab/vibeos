@@ -12,7 +12,11 @@
 
 import { spawn } from "node:child_process";
 
-const child = spawn("node", ["dist/index.js"], { stdio: ["pipe", "pipe", "inherit"] });
+// Entry to boot: defaults to the tsc output (dist/index.js); the image build
+// passes the single bundled artifact (dist/vibeos-claude-acp.mjs) so the SHIPPED
+// file is the one proven to boot, not just the dev build.
+const entry = process.argv[2] ?? "dist/index.js";
+const child = spawn("node", [entry], { stdio: ["pipe", "pipe", "inherit"] });
 let out = "";
 
 const fail = (msg) => {

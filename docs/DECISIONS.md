@@ -424,9 +424,10 @@ verrouillée (patch de prototype `canUseTool`). Livré : outil T0 `vibeos:policy
 (vibed), config couches 0/1 (Zed-only), et le paquet `zed/vibeos-claude-acp`
 (couche 2) — `tsc` compile contre l'amont, 17 tests vitest (dont la preuve de
 déterminisme et le client MCP socket), boot ACP headless vérifié (`npm run smoke`).
-**Reste** : câblage dans l'image (plan supply-chain ADR-015) et le **test
-d'intégration E2E en conditions réelles** (voir `BLOCKERS.md` — binaire Claude natif
-+ `vibed` démarré + client ACP/Zed).
+**Câblage image (ADR-015)** : étage `zed-agent-builder` livré et gardé off par
+défaut (`ARG WITH_ZED_AGENT=0`) — bundle esbuild vérifié dans le build. **Reste** :
+le **test d'intégration E2E en conditions réelles** (voir `BLOCKERS.md` — binaire
+Claude natif + `vibed` démarré + client ACP/Zed), avant d'activer l'expédition.
 
 **Contexte.** [Zed](https://zed.dev) est un éditeur rapide dont le panneau agent
 parle **ACP** (Agent Client Protocol, `zed-industries/agent-client-protocol`).
@@ -577,9 +578,12 @@ et la spec des fonctionnalités innovantes, conditionnent l'écriture de la couc
 
 ## ADR-015 — Chaîne d'approvisionnement npm de l'extension Zed (`vibeos-claude-acp`) — *plan, cible couche 1/2*
 
-**Statut** : plan (2026-07-13). L'extension existe (source + tests) mais n'est
-**pas encore câblée dans l'image** ; ce plan fixe la discipline avant de l'y
-mettre — « plus tard » sans plan écrit devient « jamais ».
+**Statut** : **étage de build livré & vérifié, expédition gardée off** (2026-07-13).
+L'étage `zed-agent-builder` du `Containerfile` implémente cette discipline et
+**construit réellement** (`npm ci --ignore-scripts` → bundle esbuild → smoke ACP
+dans le build) ; il reste **désactivé par défaut** (`ARG WITH_ZED_AGENT=0`, §6)
+jusqu'à la validation E2E. Le plan ci-dessous fixe la discipline ; les points
+réalisés sont marqués.
 
 **Contexte.** L'extension `zed/vibeos-claude-acp` dépend de l'amont npm
 `@agentclientprotocol/claude-agent-acp` (≈ 148 dépendances transitives). npm est
@@ -599,18 +603,33 @@ autres installs npm du `Containerfile`.
    le `Containerfile` pour les CLIs IA.
 3. **Vérification d'intégrité** : `npm ci` compare le champ `integrity` (SHA-512)
    du lockfile aux tarballs du registre — toute altération fait échouer l'install.
-4. **Build isolé + rebuild ciblé** : étage multi-stage dédié (comme
-   `quickshell-builder`/`vibed-builder`) — `npm ci --omit=dev --ignore-scripts`
-   puis `tsc` → `dist/` ; **seuls `dist/` + les deps de production élaguées** sont
-   copiés dans l'image finale (jamais les devDeps ni le cache de build).
+4. **Build isolé + bundle (✅ livré, gardé)** : étage multi-stage dédié
+   `zed-agent-builder` (comme `quickshell-builder`/`vibed-builder`) — `npm ci
+   --ignore-scripts` (chaîne complète, reproductible du lockfile), puis **esbuild
+   bundle** `src/` vers **un unique `dist/vibeos-claude-acp.mjs` autonome**.
+   **Décision affinée vs le plan initial** : on **ne ship pas de `node_modules`**
+   du tout — seul le bundle (≈ 1,9 Mo) est copié dans l'image (`/usr/lib/vibeos/
+   zed-agent/`), jamais les ~148 paquets transitifs, les sources TS ni l'outillage
+   dev. Meilleure hygiène que « dist/ + deps prod » : la surface npm reste
+   entièrement **build-time**. `esbuild` vient d'un *optional dependency* binaire
+   (aucune exception `npm rebuild` nécessaire). Le build **boote le bundle
+   headless** et exige une réponse ACP `initialize` avant de le copier (même garde
+   « prouve que ça tourne » que les CLIs shippées).
 5. **Bumps revus** : monter la version amont = un commit revu (rebase du fork, la
    surface de fork étant volontairement minimale — un patch de prototype, ADR-014) ;
-   `npm audit` sur la chaîne à chaque bump.
-6. **Pas livré tant que non validé** : l'extension n'entre dans l'image **qu'après**
-   la validation E2E (voir `BLOCKERS.md`) — on ne ship pas ~148 paquets non
-   éprouvés dans l'image immuable. Décision assumée, pas un oubli.
+   `npm audit` sur la chaîne à chaque bump. **Mesuré 2026-07-13** : `npm audit
+   --omit=dev` (chaîne shippée) = **0 vulnérabilité** ; les 5 advisories restantes
+   sont **dev-only** (serveur de dev esbuild, vitest) et n'entrent jamais dans l'image.
+6. **Pas livré tant que non validé (✅ gardé off)** : l'étage existe mais n'est
+   activé que par `--build-arg WITH_ZED_AGENT=1`. Par défaut l'image ne contient
+   **pas** l'extension (un marqueur `NOT-INSTALLED.txt` documente l'état) ; le
+   builder npm est alors **hors du graphe** (podman le saute — coût CI nul). On
+   ne ship pas ~148 paquets non éprouvés dans l'image immuable avant la validation
+   E2E (voir `BLOCKERS.md`). Décision assumée, pas un oubli.
 
-**Conséquences.** Chaîne npm **reproductible et vérifiable**, alignée sur la
-discipline de l'OS ; l'extension reste hors TCB mais sous la même hygiène ; le
-coût est un lockfile à maintenir et un étage de build supplémentaire le jour du
-câblage.
+**Conséquences.** Chaîne npm **reproductible, vérifiable et build-time seulement**
+(le bundle est le seul artefact shippé), alignée sur la discipline de l'OS ;
+l'extension reste hors TCB sous la même hygiène ; le coût est un lockfile à
+maintenir et un étage de build gardé. **Vérifié** : les deux chemins
+(`WITH_ZED_AGENT=0` → marqueur, `=1` → bundle + smoke ACP dans le build)
+construisent (podman, 2026-07-13).
