@@ -618,9 +618,16 @@ async fn handle_tools_call(
             let tool_args = args.clone();
             let policy_exec = Arc::clone(policy);
             let caller_exec = caller;
+            let audit_dir_exec = audit.dir().to_path_buf();
             // Tool bodies use blocking std::fs; keep the reactor responsive.
             let executed = tokio::task::spawn_blocking(move || {
-                execute_tool(&tool_name, &tool_args, &policy_exec, caller_exec)
+                execute_tool(
+                    &tool_name,
+                    &tool_args,
+                    &policy_exec,
+                    caller_exec,
+                    &audit_dir_exec,
+                )
             })
             .await;
             match executed {
@@ -900,6 +907,19 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             json!({"type": "object", "properties": {}}),
         ),
         (
+            "agents.list",
+            Tier::T0,
+            "Roster of YOUR OWN recently active agent processes, from the audit \
+             trail — CONFINED to your uid (never another user's activity), your own \
+             process excluded. Optional 'window_seconds' (default 120, max 3600). \
+             Returns { agents: [{ uid, pid, name, tier, activity, awaiting_approval, \
+             last_seen_unix, idle_seconds, calls }], count, window_seconds }. \
+             Read-only observability for the HUD.",
+            json!({"type": "object", "properties": {
+                "window_seconds": {"type": "integer", "minimum": 1}
+            }}),
+        ),
+        (
             "policy.check",
             Tier::T0,
             "Classify a HYPOTHETICAL tool call WITHOUT executing it: returns the \
@@ -944,6 +964,7 @@ fn execute_tool(
     args: &Value,
     policy: &PolicyEngine,
     caller: Caller,
+    audit_dir: &std::path::Path,
 ) -> Result<String, String> {
     match name {
         "os.status" => os_status(),
@@ -964,6 +985,7 @@ fn execute_tool(
         "memory.append" => memory_append(args),
         "agent.thinking" => agent_thinking(args),
         "agent.sessions" => agent_sessions(),
+        "agents.list" => agents_list(args, caller, audit_dir),
         "policy.check" => policy_check(args, policy),
         _ => Err(format!("unknown tool: {name}")),
     }
@@ -1066,6 +1088,226 @@ fn agent_sessions() -> Result<String, String> {
         "latest": latest,
     }))
     .map_err(|e| format!("agent.sessions: serialization failed: {e}"))
+}
+
+/// Map a capability tier to its numeric level (0..3) for the HUD roster.
+fn tier_number(t: Tier) -> u8 {
+    match t {
+        Tier::T0 => 0,
+        Tier::T1 => 1,
+        Tier::T2 => 2,
+        Tier::T3 => 3,
+    }
+}
+
+/// Best-effort process name for a pid (`/proc/<pid>/comm`). `None` if the pid is
+/// 0/unknown or the process has already exited — the roster then falls back to a
+/// generic label rather than inventing a name.
+fn proc_comm(pid: u64) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = raw.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Read a bounded tail of the audit trail as parsed records with `ts >= cutoff`.
+/// Best-effort (skips unreadable/corrupt lines) and read-only — used ONLY to
+/// derive the `agents.list` roster, never for chain verification. Bounds the
+/// read to the last `MAX_TAIL_BYTES` of the two most recent daily files, so it
+/// stays cheap regardless of how large the audit log has grown.
+fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
+    const MAX_TAIL_BYTES: u64 = 512 * 1024;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<std::path::PathBuf> = read_dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("vibed-") && n.ends_with(".jsonl"))
+        })
+        .collect();
+    files.sort();
+    // Two most recent daily files cover any short window across a midnight roll.
+    let recent: Vec<std::path::PathBuf> = files.iter().rev().take(2).rev().cloned().collect();
+
+    let mut out = Vec::new();
+    for path in recent {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let start = meta.len().saturating_sub(MAX_TAIL_BYTES);
+        let Ok(mut f) = std::fs::File::open(&path) else {
+            continue;
+        };
+        if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if f.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        let buf = String::from_utf8_lossy(&bytes);
+        let mut lines = buf.lines();
+        // A mid-file seek likely lands inside a line; drop that first partial.
+        if start > 0 {
+            lines.next();
+        }
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                let ts = v
+                    .get("ts_unix_ms")
+                    .and_then(Value::as_u64)
+                    .map(|ms| ms / 1000)
+                    .unwrap_or(0);
+                if ts >= cutoff_secs {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// agents.list (T0): a live roster of the CALLER'S OWN recently active agent
+/// processes, derived from the audit trail. **Confined to the requesting uid**
+/// (SO_PEERCRED): an agent — or the HUD, which runs as the session user — sees
+/// only processes of its OWN uid, never another user's activity (no cross-user
+/// leak; same confinement discipline as fs.read). The caller's own process is
+/// excluded (the HUD does not list itself). Grouped by pid so distinct agent
+/// processes of the same user appear separately.
+///
+/// Anti-DoS: reached through `handle_tools_call` (per-uid rate limiter runs
+/// first, call audited); output is bounded (a short entry per pid seen in a
+/// bounded time window read from a bounded audit tail); no unbounded work.
+///
+/// v0.2.5 note: `name` is best-effort from `/proc/<pid>/comm` (a Node-based CLI
+/// shows as "node"); a finished process yields "agent". Per-connection identity
+/// and a richer roster are future work — the reliable key is the SO_PEERCRED uid.
+fn agents_list(
+    args: &Value,
+    caller: Caller,
+    audit_dir: &std::path::Path,
+) -> Result<String, String> {
+    const DEFAULT_WINDOW_SECS: u64 = 120;
+    let window = args
+        .get("window_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_WINDOW_SECS)
+        .clamp(1, 3600);
+    let now = now_epoch_secs();
+    let cutoff = now.saturating_sub(window);
+
+    // Fail-closed confinement: an unidentified caller (no SO_PEERCRED uid) sees
+    // nothing — the roster is a per-uid view, never a global one.
+    let Some(uid) = caller.uid else {
+        return Ok(json!({
+            "agents": [],
+            "count": 0,
+            "window_seconds": window,
+            "note": "no caller uid (SO_PEERCRED); the roster is confined per-uid"
+        })
+        .to_string());
+    };
+    // SO_PEERCRED pids are positive; a non-positive pid never matches a real one.
+    let self_pid = caller.pid.filter(|p| *p > 0).map(|p| p as u64);
+
+    struct Agg {
+        tier: u8,
+        last_ts: u64,
+        last_tool: String,
+        last_target: Option<String>,
+        calls: u64,
+    }
+    let mut by_pid: std::collections::BTreeMap<u64, Agg> = std::collections::BTreeMap::new();
+
+    for r in read_recent_audit(audit_dir, cutoff) {
+        // Confine to the caller's own uid; skip the caller's own process.
+        if r.get("caller_uid").and_then(Value::as_u64) != Some(u64::from(uid)) {
+            continue;
+        }
+        let pid = r.get("caller_pid").and_then(Value::as_u64).unwrap_or(0);
+        if Some(pid) == self_pid {
+            continue;
+        }
+        let ts = r
+            .get("ts_unix_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| ms / 1000)
+            .unwrap_or(0);
+        let tool = r
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let target = r.get("target").and_then(Value::as_str).map(str::to_string);
+        let tier = tool_tier(&tool).map(tier_number).unwrap_or(0);
+
+        let e = by_pid.entry(pid).or_insert(Agg {
+            tier: 0,
+            last_ts: 0,
+            last_tool: String::new(),
+            last_target: None,
+            calls: 0,
+        });
+        e.calls += 1;
+        e.tier = e.tier.max(tier);
+        if ts >= e.last_ts {
+            e.last_ts = ts;
+            e.last_tool = tool;
+            e.last_target = target;
+        }
+    }
+
+    // A pending T2/T3 approval is keyed by uid, so it flags all of that uid's
+    // processes (best-effort — the store may distinguish finer later).
+    let awaiting =
+        crate::approval::list_pending(std::path::Path::new(crate::approval::APPROVAL_DIR))
+            .iter()
+            .any(|p| p.get("caller_uid").and_then(Value::as_u64) == Some(u64::from(uid)));
+
+    let agents: Vec<Value> = by_pid
+        .into_iter()
+        .map(|(pid, a)| {
+            let name = proc_comm(pid).unwrap_or_else(|| "agent".to_string());
+            let activity = match &a.last_target {
+                Some(t) if !t.is_empty() => format!("{} {}", a.last_tool, t),
+                _ => a.last_tool.clone(),
+            };
+            json!({
+                "uid": uid,
+                "pid": pid,
+                "name": name,
+                "tier": a.tier,
+                "activity": activity,
+                "awaiting_approval": awaiting,
+                "last_seen_unix": a.last_ts,
+                "idle_seconds": now.saturating_sub(a.last_ts),
+                "calls": a.calls,
+            })
+        })
+        .collect();
+
+    let count = agents.len();
+    Ok(json!({
+        "agents": agents,
+        "count": count,
+        "window_seconds": window,
+    })
+    .to_string())
 }
 
 /// sectools.list (T0): read-only discovery of the shipped security toolkit.
@@ -3910,6 +4152,78 @@ mod tests {
             "latest key must be present: {out}"
         );
         assert_eq!(tool_tier("agent.sessions"), Some(Tier::T0));
+    }
+
+    #[test]
+    fn agents_list_confines_to_caller_uid_and_excludes_self() {
+        let dir = std::env::temp_dir().join(format!("vibed-agents-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = AuditLog::new(dir.clone());
+
+        let me = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(111),
+        }; // the HUD / requesting process
+        let peer = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(222),
+        }; // another agent, SAME uid
+        let stranger = Caller {
+            uid: Some(2000),
+            gid: Some(2000),
+            pid: Some(333),
+        }; // a different user's agent
+
+        log.record(
+            "fs.write",
+            &json!({}),
+            Some("/home/a/x"),
+            "allow",
+            "ok",
+            peer,
+        )
+        .unwrap();
+        log.record("os.status", &json!({}), None, "allow", "ok", me)
+            .unwrap();
+        log.record(
+            "fs.read",
+            &json!({}),
+            Some("/home/b/y"),
+            "allow",
+            "ok",
+            stranger,
+        )
+        .unwrap();
+
+        let out: Value = serde_json::from_str(&agents_list(&json!({}), me, &dir).unwrap()).unwrap();
+        let agents = out["agents"].as_array().unwrap();
+
+        // Only the PEER process of MY uid (pid 222); never me (111) or the
+        // stranger (uid 2000) — cross-user confinement + self-exclusion.
+        assert_eq!(agents.len(), 1, "roster must hold exactly the peer: {out}");
+        assert_eq!(agents[0]["uid"], 1000);
+        assert_eq!(agents[0]["pid"], 222);
+        assert_eq!(agents[0]["tier"], 1, "fs.write is T1");
+        assert!(
+            agents[0]["activity"].as_str().unwrap().contains("fs.write"),
+            "activity must carry the last tool: {out}"
+        );
+
+        // A caller with no SO_PEERCRED uid sees an empty roster (fail-closed).
+        let anon = Caller {
+            uid: None,
+            gid: None,
+            pid: Some(9),
+        };
+        let out2: Value =
+            serde_json::from_str(&agents_list(&json!({}), anon, &dir).unwrap()).unwrap();
+        assert_eq!(out2["count"], 0, "an unidentified caller sees nothing");
+
+        assert_eq!(tool_tier("agents.list"), Some(Tier::T0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

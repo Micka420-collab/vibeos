@@ -72,9 +72,9 @@ ShellRoot {
     // No agents.list tool yet — the roster is not derivable from vibed (see
     // AgentStatus.qml). Stays [] until that tool lands; the panel shows offline.
     property var agents: []
-    // ollama gauge keeps its own probe (OllamaGauge.qml, ollama API + nvidia-smi),
-    // not the vibed socket — honest default is "unavailable".
-    property var ollama: Vibed.mockOllama()
+    // ollama gauge has its OWN local probe (below), independent of vibed — it
+    // must keep working when vibed is offline. Honest default: unavailable.
+    property var ollama: ({ available: false })
     // Live reasoning of the most recent autonomous session (agent.sessions ->
     // agent.thinking). [] until a session exists; ReasoningPanel shows offline.
     property var reasoningLive: []
@@ -122,6 +122,7 @@ ShellRoot {
         if (!vibedSocket.connected) return
         vibedSocket.write(Vibed.toolsCallRequest("os.status", {}))
         vibedSocket.write(Vibed.toolsCallRequest("memory.query", { query: "" }))
+        vibedSocket.write(Vibed.toolsCallRequest("agents.list", {}))
         vibedSocket.write(Vibed.toolsCallRequest("agent.sessions", {}))
         if (root.reasoningSession !== "")
             vibedSocket.write(Vibed.toolsCallRequest("agent.thinking",
@@ -147,6 +148,8 @@ ShellRoot {
             root.osStatus = res.data
         } else if (res.tool === "memory.query") {
             root.memoryStatus = res.data
+        } else if (res.tool === "agents.list") {
+            root.agents = Vibed.agentsListToRoster(res.data)
         } else if (res.tool === "agent.sessions") {
             // Follow the most recent session; clear reasoning when none.
             const latest = (res.data && res.data.latest) ? res.data.latest : ""
@@ -156,6 +159,77 @@ ShellRoot {
             }
         } else if (res.tool === "agent.thinking") {
             root.reasoningLive = Vibed.reasoningToLive(res.data)
+        }
+    }
+
+    // ----- Local ollama + VRAM probe (independent of vibed) ------------------
+    // The gauge must keep working when vibed is offline, so it reads two LOCAL,
+    // read-only sources directly: ollama's HTTP API for model presence, and
+    // nvidia-smi for VRAM. Any failure degrades to available:false (never fake).
+    // NOTE: not runtime-verifiable here (no Quickshell/ollama/GPU); built to the
+    // documented Phase 2 sources (OllamaGauge.qml header).
+    function probeOllama() {
+        const xhr = new XMLHttpRequest()
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            const prev = root.ollama || {}
+            let next = {
+                available: false,
+                model: "",
+                generating: false,
+                vram_used_mb: prev.vram_used_mb || 0,
+                vram_total_mb: prev.vram_total_mb || 0
+            }
+            if (xhr.status === 200) {
+                try {
+                    const j = JSON.parse(xhr.responseText)
+                    const models = (j && j.models) || []
+                    next.available = true
+                    if (models.length > 0) next.model = models[0].name || ""
+                } catch (e) { /* malformed -> stay unavailable */ }
+            }
+            root.ollama = next
+        }
+        // ollama not running -> connection refused -> onreadystatechange with
+        // status 0 -> available:false. Wrapped so a throw can't break the HUD.
+        try {
+            xhr.open("GET", "http://127.0.0.1:11434/api/ps")
+            xhr.send()
+        } catch (e) {
+            root.ollama = { available: false }
+        }
+    }
+
+    Process {
+        id: vramProbe
+        command: ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                  "--format=csv,noheader,nounits"]
+        running: false
+        stdout: SplitParser {
+            onRead: function (line) {
+                const parts = line.split(",")
+                if (parts.length < 2) return
+                const used = parseInt(parts[0])
+                const total = parseInt(parts[1])
+                if (isNaN(used) || isNaN(total)) return
+                const o = root.ollama || {}
+                root.ollama = {
+                    available: o.available === true,
+                    model: o.model || "",
+                    generating: o.generating === true,
+                    vram_used_mb: used,
+                    vram_total_mb: total
+                }
+            }
+        }
+    }
+
+    Timer {   // poll the local probes; independent of the vibed connection
+        interval: 5000; running: true; repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            root.probeOllama()
+            if (!vramProbe.running) vramProbe.running = true
         }
     }
 

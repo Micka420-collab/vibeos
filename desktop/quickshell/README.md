@@ -107,9 +107,9 @@ connecter. Sinon → état « hors ligne » (voir §5), jamais une erreur.
 | Statut système | ✅ **live** | `tools/call os.status` (T0) via le socket, poll 5 s |
 | État mémoire | ✅ **live** | `tools/call memory.query` (T0) via le socket |
 | Raisonnement des agents | ✅ **live** | `agent.sessions` (découverte de session) → `agent.thinking` (T0) via le socket ; `[]` tant qu'aucune session autonome n'a capté de raisonnement |
-| Roster des agents + tiers | ⛔ pas encore | `vibed` n'expose aucun outil `agents.list` — non *dérivable* du démon ; roster `[]` (panneau hors ligne) tant que l'outil n'est pas spécifié |
-| Cadenas « approbation en attente » | ⛔ pas encore | dépend du roster (`agents.list`) + flux d'approbation T2/T3 (dialogue Plasma) |
-| Jauge ollama / VRAM | ⛔ pas encore | défaut honnête `available:false` ; cible : `ollama ps` (API `127.0.0.1:11434`) + `nvidia-smi` via `Quickshell.Io.Process` |
+| Roster des agents + tiers | ✅ **live** | `agents.list` (T0, **confiné à l'uid appelant**, dérivé de l'audit, groupé par pid, soi-même exclu) via le socket ; `name` best-effort `/proc/<pid>/comm` |
+| Cadenas « approbation en attente » | ✅ **live** | `awaiting_approval` d'`agents.list` (une demande T2/T3 en attente pour l'uid) |
+| Jauge ollama / VRAM | ✅ **live** (probe local) | `GET 127.0.0.1:11434/api/ps` (modèle) + `nvidia-smi` via `Quickshell.Io.Process` (VRAM) — indépendant de vibed, `available:false` en cas d'échec |
 
 Le branchement live utilise `Quickshell.Io` (`Socket` sur le chemin Unix +
 `SplitParser` pour le découpage en lignes) dans `shell.qml` ; les formes de

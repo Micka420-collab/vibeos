@@ -94,6 +94,12 @@ impl AuditLog {
         Self::new(PathBuf::from(DEFAULT_AUDIT_DIR))
     }
 
+    /// Directory the audit trail is written to. Used by the `agents.list` tool
+    /// to derive a live roster from the recent tail (honoring any dev override).
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Append one record. Callers on the `Allow` path treat an error here as
     /// fatal for the call (fail-closed): no audit, no execution.
     pub fn record(

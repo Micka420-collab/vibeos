@@ -15,13 +15,11 @@
 // ---------------------------------------------------------------------------
 // DATA SOURCE — v0.1 vs Phase 2 (honesty rule)
 // ---------------------------------------------------------------------------
-// Current state: the roster stays EMPTY ([] -> offline placeholder). vibed
-// exposes NO tool that lists connected agents — the roster is not derivable from
-// the daemon yet, so shell.qml leaves `agents` at [] rather than faking a wire
-// (unlike os.status/memory.query/agent.thinking, which are now live).
-// TODO: feed from vibed over /run/vibed/mcp.sock — an `agents.list` T0 tool, or
-// an audit-derived stream keyed by caller pid (SO_PEERCRED). Same path as
-// os.status, through vibed_client.js.
+// Current state: LIVE from vibed's `agents.list` (T0), audit-derived and
+// CONFINED to the caller's uid (the HUD runs as the session user, so it sees
+// that user's own agent processes, grouped by pid). Empty -> offline placeholder.
+// v0.2.5 limit: `name` is best-effort /proc/<pid>/comm (a Node CLI shows "node")
+// and granularity is per-uid+pid; per-connection identity is future work.
 // ---------------------------------------------------------------------------
 
 import QtQuick

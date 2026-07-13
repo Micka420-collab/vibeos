@@ -186,6 +186,26 @@ function reasoningToLive(data) {
     }];
 }
 
+// Map an agents.list payload ({ agents:[{ uid,pid,name,tier,activity,
+// awaiting_approval,last_seen_unix,idle_seconds,calls }], ... }) into the
+// AgentStatus chip shape ([{ name, tier, awaitingApproval, activity, project,
+// elapsed }]). The roster is already confined to the caller's uid by vibed, so
+// the HUD (running as the session user) receives only that user's agents.
+function agentsListToRoster(data) {
+    if (!data || !data.agents || data.agents.length === 0) return [];
+    return data.agents.map(function (a) {
+        var idle = (typeof a.idle_seconds === "number") ? a.idle_seconds : null;
+        return {
+            name: a.name || "agent",
+            tier: (typeof a.tier === "number") ? a.tier : 0,
+            awaitingApproval: a.awaiting_approval === true,
+            activity: a.activity || "idle",
+            project: "",                                   // not derivable yet
+            elapsed: idle !== null ? ("actif il y a " + idle + "s") : ""
+        };
+    });
+}
+
 // ---------------------------------------------------------------------------
 // MOCK DATA — v0.1 only. TODO(Phase 2): delete everything below once the
 // socket wiring in shell.qml replaces it.
