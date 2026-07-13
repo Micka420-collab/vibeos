@@ -192,6 +192,16 @@ Schéma d'un événement :
 Le tout premier événement de la vie d'une machine est toujours `type: "genesis"`,
 écrit par `genesis.sh` lui-même.
 
+**Événement `tool_call` (écrit par `vibed`)** — à chaque **action agent T1+
+réellement exécutée** (aujourd'hui `fs.write` ; demain les outils T2/T3
+approuvés), `vibed` ajoute une ligne `type: "tool_call"`, `source: "vibed"`,
+`data: {tool, target, tier, caller_uid}` — sans secret (le `target` non secret
+reprend celui de l'audit). C'est la mémoire *de haut niveau* de ce que la
+machine a fait (« qu'ai-je fait hier ? »), distincte du journal d'audit
+forensique. Les lectures T0 et les outils `memory.*` en sont **exclus** (bruit
+méta). `tool_call` est un type **réservé au système** : un agent ne peut pas le
+forger via `memory.append` (refusé).
+
 ### 3.6 `knowledge/`
 
 Faits durables extraits du journal : `facts.jsonl` avec

@@ -472,6 +472,13 @@ async fn handle_tools_call(
                         "ok",
                         caller,
                     );
+                    // Feed the machine's own memory: record executed,
+                    // state-changing actions as a reserved `tool_call` journal
+                    // event (distinct from the forensic audit log). T0 reads and
+                    // the memory.* tools themselves are excluded to keep the
+                    // biography meaningful and avoid meta-noise. Best-effort:
+                    // a failure here never fails the (already-succeeded) call.
+                    try_journal_tool_call(&name, tier, target.as_deref(), caller);
                     tool_result(id, text, false)
                 }
                 Ok(Err(message)) => {
@@ -524,6 +531,33 @@ fn audit_target(
         }
     }
     None
+}
+
+/// Best-effort: record an executed, state-changing tool call in the machine's
+/// memory journal (reserved `tool_call` event). Only T1+ tools qualify (T0 is
+/// read-only, not biography) and the `memory.*` tools are excluded (they are
+/// themselves memory writes/reads — journaling them would be meta-noise and, in
+/// the append case, double every entry). Never fails the caller.
+fn try_journal_tool_call(name: &str, tier: Option<Tier>, target: Option<&str>, caller: Caller) {
+    let is_state_changing = matches!(tier, Some(Tier::T1) | Some(Tier::T2) | Some(Tier::T3));
+    if !is_state_changing || name.starts_with("memory.") {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let tier_str = tier.map(Tier::as_str).unwrap_or("?");
+    if let Err(e) = journal_tool_call_at(
+        std::path::Path::new(MEMORY_DIR),
+        now,
+        name,
+        target,
+        tier_str,
+        caller,
+    ) {
+        warn!("memory journal (tool_call) write failed for '{name}': {e}");
+    }
 }
 
 fn try_audit(
@@ -1526,9 +1560,6 @@ fn memory_append_at(
     args: &Value,
     epoch_secs: u64,
 ) -> Result<String, String> {
-    use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-
     let scope = args
         .get("scope")
         .and_then(Value::as_str)
@@ -1662,20 +1693,44 @@ fn memory_append_at(
         }
     };
 
-    let mut line = serde_json::to_string(&line_value)
-        .map_err(|e| format!("memory.append: serialization failed: {e}"))?;
+    let bytes = append_memory_jsonl(root, &relative_file, &line_value)?;
+    Ok(json!({
+        "appended": true,
+        "file": relative_file,
+        "bytes": bytes,
+        "ts": ts
+    })
+    .to_string())
+}
+
+/// Append one JSON value as a single line to a memory-store-relative file,
+/// with the store's append-only discipline: parent dir created 0700 if missing
+/// (never the store root), file 0600, `O_APPEND` + `O_NOFOLLOW`, 16 KiB line
+/// cap, and process-serialized so a line is never interleaved. Shared by
+/// `memory.append` (agent scopes) and the system journal writer
+/// (`journal_tool_call_at`). Returns the byte length written.
+fn append_memory_jsonl(
+    root: &std::path::Path,
+    relative_file: &str,
+    value: &Value,
+) -> Result<usize, String> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let mut line = serde_json::to_string(value)
+        .map_err(|e| format!("memory append: serialization failed: {e}"))?;
     line.push('\n');
     if line.len() > MAX_APPEND_BYTES {
         return Err(format!(
-            "memory.append: entry exceeds the {} KiB line cap",
+            "memory append: entry exceeds the {} KiB line cap",
             MAX_APPEND_BYTES / 1024
         ));
     }
 
-    let target = root.join(&relative_file);
+    let target = root.join(relative_file);
     let parent = target
         .parent()
-        .ok_or_else(|| "memory.append: internal error: target has no parent".to_string())?;
+        .ok_or_else(|| "memory append: internal error: target has no parent".to_string())?;
     // Genesis creates the subdirectories; recreate defensively with the same
     // private permissions if one is missing (never the store root itself).
     if !parent.is_dir() {
@@ -1683,7 +1738,7 @@ fn memory_append_at(
             .recursive(true)
             .mode(0o700)
             .create(parent)
-            .map_err(|e| format!("memory.append: cannot create '{relative_file}' parent: {e}"))?;
+            .map_err(|e| format!("memory append: cannot create '{relative_file}' parent: {e}"))?;
     }
 
     // Serialize appends within the process; combined with O_APPEND, each entry
@@ -1700,17 +1755,44 @@ fn memory_append_at(
         .mode(0o600)
         .custom_flags(O_NOFOLLOW)
         .open(&target)
-        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
+        .map_err(|e| format!("memory append {relative_file}: {e}"))?;
     file.write_all(line.as_bytes())
-        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
+        .map_err(|e| format!("memory append {relative_file}: {e}"))?;
+    Ok(line.len())
+}
 
-    Ok(json!({
-        "appended": true,
-        "file": relative_file,
-        "bytes": line.len(),
-        "ts": ts
-    })
-    .to_string())
+/// System-written journal event recording that an agent's tool call executed.
+/// This is the RESERVED `tool_call` type (agents cannot append it via
+/// memory.append); `source` is `vibed`. Distinct from the forensic audit log:
+/// this feeds the machine's own memory ("what did I do?"), so only executed
+/// state-changing actions are recorded, never secrets (the non-secret `target`
+/// mirrors the audit target). See docs/MEMORY.md §3.5.
+fn journal_tool_call_at(
+    root: &std::path::Path,
+    epoch_secs: u64,
+    tool: &str,
+    target: Option<&str>,
+    tier: &str,
+    caller: Caller,
+) -> Result<(), String> {
+    // Never create the store root: if Genesis has not run, there is nothing to
+    // journal into (the caller treats this as a no-op).
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let event = json!({
+        "ts": utc_iso8601(epoch_secs),
+        "type": "tool_call",
+        "source": "vibed",
+        "data": {
+            "tool": tool,
+            "target": target,
+            "tier": tier,
+            "caller_uid": caller.uid,
+        }
+    });
+    let relative = format!("journal/{}.jsonl", utc_date_string(epoch_secs));
+    append_memory_jsonl(root, &relative, &event).map(|_| ())
 }
 
 /// `source` field of a memory entry: the self-declared emitter label (e.g.
@@ -3029,6 +3111,62 @@ mod tests {
         .unwrap_err()
         .contains("absolute path"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn journal_tool_call_writes_reserved_system_event() {
+        let root = memory_scratch("jtc");
+        journal_tool_call_at(
+            &root,
+            T_2026_07_08,
+            "fs.write",
+            Some("/var/home/dev/notes.md"),
+            "T1",
+            Caller {
+                uid: Some(1000),
+                gid: None,
+                pid: None,
+            },
+        )
+        .expect("tool_call journal write");
+        let written =
+            std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl")).unwrap();
+        let ev: Value = serde_json::from_str(written.trim()).unwrap();
+        assert_eq!(ev["type"], "tool_call", "reserved system type");
+        assert_eq!(ev["source"], "vibed");
+        assert_eq!(ev["data"]["tool"], "fs.write");
+        assert_eq!(ev["data"]["target"], "/var/home/dev/notes.md");
+        assert_eq!(ev["data"]["tier"], "T1");
+        assert_eq!(ev["data"]["caller_uid"], 1000);
+        assert_eq!(ev["ts"], "2026-07-08T01:01:01Z");
+
+        // An agent can NEVER forge this reserved type via memory.append.
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "tool_call", "source": "x", "data": {}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("reserved"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn journal_tool_call_is_a_noop_without_a_store() {
+        // Best-effort: no store (Genesis not run) => Ok, nothing created.
+        let root = std::env::temp_dir().join(format!("vibed-jtc-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        journal_tool_call_at(
+            &root,
+            T_2026_07_08,
+            "fs.write",
+            None,
+            "T1",
+            Caller::default(),
+        )
+        .expect("no-op without store");
+        assert!(!root.exists(), "must never create the store root");
     }
 
     #[test]
