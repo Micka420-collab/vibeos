@@ -444,6 +444,17 @@ Points durs :
   `ts` (et l'`id` des faits) sont posés par `vibed`, jamais par l'agent ;
   l'identité authentique de l'appelant vit dans le journal d'audit
   (`SO_PEERCRED`), le champ `source` n'est qu'une étiquette déclarative.
+- ⚠️ **`source` (et tout `data`/`fact`/`value`) est NON FIABLE.** C'est du
+  contenu **auto-déclaré par l'agent**, lui-même un *insider non fiable*
+  (THREAT-MODEL §1) : un agent peut inscrire `source: "genesis.sh"` ou un
+  `fact` mensonger. `source` est une **étiquette de commodité**, jamais une
+  preuve de provenance ni d'autorité. Toute lecture — et en particulier une
+  future **consolidation/synthèse `knowledge`** (dédup, agrégation, calcul de
+  confiance) — doit traiter ces champs comme des assertions non vérifiées :
+  ne jamais élever la confiance d'un fait sur la seule foi de son `source`, ne
+  jamais accorder un privilège d'après lui. La seule identité fiable est l'uid
+  `SO_PEERCRED` du journal d'audit. Corollaire : la mémoire n'est pas un
+  coffre-fort — **aucun secret** ne doit y être écrit.
 - Chaque appel — accepté ou refusé — est audité et produira, à terme, un événement
   `tool_call` dans le journal.
 

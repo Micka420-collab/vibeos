@@ -772,7 +772,9 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
              'user' (entry: key/value/source — append-only update, current profile = fold, \
              last-write-wins per key), 'projects' (entry: path/source[/name/languages/vcs/\
              summary/last_opened] — fold per path). vibed stamps ts (and the fact id). \
-             See docs/MEMORY.md §9",
+             NOTE: 'source' is a self-declared label, NOT trusted provenance — the \
+             authoritative caller identity is the audit log's SO_PEERCRED uid. Never write \
+             secrets here. See docs/MEMORY.md §9",
             json!({"type": "object", "required": ["scope", "entry"],
             "properties": {
                 "scope": {"type": "string",

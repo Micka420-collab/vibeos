@@ -160,6 +160,7 @@ Phases de la [../ROADMAP.md](../ROADMAP.md) (qui fait foi) : Phase 1 = v0.1 Prem
 | S2 | Denylist étendue aux credentials des agents IA (`~/.claude/`, `~/.config/gh/`, `~/.gemini/`, `~/.codex/`, opencode, ollama, npmrc, git-credentials, SOPS) | Phase 2 ✅ |
 | S2 | `memory.append` scopes `user`/`projects` : écriture agent **append-only** (`updates.jsonl`), chemin dérivé du scope (aucun argument de chemin), `ts` posé par `vibed`, plafond 16 KiB, `O_APPEND`+`O_NOFOLLOW` — même discipline que `journal`/`knowledge`, pas de réécriture ni de fuite hors du store | Phase 2 ✅ |
 | S2 | Audit de tous les accès mémoire | Phase 2–3 |
+| S1/A1 | **Contenu mémoire = assertions non fiables** : `source`, `data`, `fact`, `value` sont **auto-déclarés par l'agent** (insider non fiable). `source` n'est jamais une preuve de provenance/autorité — la seule identité fiable est l'uid `SO_PEERCRED` de l'audit. Toute consolidation/synthèse `knowledge` future doit traiter ces champs comme non vérifiés (ne pas élever la confiance ni accorder un privilège d'après `source`). Types système (`genesis`/`boot`/`tool_call`/`purge`) non forgeables ; documenté `docs/MEMORY.md` §9 | Phase 2 ✅ (doc) |
 | S2 | Mode amnésique (tmpfs) | Phase 3 |
 | S2 | Contrôle d'egress réseau par agent | Phase 6+ |
 | S3 Supply chain | Signature cosign (livrée, CI) / vérification client | Phase 1 ✅ / Phase 4 |
