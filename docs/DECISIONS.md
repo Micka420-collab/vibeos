@@ -264,3 +264,57 @@ résoudra `/proc/<pid>/exe` (chemin réel, canonicalisé) et l'exposera dans le
   l'accept**, sur la connexion, pas par appel.
 - Ce mécanisme ne remplace **pas** le tiering ni l'approbation humaine T2/T3 ; il
   affine *qui* peut demander *quoi* en amont.
+
+## ADR-011 — Lecture du journal système par un agent (`log.read`, T0) — *proposé, cible Phase 2*
+
+**Statut** : proposé (non implémenté). Ouvert le 2026-07-13. Concrétise le
+livrable Phase 2 « lecture du journal » resté ouvert précisément *parce qu'il
+demande une conception anti-exfiltration* — ce document est ce garde-fou.
+
+**Contexte.** Un agent qui débogue a besoin de lire les logs (« pourquoi mon
+service a-t-il échoué ? »). Mais les journaux système sont un **canal
+d'exfiltration de premier ordre** ([THREAT-MODEL.md](THREAT-MODEL.md) S2) : les
+services y déversent régulièrement des secrets (clés API échoées par une conf
+maladroite, jetons dans des URL, chaînes de connexion, `environ` sur crash), et
+`journald` agrège **tous les utilisateurs et services**. Exposer bêtement
+`journalctl` à un agent (insider non fiable) reproduirait, en pire, le trou
+cross-user que F1 vient de fermer côté `fs.read`. C'est pourquoi aucun outil de
+lecture de log n'est livré tant que sa forme sûre n'est pas arrêtée.
+
+**Décision (cible, T0 mais sensible à l'exfiltration).** Un outil `log.read`
+**délibérément étroit**, jamais un `journalctl` générique :
+
+1. **Allowlist d'unités uniquement.** Lecture bornée à une liste explicite
+   d'unités (les unités d'agent de l'utilisateur, `vibed` lui-même), déclarée en
+   politique (`[rule.units].allowed`). Défaut : refus. Jamais le journal système
+   complet, jamais l'unité d'un autre utilisateur.
+2. **Sortie bornée.** Dernières *N* lignes (plafond dur, ex. ≤ 200) et plafond
+   d'octets — même discipline anti-DoS que `fs.read`/`fs.list`.
+3. **Passe de rédaction** *best-effort* : masquage des motifs à forte entropie et
+   des marqueurs connus (`*_KEY=`, `Bearer `, `PRIVATE KEY`, `AWS_…`, `password=`)
+   avant retour. **Défense en profondeur, pas une garantie** (cf. conséquences).
+4. **Aucun filtre libre.** Pas d'argument `grep`/regex fourni par l'agent : on
+   n'offre pas « montre-moi les lignes contenant `password` » — l'outil ne doit
+   pas devenir un chercheur de secrets.
+5. **Audité** comme tout appel (unité, nombre de lignes) : une volumétrie ou une
+   cadence anormale est détectable (mitigation S2), et le **rate-limiting par
+   uid** déjà en place borne l'aspiration en boucle.
+
+**Conséquences.**
+- (+) L'agent se débogue seul (ses propres logs de service) sans shell ni lecture
+  de fichiers bruts — utile et gouverné.
+- (−) La **rédaction est heuristique, jamais complète** : le vrai contrôle est
+  l'allowlist d'unités + la sortie bornée + l'audit, *pas* le masquage. Une unité
+  autorisée qui logge un secret le divulguera : l'allowlist doit **exclure** les
+  unités connues pour journaliser du sensible.
+- (−) `journald` mêle les flux ; la sélection par unité (`_SYSTEMD_UNIT=`) doit
+  être stricte (pas de préfixe qui ratisse large).
+- Reste **T0 en tiering** mais **étiqueté sensible à l'exfiltration** dans le
+  catalogue — candidat à un budget de rate-limit dédié plus serré.
+
+**Alternatives écartées.** (a) exposer `journalctl` complet — rejeté
+(exfiltration + cross-user) ; (b) laisser l'agent lire `/var/log` via `fs.read`
+— rejeté (journald est binaire, et la denylist bloque déjà beaucoup ; ne règle
+pas le cross-user) ; (c) pas d'outil de log — statu quo, mais prive l'agent d'un
+auto-diagnostic légitime. La forme (1)–(5) est le compromis retenu ; son
+implémentation attend la revue de l'allowlist et du rédacteur.
