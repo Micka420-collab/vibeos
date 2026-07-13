@@ -461,14 +461,36 @@ async fn handle_tools_call(
     // approver's uid, which we fold into the audit outcome: the grant file is
     // deleted on consumption, so the tamper-evident log is the ONLY durable
     // record of who authorized the action.
+    //
+    // ORDERING (deliberate, see below): the grant is CONSUMED here, before the
+    // `started_approved` audit write on the Allow path. That means a rare audit
+    // failure (disk-full / I/O error — itself a fail-closed catastrophe that
+    // refuses execution anyway) burns the operator's single approval, forcing a
+    // re-approval. We accept that over the alternative: consuming only AFTER the
+    // audit would require a peek-then-delete split, which reopens a double-
+    // execution window (two concurrent identical approved calls could both pass
+    // the peek before either deletes). The one-shot guarantee — the atomic unlink
+    // is the execution gate — is worth more than saving one approval in an
+    // already-failing-disk state. Not silent debt: this is the documented choice.
+    //
+    // The blocking std::fs of the approval store runs on a blocking thread
+    // (spawn_blocking), exactly like `execute_tool` below — never on the reactor.
     let consumed = if matches!(decision, Decision::RequireApproval) {
-        crate::approval::check_and_consume_grant(
-            std::path::Path::new(crate::approval::APPROVAL_DIR),
-            &name,
-            target.as_deref(),
-            caller.uid,
-            now_epoch_secs(),
-        )
+        let name_g = name.clone();
+        let target_g = target.clone();
+        let uid_g = caller.uid;
+        let now_g = now_epoch_secs();
+        tokio::task::spawn_blocking(move || {
+            crate::approval::check_and_consume_grant(
+                std::path::Path::new(crate::approval::APPROVAL_DIR),
+                &name_g,
+                target_g.as_deref(),
+                uid_g,
+                now_g,
+            )
+        })
+        .await
+        .unwrap_or(None) // a panic in the blocking task -> no grant (fail-closed)
     } else {
         None
     };
@@ -504,16 +526,26 @@ async fn handle_tools_call(
         }
         Decision::RequireApproval => {
             // No fresh grant: record a pending request the operator can act on
-            // with `vibectl approve <id>`, and tell the agent to wait.
-            let request_id = crate::approval::request_approval(
-                std::path::Path::new(crate::approval::APPROVAL_DIR),
-                &name,
-                target.as_deref(),
-                tier.map(Tier::as_str).unwrap_or("?"),
-                caller.uid,
-                now_epoch_secs(),
-            )
-            .ok();
+            // with `vibectl approve <id>`, and tell the agent to wait. The
+            // store's blocking std::fs runs on a blocking thread, not the reactor.
+            let name_r = name.clone();
+            let target_r = target.clone();
+            let tier_r = tier.map(Tier::as_str).unwrap_or("?").to_string();
+            let uid_r = caller.uid;
+            let now_r = now_epoch_secs();
+            let request_id = tokio::task::spawn_blocking(move || {
+                crate::approval::request_approval(
+                    std::path::Path::new(crate::approval::APPROVAL_DIR),
+                    &name_r,
+                    target_r.as_deref(),
+                    &tier_r,
+                    uid_r,
+                    now_r,
+                )
+            })
+            .await
+            .ok()
+            .and_then(Result::ok);
             try_audit(
                 audit,
                 &name,
