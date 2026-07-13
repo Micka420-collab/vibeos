@@ -422,6 +422,22 @@ rebasable** (l'amont évolue vite).
 
 ---
 
+## 9 ter. Dette technique explicite (suivie, non abandonnée)
+
+> Cette section existe pour qu'aucune dette identifiée ne disparaisse
+> silencieusement d'une réécriture de doc à l'autre. Chaque entrée porte une
+> estimation d'effort et une raison de report. Une dette n'est **pas** un
+> critère de sortie de phase, mais elle doit rester visible jusqu'à sa
+> résorption.
+
+| # | Dette | Origine | Effort estimé | Report justifié par |
+|---|---|---|---|---|
+| **F6** | **Découper `vibed/src/mcp.rs`** (≈ 3 710 lignes au 2026-07-13, ~113 fonctions) en modules `tools/{fs,memory,svc,sectools,policy,agent,os}.rs` + un dispatcher mince, catalogue et table de dispatch conservés cohérents | Revue adversariale Fable 5 (finding F6, 7/7 traités sauf celui-ci) | **1–2 j** de travail focalisé : déplacement mécanique des fonctions, mise à jour des `mod`/`use`, préservation du catalogue `tools/list` + du `match` de `tools/call`, re-passage des 140 tests Rust (dont l'intégration MCP e2e). Risque : conflits de merge pour les sessions autonomes concurrentes tant que le fichier reste monolithique | Refactor **mécanique sans gain fonctionnel** ; le protocole décourage le cosmétique sans gain mesuré. Le gain réel — réduire le risque de conflit et la charge cognitive — se matérialise quand `mcp.rs` devient un point de contention, pas avant. **À planifier en session dédiée** (pas en fin de créneau), idéalement juste après le merge de PR #11 pour repartir d'une base stable |
+
+**F6 — critère de « fait »** : `mcp.rs` réduit à un module de câblage (< ~400 lignes : `initialize`, routage `tools/list`/`tools/call`, rate-limit, audit), chaque famille d'outils dans son propre fichier `tools/*.rs`, **zéro changement de comportement** (les 140 tests passent sans modification de leurs assertions), `clippy -D warnings` et `fmt --check` verts.
+
+---
+
 ## 10. Gouvernance de la feuille de route
 
 - **Versionnement** : `v0.x` = phases de construction (une version par phase) ; `v1.0` = premier contrat public ; ensuite versions mineures trimestrielles visées, correctifs de sécurité au fil de l'eau.

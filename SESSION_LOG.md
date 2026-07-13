@@ -1,8 +1,11 @@
 # SESSION_LOG — session autonome du 2026-07-13
 
-> Journal de la session de travail autonome (matin → 16h). Point d'entrée
-> permanent : [STATUS.md](STATUS.md). Branche : `worktree-amelioration-2026-07-13`,
-> empilée sur les 3 draft PRs Phase 2 → **[PR #4](https://github.com/Micka420-collab/vibeos/pull/4)**.
+> Journal de la session de travail autonome (matin → 23h). Point d'entrée
+> permanent : [STATUS.md](STATUS.md). Branche : `worktree-amelioration-2026-07-13`.
+> PR principale : **[PR #11](https://github.com/Micka420-collab/vibeos/pull/11)**
+> (branche → `main`, MERGEABLE). La [PR #4](https://github.com/Micka420-collab/vibeos/pull/4)
+> (empilée sur les draft PRs Phase 2, cible `phase2-supply-chain`) est **antérieure
+> et superseded** par #11 ; son sort (fermeture) est laissé à l'humain.
 
 ## ✅ Fait (livré, testé, poussé)
 
