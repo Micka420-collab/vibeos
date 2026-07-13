@@ -464,8 +464,58 @@ la politique classe déjà `Allow` (T0/T1), jamais pour T2/T3.
 - (−) Le schéma des outils/permissions de l'adaptateur n'est **pas contractuel** ;
   d'où l'investigation préalable (§ Structure de l'adaptateur).
 
-### Structure de l'adaptateur (investigation)
+### Structure de l'adaptateur (investigation — 2026-07-13)
 
-*À compléter par la cartographie du code réel de `claude-code-acp` avant le premier
-patch de la couche 1 (points d'exposition des outils, hook de permission/élicitation,
-config MCP/context-servers, mode de permission). En cours le 2026-07-13.*
+Cartographie du code réel de `@zed-industries/claude-code-acp` (v0.58.1, TypeScript/
+ESM, Node ≥ 22, tests Vitest), menée **avant tout patch**.
+
+**Fait architectural central.** L'adaptateur **n'implémente ni n'exécute aucun outil**.
+C'est un pont : il lance le **binaire natif du Claude Agent SDK** en sous-process
+(via `query()`, `pathToClaudeCodeExecutable`, `acp-agent.ts:4401`) et traduit entre
+ACP (Zed ⇄ agent) et le SDK. Les outils natifs **`Read`/`Write`/`Edit`/`Bash`/`Grep`/
+`Glob`** tournent **dans ce sous-process**, activés en **preset** (`{ type: "preset",
+preset: "claude_code" }`, `acp-agent.ts:4339`), jamais énumérés. `src/tools.ts` ne fait
+que du **rendu ACP** (pas d'exécution). **Conséquence** : on ne « remplace » pas
+l'implémentation de `Read` ici — elle n'y est pas. On intercepte aux **deux seams que
+l'adaptateur possède**.
+
+**Seam 1 — le hook de permission `canUseTool`** (`acp-agent.ts:3546`, branché
+`acp-agent.ts:4381`). Chaque appel d'outil non déjà tranché y passe (en mode
+`default`/« Manual », tout passe). Il renvoie `{ behavior: "allow", updatedInput }` ou
+`{ behavior: "deny", message }`, et **peut réécrire l'input**. Précédent de
+court-circuit déjà présent : `if (currentModeId === "bypassPermissions") return
+{ behavior: "allow" }` (`acp-agent.ts:3681`) — exactement le patron du « la politique
+dit Allow → pas de prompt ». Sinon → `requestPermissionFromClient()`
+(`acp-agent.ts:3471`) → prompt ACP `session/request_permission`.
+
+**Seam 2 — l'assemblage des options dans `createSession()`** (`acp-agent.ts:4232`) :
+`mcpServers` (`:4376`), `disallowedTools` (`:4406`), `tools`/preset (`:4339`),
+`systemPrompt` (`:4287`), `permissionMode` (`:4380`).
+
+**Points d'attention.** Le mode `auto` natif est un **classifieur par modèle**, PAS un
+moteur de politique — inutilisable tel quel. La config vient des **settings de Claude
+Code** (`~/.claude/settings.json`, `.claude/settings.json`, `.mcp.json` ; `settingSources:
+["user","project","local"]`, `acp-agent.ts:4352`) : clés `permissions.defaultMode`,
+`permissions.allow`/`deny`. Les serveurs **MCP** sont acceptés depuis trois sources
+fusionnées dans `mcpServers` et surfacés via la machinerie MCP de Claude Code
+(`mcp__<serveur>__<outil>`), déjà gouvernés par le même `canUseTool`.
+
+**Plan de fork VibeOS (chirurgical, deux fonctions).**
+- **Couche 0 (aucun code)** : enregistrer le serveur MCP `vibeos:*` là où le
+  sous-process Claude Code le lit (`.mcp.json` / `~/.claude.json` déjà livré) — l'agent
+  hébergé voit `vibeos:*` sans patch. Config Zed dans `/etc/skel/.config/zed/`.
+- **Couche 1** — dans `createSession()` : ajouter `"Read"`, `"Write"`, `"Edit"` (etc.)
+  à `disallowedTools` (`:4406`) et garantir `vibeos:*` dans `mcpServers` (`:4376`), +
+  un `systemPrompt.append` (`:4287`) qui oriente le modèle vers `vibeos:fs.read`/
+  `fs.write`/`memory.query`. Toute action fichier passe alors par `vibed`.
+- **Couche 2** — forker **une seule fonction**, `canUseTool` (`:3546`) : en tête,
+  interroger `vibed` (classer T0–T3) ; `Allow` (T0/T1) → `{ behavior: "allow" }` **sans
+  prompt** ; `RequireApproval` (T2/T3) → laisser tomber dans le
+  `requestPermissionFromClient` existant (prompt/approbation **toujours** montré).
+  `permissionMode` maintenu à `default` pour que tout passe par `canUseTool`.
+  **INVARIANT** : ce chemin **ne touche pas `approval.rs`** et ne décide jamais lui-même
+  d'un T2/T3 — il ne fait que *lire* la classification de `vibed`.
+
+**Build/run** : `tsc` → `dist/index.js` (`start`), `vitest` pour les tests ; entrée
+`src/index.ts` → `runAcp()` ; `src/lib.ts` réexporte `ClaudeAcpAgent`/`runAcp` (le fork
+peut consommer la classe en bibliothèque plutôt que patcher en place). Amont Apache-2.0.

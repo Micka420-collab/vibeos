@@ -144,20 +144,29 @@ pub fn extract_thinking(event: &Value) -> Option<Value> {
     }
 }
 
-/// Does this `stream-json` event represent the agent invoking a tool? Used to
-/// count against the tool-call budget. Defensive, same schema caveat as above.
+/// Does this `stream-json` event represent the agent invoking a tool? Defensive,
+/// same schema caveat as above.
 pub fn is_tool_use(event: &Value) -> bool {
+    count_tool_use(event) > 0
+}
+
+/// Count the `tool_use` blocks in this event. An assistant turn can carry SEVERAL
+/// parallel tool calls in one message; counting them (not just "any") keeps the
+/// `--calls` budget honest against batching. Defensive, same schema caveat.
+pub fn count_tool_use(event: &Value) -> usize {
     match event.get("type").and_then(Value::as_str) {
         Some("assistant") => event
             .get("message")
             .and_then(|m| m.get("content"))
             .and_then(Value::as_array)
-            .is_some_and(|items| {
+            .map(|items| {
                 items
                     .iter()
-                    .any(|i| i.get("type").and_then(Value::as_str) == Some("tool_use"))
-            }),
-        _ => false,
+                    .filter(|i| i.get("type").and_then(Value::as_str) == Some("tool_use"))
+                    .count()
+            })
+            .unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -287,6 +296,19 @@ mod tests {
         assert!(!is_tool_use(
             &json!({"type":"content_block_delta","delta":{}})
         ));
+    }
+
+    #[test]
+    fn count_tool_use_counts_parallel_calls() {
+        // Several tool_use blocks in ONE assistant turn all count (budget honest).
+        let ev = json!({"type":"assistant","message":{"content":[
+            {"type":"tool_use","name":"fs.read","input":{}},
+            {"type":"text","text":"and"},
+            {"type":"tool_use","name":"fs.list","input":{}},
+            {"type":"tool_use","name":"os.status","input":{}}
+        ]}});
+        assert_eq!(count_tool_use(&ev), 3);
+        assert_eq!(count_tool_use(&json!({"type":"result"})), 0);
     }
 
     #[test]

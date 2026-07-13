@@ -130,13 +130,19 @@ pub fn read_thinking(
         .min(REASONING_MAX_TAIL);
 
     let path = session_file(root, id);
-    let Ok(content) = std::fs::read_to_string(&path) else {
+    // Bounded read: for a tail we only need the END of the file. Reading the
+    // whole file (a multi-hour run can reach hundreds of MB) into memory on a
+    // repeatable T0 call is a memory-amplification vector — cap it.
+    let Some((content, window_bounded)) = read_tail_string(&path, READ_TAIL_CAP) else {
         return Ok(json!({ "session_id": id, "lines": [], "count": 0, "truncated": false }));
     };
 
-    // Parse each non-empty line; apply the `since` filter.
-    let mut parsed: Vec<Value> = content
-        .lines()
+    // If we started mid-file, the first line is likely partial — drop it.
+    let mut lines = content.lines();
+    if window_bounded {
+        lines.next();
+    }
+    let mut parsed: Vec<Value> = lines
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|v| match since_unix {
@@ -155,7 +161,31 @@ pub fn read_thinking(
         "lines": parsed,
         "count": total,
         "truncated": truncated,
+        // True when the file was larger than the read window: `count` reflects
+        // the window (the newest ~READ_TAIL_CAP bytes), not the whole file.
+        "window_bounded": window_bounded,
     }))
+}
+
+/// Cap on how many bytes `read_thinking` reads from the tail of a session file.
+const READ_TAIL_CAP: u64 = 4 * 1024 * 1024;
+
+/// Read up to `cap` bytes from the END of `path`. Returns `(content, bounded)`;
+/// `bounded` is true when the file exceeded `cap` (so the content starts mid-file
+/// and its first line may be partial). `None` if the file is absent.
+fn read_tail_string(path: &Path, cap: u64) -> Option<(String, bool)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len <= cap {
+        let mut s = String::new();
+        file.read_to_string(&mut s).ok()?;
+        return Some((s, false));
+    }
+    file.seek(SeekFrom::Start(len - cap)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(cap).read_to_end(&mut bytes).ok()?;
+    Some((String::from_utf8_lossy(&bytes).into_owned(), true))
 }
 
 /// List the session ids that have a reasoning file (newest activity first is not
@@ -264,6 +294,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&missing);
         assert!(append_thinking(&missing, "s", &json!({}), 1).is_err());
         assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_tail_string_bounds_large_files() {
+        let root = scratch("tail");
+        let path = root.join("big.txt");
+        // 10 lines; read with a tiny cap so only the last few bytes are read.
+        let content = (0..10).map(|i| format!("line{i}\n")).collect::<String>();
+        std::fs::write(&path, &content).unwrap();
+        // Whole-file read (cap larger than file).
+        let (all, bounded) = read_tail_string(&path, 10_000).unwrap();
+        assert!(!bounded);
+        assert_eq!(all, content);
+        // Bounded read: last 12 bytes -> starts mid-file, flagged bounded.
+        let (tail, bounded) = read_tail_string(&path, 12).unwrap();
+        assert!(bounded);
+        assert!(tail.len() <= 12);
+        assert!(tail.ends_with("line9\n"));
+        assert!(read_tail_string(&root.join("absent"), 100).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

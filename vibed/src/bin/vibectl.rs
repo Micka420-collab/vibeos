@@ -66,13 +66,33 @@ fn agent_dispatch(sub: &[&str]) -> ExitCode {
             while i < flags.len() {
                 match flags[i] {
                     "--budget" => {
-                        budget_secs = flags
-                            .get(i + 1)
-                            .and_then(|s| vibed::supervisor::parse_duration(s));
+                        // Reject a present-but-unparseable value rather than
+                        // silently running unbounded.
+                        match flags.get(i + 1) {
+                            Some(v) => match vibed::supervisor::parse_duration(v) {
+                                Some(secs) => budget_secs = Some(secs),
+                                None => {
+                                    eprintln!(
+                                        "agent run: invalid --budget '{v}' (e.g. 8h, 30m, 45s)"
+                                    );
+                                    return ExitCode::from(2);
+                                }
+                            },
+                            None => {
+                                eprintln!("agent run: --budget needs a value");
+                                return ExitCode::from(2);
+                            }
+                        }
                         i += 2;
                     }
                     "--calls" => {
-                        max_calls = flags.get(i + 1).and_then(|s| s.parse().ok());
+                        match flags.get(i + 1).map(|s| s.parse::<u64>()) {
+                            Some(Ok(n)) if n > 0 => max_calls = Some(n),
+                            _ => {
+                                eprintln!("agent run: --calls needs a positive integer");
+                                return ExitCode::from(2);
+                            }
+                        }
                         i += 2;
                     }
                     "--session" => {
@@ -88,6 +108,12 @@ fn agent_dispatch(sub: &[&str]) -> ExitCode {
                         return ExitCode::from(2);
                     }
                 }
+            }
+            if budget_secs.is_none() && max_calls.is_none() {
+                eprintln!(
+                    "agent run: WARNING — no --budget/--calls: this run is UNBOUNDED \
+                     (only `agent stop` or the CLI exiting will end it)."
+                );
             }
             let opts = vibectl::AgentRunOpts {
                 command: cmd.iter().map(|s| s.to_string()).collect(),

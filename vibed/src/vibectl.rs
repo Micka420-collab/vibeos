@@ -321,6 +321,53 @@ fn terminate_group(pid: u32) {
     let _ = Command::new("kill").arg("-KILL").arg(&group).status();
 }
 
+/// Max bytes buffered for one `stream-json` line before it is dropped. Aligned
+/// with the reasoning store's per-line cap (a bigger line would be refused there
+/// anyway). Bounds the reader's memory against a giant single-line event.
+const STREAM_LINE_CAP: usize = reasoning::REASONING_MAX_LINE_BYTES;
+
+/// Read one `\n`-terminated line into `buf`, capping at `max` bytes. Returns
+/// `Some(false)` for a normal line (in `buf`, newline stripped), `Some(true)`
+/// when a line exceeded `max` and was DROPPED (buf cleared, bytes discarded to
+/// the next newline — memory bounded), and `None` at EOF. Unlike
+/// `BufRead::lines()`/`read_until`, the buffer never grows past `max`.
+fn read_capped_line<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>, max: usize) -> Option<bool> {
+    buf.clear();
+    let mut over = false;
+    loop {
+        let available = reader.fill_buf().ok()?;
+        if available.is_empty() {
+            return if buf.is_empty() && !over {
+                None
+            } else {
+                Some(over)
+            };
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                if !over && buf.len() + i <= max {
+                    buf.extend_from_slice(&available[..i]);
+                } else {
+                    over = true; // the line (with this chunk) exceeds `max`
+                    buf.clear();
+                }
+                reader.consume(i + 1);
+                return Some(over);
+            }
+            None => {
+                let n = available.len();
+                if !over && buf.len() + n <= max {
+                    buf.extend_from_slice(available);
+                } else {
+                    over = true;
+                    buf.clear(); // release the partial over-long line
+                }
+                reader.consume(n);
+            }
+        }
+    }
+}
+
 /// `vibectl agent thinking` — bounded tail of a session's captured reasoning
 /// (the same store as the T0 `agent.thinking` MCP tool).
 pub fn agent_thinking(
@@ -436,7 +483,19 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
         let blocks = Arc::clone(&blocks);
         let reader_done = Arc::clone(&reader_done);
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let mut reader = BufReader::new(stdout);
+            let mut buf: Vec<u8> = Vec::new();
+            // Bounded line read: a single giant `stream-json` line (model- or
+            // agent-influenced — e.g. a huge tool result echoed in one event)
+            // must NOT grow the buffer without limit and OOM the supervisor
+            // during an unattended run. Over-`STREAM_LINE_CAP` lines are dropped.
+            while let Some(over) = read_capped_line(&mut reader, &mut buf, STREAM_LINE_CAP) {
+                if over {
+                    continue; // over-long line dropped, memory released
+                }
+                let Ok(line) = std::str::from_utf8(&buf) else {
+                    continue;
+                };
                 let line = line.trim();
                 if line.is_empty() {
                     continue;
@@ -444,9 +503,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
                 let Ok(ev) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
-                if supervisor::is_tool_use(&ev) {
-                    tool_calls.fetch_add(1, Ordering::Relaxed);
-                }
+                tool_calls.fetch_add(supervisor::count_tool_use(&ev) as u64, Ordering::Relaxed);
                 if let Some(block) = supervisor::extract_thinking(&ev) {
                     if reasoning::append_thinking(&mem, &sid, &block, now_epoch_secs()).is_ok() {
                         blocks.fetch_add(1, Ordering::Relaxed);
@@ -489,15 +546,25 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let _ = child.wait(); // reap the direct child (now dead — never blocks)
-                          // Bounded drain: give the reader a moment to finish the closed pipe (on the
-                          // completed path it is already done; on a kill path the group-kill closes the
-                          // pipe). Never an unbounded join — cap the wait so the supervisor always
-                          // returns even if a grandchild kept the pipe open despite the group-kill.
+    // The child has exited (completed path) or been killed (budget/stop path); in
+    // both cases it is a zombie, NOT yet reaped, so its pid/pgid cannot be reused
+    // — capture the pid before reaping.
+    let child_pid = child.id();
+
+    // Bounded drain: give the reader a moment to finish the now-closed pipe.
+    // Never an unbounded join — cap the wait so the supervisor always returns.
     let drain_deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !reader_done.load(Ordering::Acquire) && std::time::Instant::now() < drain_deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    // If the reader still hasn't finished, a grandchild is holding the stdout
+    // write-end open (this can happen on the CLEAN-exit path too, where we did
+    // not group-kill). Terminate the whole group to release the pipe and stop
+    // the leaked grandchildren — safe because the child is not yet reaped.
+    if !reader_done.load(Ordering::Acquire) {
+        terminate_group(child_pid);
+    }
+    let _ = child.wait(); // reap the direct child (dead — never blocks)
     let blocks = blocks.load(Ordering::Relaxed);
     let calls = tool_calls.load(Ordering::Relaxed);
 
@@ -639,6 +706,31 @@ mod tests {
         let (report, ok) = audit_verify(Path::new("/nonexistent-audit.jsonl"));
         assert!(ok);
         assert_eq!(report["records"], 0);
+    }
+
+    #[test]
+    fn read_capped_line_drops_oversized_lines() {
+        use std::io::Cursor;
+        // A normal line, a giant (over-cap) line, another normal line.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"small1\n");
+        data.extend_from_slice(&[b'x'; 50]);
+        data.push(b'\n');
+        data.extend_from_slice(b"small2\n");
+        let mut reader = BufReader::new(Cursor::new(data));
+        let mut buf = Vec::new();
+        // cap = 10: "small1" fits; the 50-byte line is DROPPED; "small2" fits.
+        assert_eq!(read_capped_line(&mut reader, &mut buf, 10), Some(false));
+        assert_eq!(buf, b"small1");
+        assert_eq!(
+            read_capped_line(&mut reader, &mut buf, 10),
+            Some(true),
+            "oversized line reported as dropped"
+        );
+        assert!(buf.is_empty(), "dropped line releases its memory");
+        assert_eq!(read_capped_line(&mut reader, &mut buf, 10), Some(false));
+        assert_eq!(buf, b"small2");
+        assert_eq!(read_capped_line(&mut reader, &mut buf, 10), None, "EOF");
     }
 
     #[test]
