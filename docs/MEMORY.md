@@ -125,25 +125,37 @@ mode = "persistent"                                # "persistent" | "amnesic"
 | `birth` | **date de naissance** de la mémoire (ISO 8601 avec fuseau) |
 | `mode` | `persistent` ou `amnesic` — lu par Genesis dans la variable d'environnement `VIBEOS_MEMORY_MODE` (support de montage : LUKS/tmpfs en Phase 3) |
 
-### 3.2 `hardware.json`
+### 3.2 `hardware.json` (schema 2)
 
-Profil matériel collecté à la naissance. En v0.1, ce sont des instantanés **bruts**
-(sortie texte des outils, échappée en chaînes JSON) — suffisant pour que les agents
-répondent à « sur quoi je tourne ? » sans exécuter de commande. Chaque outil absent
-ou en échec est remplacé par un marqueur explicite (`"(lscpu not available)"`),
-jamais par un crash de Genesis.
+Profil matériel collecté à la naissance. **schema 2** expose des **champs
+structurés** (nombre de cœurs, RAM en octets, GPU + VRAM en octets) exploitables
+directement par les agents, et conserve les **instantanés bruts** des outils
+sous `raw` pour la forensique. Chaque sonde dégrade gracieusement (`cores: 0`,
+`total_bytes: null`, `gpu: []`, `"(lscpu not available)"`) — jamais un crash de
+Genesis. La VRAM n'est renseignée que si un outil vendeur la fournit
+(`nvidia-smi` pour NVIDIA) ; sinon `vram_bytes: null`.
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "collected_at": "2026-07-03T09:14:22+02:00",
   "kernel": "Linux 6.15.4-200.fc42.x86_64 x86_64 GNU/Linux",
-  "cpu": "…sortie de lscpu…",
-  "memory": "…sortie de free -h…",
-  "block_devices": "…sortie de lsblk…",
-  "filesystems": "…sortie de df -h…"
+  "cpu": { "model": "AMD Ryzen 7 3700X 8-Core Processor", "cores": 16 },
+  "memory": { "total_bytes": 16777216000 },
+  "gpu": [
+    { "vendor": "NVIDIA", "model": "NVIDIA GeForce RTX 3070 Ti", "vram_bytes": 8589934592 }
+  ],
+  "raw": {
+    "cpu": "…sortie de lscpu…",
+    "memory": "…sortie de free -h…",
+    "block_devices": "…sortie de lsblk…",
+    "filesystems": "…sortie de df -h…"
+  }
 }
 ```
+
+> **Note schema** : `hardware.json` porte son propre numéro (2), distinct du
+> schema de la mémoire/identité (`identity.toml`, événement `genesis` = 1).
 
 Évolution prévue (`schema = 2`) : champs structurés (cœurs, RAM en octets,
 GPU/VRAM pour dimensionner les modèles ollama locaux) et re-collecte journalisée
@@ -244,7 +256,8 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
 2. `umask 077` — tout ce qui naît ici est privé.
 3. Création du squelette : `user/`, `projects/`, `journal/`, `knowledge/`,
    racine en `0700`.
-4. Collecte matérielle → `hardware.json` : `uname`, `lscpu`, `free`, `lsblk`,
+4. Collecte matérielle → `hardware.json` (schema 2, champs structurés
+   cœurs/RAM/GPU + blobs bruts) : `uname`, `lscpu`, `free`, `lsblk`,
    `df` — chaque outil avec repli gracieux s'il est absent ou en échec.
 5. Écriture d'`identity.toml` : hostname, machine-id (si lisible),
    `birth = date -Is`, `mode` (persistent par défaut, amnesic si la variable

@@ -25,7 +25,11 @@ set -euo pipefail
 
 readonly MEMORY_DIR="${VIBEOS_MEMORY_DIR:-/var/lib/vibeos/memory}"
 readonly MEMORY_MODE="${VIBEOS_MEMORY_MODE:-persistent}"
+# Memory-layout / identity schema (identity.toml, journal genesis event).
 readonly SCHEMA_VERSION=1
+# hardware.json schema — bumped to 2 for structured cpu/memory/gpu fields
+# (was 1: free-text command blobs only). See docs/MEMORY.md §3.2.
+readonly HARDWARE_SCHEMA_VERSION=2
 
 log() { printf 'vibeos-genesis: %s\n' "$*" >&2; }
 
@@ -113,6 +117,82 @@ mkdir -p \
 chmod 700 "${MEMORY_DIR}"
 log "directory skeleton created"
 
+# --- Structured hardware probes (schema 2) -----------------------------------
+# Each prints a value or a safe default; none ever fails (Genesis must not
+# abort on a minimal/exotic host). Numeric probes print a bare number or the
+# JSON literal `null`, so they embed UNQUOTED in the document.
+
+cpu_model() {
+    local m=""
+    [ -r /proc/cpuinfo ] && m=$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)
+    [ -n "${m}" ] || m="unknown"
+    printf '%s' "${m}"
+}
+
+cpu_cores() {
+    local n=""
+    if command -v nproc >/dev/null 2>&1; then n=$(nproc 2>/dev/null || true); fi
+    if [ -z "${n}" ] && [ -r /proc/cpuinfo ]; then
+        n=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || true)
+    fi
+    case "${n}" in
+        '' | *[!0-9]*) printf '0' ;;
+        *) printf '%s' "${n}" ;;
+    esac
+}
+
+mem_total_bytes() {
+    local kb=""
+    [ -r /proc/meminfo ] && kb=$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || true)
+    case "${kb}" in
+        '' | *[!0-9]*) printf 'null' ;;
+        *) printf '%s' "$(( kb * 1024 ))" ;;
+    esac
+}
+
+# gpu_json — a JSON array of {vendor, model, vram_bytes}. NVIDIA first (its
+# tool reports VRAM); otherwise lspci display controllers (no VRAM without a
+# vendor tool); `[]` if nothing is detectable.
+gpu_json() {
+    local arr="" first=1
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local out
+        out=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null || true)
+        if [ -n "${out}" ]; then
+            local name mib vram
+            while IFS=',' read -r name mib; do
+                [ -n "${name}" ] || continue
+                name=$(printf '%s' "${name}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                mib=$(printf '%s' "${mib}" | tr -cd '0-9')
+                vram="null"; [ -n "${mib}" ] && vram=$(( mib * 1024 * 1024 ))
+                [ "${first}" -eq 1 ] || arr="${arr},"
+                first=0
+                arr="${arr}{\"vendor\":\"NVIDIA\",\"model\":\"$(json_escape "${name}")\",\"vram_bytes\":${vram}}"
+            done <<< "${out}"
+            printf '[%s]' "${arr}"
+            return
+        fi
+    fi
+    if command -v lspci >/dev/null 2>&1; then
+        local lines line vendor model
+        lines=$(lspci -mm 2>/dev/null | grep -Ei 'VGA compatible|3D controller|Display controller' || true)
+        if [ -n "${lines}" ]; then
+            while IFS= read -r line; do
+                [ -n "${line}" ] || continue
+                # lspci -mm: SLOT "CLASS" "VENDOR" "DEVICE" ... — split on quotes.
+                vendor=$(printf '%s' "${line}" | awk -F'"' '{print $4}')
+                model=$(printf '%s' "${line}" | awk -F'"' '{print $6}')
+                [ "${first}" -eq 1 ] || arr="${arr},"
+                first=0
+                arr="${arr}{\"vendor\":\"$(json_escape "${vendor}")\",\"model\":\"$(json_escape "${model}")\",\"vram_bytes\":null}"
+            done <<< "${lines}"
+            printf '[%s]' "${arr}"
+            return
+        fi
+    fi
+    printf '[]'
+}
+
 # --- 2. Hardware profile -> hardware.json ---------------------------------------
 BIRTH_TS="$(date -Is)"
 KERNEL_INFO="$(capture uname -srmo)"
@@ -121,18 +201,30 @@ MEM_INFO="$(capture free -h)"
 DISK_INFO="$(capture lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT)"
 FS_INFO="$(capture df -h)"
 
+# schema 2 adds STRUCTURED fields (cpu.cores, memory.total_bytes, gpu[].vram)
+# alongside the raw command blobs kept under `raw` for forensic completeness.
 cat > "${MEMORY_DIR}/hardware.json" <<EOF
 {
-  "schema": ${SCHEMA_VERSION},
+  "schema": ${HARDWARE_SCHEMA_VERSION},
   "collected_at": "$(json_escape "${BIRTH_TS}")",
   "kernel": "$(json_escape "${KERNEL_INFO}")",
-  "cpu": "$(json_escape "${CPU_INFO}")",
-  "memory": "$(json_escape "${MEM_INFO}")",
-  "block_devices": "$(json_escape "${DISK_INFO}")",
-  "filesystems": "$(json_escape "${FS_INFO}")"
+  "cpu": {
+    "model": "$(json_escape "$(cpu_model)")",
+    "cores": $(cpu_cores)
+  },
+  "memory": {
+    "total_bytes": $(mem_total_bytes)
+  },
+  "gpu": $(gpu_json),
+  "raw": {
+    "cpu": "$(json_escape "${CPU_INFO}")",
+    "memory": "$(json_escape "${MEM_INFO}")",
+    "block_devices": "$(json_escape "${DISK_INFO}")",
+    "filesystems": "$(json_escape "${FS_INFO}")"
+  }
 }
 EOF
-log "hardware profile written"
+log "hardware profile written (schema ${HARDWARE_SCHEMA_VERSION})"
 
 # --- 3. Machine identity -> identity.toml ---------------------------------------
 HOSTNAME_VALUE="$(get_hostname)"

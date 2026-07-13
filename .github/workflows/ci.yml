@@ -125,6 +125,42 @@ jobs:
             os/rootfs/usr/libexec/vibeos/vibeos-agents-group.sh \
             os/rootfs/usr/lib/systemd/system-generators/vibeos-amnesic-generator
 
+      # Non-regression smoke test of the Genesis sequence: run it into a throwaway
+      # dir and assert the layout, the hardware.json schema-2 structured fields,
+      # idempotency (a second run is a no-op) and the amnesic-mode marker.
+      - name: Genesis smoke test
+        run: |
+          set -euo pipefail
+          T="$(mktemp -d)"
+          VIBEOS_MEMORY_DIR="$T/mem" bash memory/genesis.sh
+          test -f "$T/mem/.initialized"
+          python3 - "$T/mem" <<'PY'
+          import json, sys, pathlib
+          root = pathlib.Path(sys.argv[1])
+          hw = json.loads((root / "hardware.json").read_text())
+          assert hw["schema"] == 2, f"hardware.json schema must be 2, got {hw['schema']}"
+          assert isinstance(hw["cpu"]["cores"], int), "cpu.cores must be an integer"
+          assert "total_bytes" in hw["memory"], "memory.total_bytes missing"
+          assert isinstance(hw["gpu"], list), "gpu must be an array"
+          assert set(hw["raw"]) >= {"cpu", "memory", "block_devices", "filesystems"}
+          # journal genesis event present
+          import glob
+          j = glob.glob(str(root / "journal" / "*.jsonl"))
+          assert j, "no journal file written"
+          ev = json.loads(open(j[0]).read().splitlines()[0])
+          assert ev["type"] == "genesis" and ev["source"] == "genesis.sh"
+          print("Genesis smoke test OK")
+          PY
+          # Idempotency: a second run must change nothing.
+          before="$(find "$T/mem" -type f | sort | xargs sha256sum)"
+          VIBEOS_MEMORY_DIR="$T/mem" bash memory/genesis.sh
+          after="$(find "$T/mem" -type f | sort | xargs sha256sum)"
+          test "$before" = "$after"  # no rewrite on second run
+          # Amnesic marker written by genesis event data.
+          VIBEOS_MEMORY_DIR="$T/mem2" VIBEOS_MEMORY_MODE=amnesic bash memory/genesis.sh
+          grep -q '^mode = "amnesic"' "$T/mem2/identity.toml"
+          rm -rf "$T"
+
   policy:
     name: policy.d — TOML schema validation
     runs-on: ubuntu-latest
