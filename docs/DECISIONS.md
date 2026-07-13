@@ -515,6 +515,15 @@ fusionnées dans `mcpServers` et surfacés via la machinerie MCP de Claude Code
   `permissionMode` maintenu à `default` pour que tout passe par `canUseTool`.
   **INVARIANT** : ce chemin **ne touche pas `approval.rs`** et ne décide jamais lui-même
   d'un T2/T3 — il ne fait que *lire* la classification de `vibed`.
+  - **Primitif requis côté `vibed`** : un outil MCP **T0 `policy.check(tool, target)`**
+    qui renvoie la `Decision` (`allow`/`deny`/`require_approval`) + le tier **sans
+    exécuter, sans consommer de grant, sans toucher `approval.rs`** — c'est ce que
+    `canUseTool` interroge pour décider « prompt ou pas ». **C'est un indice** : la
+    vraie application reste à l'exécution dans `vibed` (denylist, confinement,
+    plancher T2/T3), donc un `policy.check` imparfait ne peut jamais laisser passer
+    un T2/T3 sans approbation — au pire l'éditeur montre/omet un prompt à tort, mais
+    `vibed` gate toujours l'appel réel. Groundwork couche 2, implémentable côté vibed
+    indépendamment du fork.
 
 **Build/run** : `tsc` → `dist/index.js` (`start`), `vitest` pour les tests ; entrée
 `src/index.ts` → `runAcp()` ; `src/lib.ts` réexporte `ClaudeAcpAgent`/`runAcp` (le fork
