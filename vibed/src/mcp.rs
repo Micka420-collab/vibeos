@@ -890,6 +890,16 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             }}),
         ),
         (
+            "agent.sessions",
+            Tier::T0,
+            "List the autonomous-session ids that have captured reasoning \
+             (/var/lib/vibeos/memory/reasoning/*.jsonl). Returns { sessions: [id...], \
+             count, latest } (lexical order; 'latest' is the last id). Read-only \
+             discovery so an observer (the HUD) can find a session to feed to \
+             agent.thinking. No arguments.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        (
             "policy.check",
             Tier::T0,
             "Classify a HYPOTHETICAL tool call WITHOUT executing it: returns the \
@@ -953,6 +963,7 @@ fn execute_tool(
         "memory.query" => memory_query(args),
         "memory.append" => memory_append(args),
         "agent.thinking" => agent_thinking(args),
+        "agent.sessions" => agent_sessions(),
         "policy.check" => policy_check(args, policy),
         _ => Err(format!("unknown tool: {name}")),
     }
@@ -1041,6 +1052,20 @@ fn agent_thinking(args: &Value) -> Result<String, String> {
     let out =
         crate::reasoning::read_thinking(std::path::Path::new(MEMORY_DIR), session_id, tail, since)?;
     serde_json::to_string(&out).map_err(|e| format!("agent.thinking: serialization failed: {e}"))
+}
+
+/// agent.sessions (T0): list the reasoning-session ids so an observer (the HUD)
+/// can discover a session to pass to `agent.thinking`. Read-only directory
+/// listing; no arguments, bounded output (one short id per captured session).
+fn agent_sessions() -> Result<String, String> {
+    let sessions = crate::reasoning::list_sessions(std::path::Path::new(MEMORY_DIR));
+    let latest = sessions.last().cloned();
+    serde_json::to_string(&json!({
+        "sessions": sessions,
+        "count": sessions.len(),
+        "latest": latest,
+    }))
+    .map_err(|e| format!("agent.sessions: serialization failed: {e}"))
 }
 
 /// sectools.list (T0): read-only discovery of the shipped security toolkit.
@@ -3867,6 +3892,24 @@ mod tests {
         assert!(err.contains("session_id"), "unexpected error: {err}");
         // agent.thinking is T0 in the catalog.
         assert_eq!(tool_tier("agent.thinking"), Some(Tier::T0));
+    }
+
+    #[test]
+    fn agent_sessions_returns_a_well_formed_listing() {
+        // No arguments; on a machine without the store it yields an empty, valid
+        // listing (never an error) — the discovery tool degrades gracefully.
+        let out: Value = serde_json::from_str(&agent_sessions().unwrap()).unwrap();
+        assert!(
+            out["sessions"].is_array(),
+            "sessions must be an array: {out}"
+        );
+        assert!(out["count"].is_u64(), "count must be a number: {out}");
+        // 'latest' is null when empty, or the last id otherwise — both are valid.
+        assert!(
+            out.get("latest").is_some(),
+            "latest key must be present: {out}"
+        );
+        assert_eq!(tool_tier("agent.sessions"), Some(Tier::T0));
     }
 
     #[test]

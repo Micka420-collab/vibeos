@@ -15,12 +15,13 @@
 // ---------------------------------------------------------------------------
 // DATA SOURCE — v0.1 vs Phase 2 (honesty rule)
 // ---------------------------------------------------------------------------
-// v0.1: MOCK data from vibed_client.js (mockAgents()). vibed v0.1 exposes NO
-// tool that lists connected agents — the roster is not derivable from the daemon
-// yet, and we say so (offline placeholder) instead of faking a wire.
-// TODO(Phase 2): feed from vibed over /run/vibed/mcp.sock — an `agents.list` T0
-// tool, or an audit-derived stream keyed by caller pid (SO_PEERCRED). Same path
-// as os.status, through vibed_client.js.
+// Current state: the roster stays EMPTY ([] -> offline placeholder). vibed
+// exposes NO tool that lists connected agents — the roster is not derivable from
+// the daemon yet, so shell.qml leaves `agents` at [] rather than faking a wire
+// (unlike os.status/memory.query/agent.thinking, which are now live).
+// TODO: feed from vibed over /run/vibed/mcp.sock — an `agents.list` T0 tool, or
+// an audit-derived stream keyed by caller pid (SO_PEERCRED). Same path as
+// os.status, through vibed_client.js.
 // ---------------------------------------------------------------------------
 
 import QtQuick

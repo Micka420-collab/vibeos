@@ -99,20 +99,24 @@ Prérequis d'accès : le socket est `root:vibeos-agents` en `0660` ; l'utilisate
 session doit appartenir au groupe **`vibeos-agents`** pour que le HUD puisse s'y
 connecter. Sinon → état « hors ligne » (voir §5), jamais une erreur.
 
-## 4. Ce qui est mocké en v0.1 vs live en Phase 2
+## 4. Ce qui est live vs encore mocké
 
-| Donnée | v0.1 (livré) | Phase 2 (cible) |
+| Donnée | Statut | Source |
 |---|---|---|
-| État du démon | **mock : toujours « hors ligne »** (honnête : `vibed` tourne bien au boot, mais ce QML n'ouvre encore **aucun** socket) | connexion réelle au socket, reconnexion périodique |
-| Statut système | mock plausible (`mockOsStatus()`) | `tools/call os.status` via le socket |
-| État mémoire | mock plausible (`mockMemoryQuery()`) | `tools/call memory.query` via le socket |
-| Roster des agents + tiers | **mock assumé** : `vibed` v0.1 n'expose aucun outil `agents.list` — cette donnée n'est *pas encore dérivable* du démon | outil `agents.list` (ou flux dérivé des peer credentials de l'audit) à spécifier en Phase 2 |
-| Cadenas « approbation en attente » | mock (déclenché dans le modèle de démo) | flux d'approbation T2/T3 (dialogue Plasma, Phase 2) |
-| Jauge ollama / VRAM | mock (`mockOllama()`) | `ollama ps` (API locale `127.0.0.1:11434`) + `nvidia-smi --query-gpu=...` via `Quickshell.Io.Process` |
+| État du démon | ✅ **live** | connexion réelle au socket (`Quickshell.Io.Socket`), sonde de reconnexion périodique |
+| Statut système | ✅ **live** | `tools/call os.status` (T0) via le socket, poll 5 s |
+| État mémoire | ✅ **live** | `tools/call memory.query` (T0) via le socket |
+| Raisonnement des agents | ✅ **live** | `agent.sessions` (découverte de session) → `agent.thinking` (T0) via le socket ; `[]` tant qu'aucune session autonome n'a capté de raisonnement |
+| Roster des agents + tiers | ⛔ pas encore | `vibed` n'expose aucun outil `agents.list` — non *dérivable* du démon ; roster `[]` (panneau hors ligne) tant que l'outil n'est pas spécifié |
+| Cadenas « approbation en attente » | ⛔ pas encore | dépend du roster (`agents.list`) + flux d'approbation T2/T3 (dialogue Plasma) |
+| Jauge ollama / VRAM | ⛔ pas encore | défaut honnête `available:false` ; cible : `ollama ps` (API `127.0.0.1:11434`) + `nvidia-smi` via `Quickshell.Io.Process` |
 
-Le branchement Phase 2 utilisera `Quickshell.Io` (`Socket` sur le chemin Unix +
-`SplitParser` pour le découpage en lignes) ; les emplacements exacts sont marqués
-`TODO(Phase 2)` dans `shell.qml` et `vibed_client.js`.
+Le branchement live utilise `Quickshell.Io` (`Socket` sur le chemin Unix +
+`SplitParser` pour le découpage en lignes) dans `shell.qml` ; les formes de
+requête/réponse et le mappage du raisonnement vivent dans `vibed_client.js`.
+**Non vérifié au runtime ici** : Quickshell n'est pas lançable headless — le
+câblage est construit d'après le pattern documenté et la forme réelle des
+payloads `vibed` ; la validation visuelle attend une session graphique.
 
 ## 5. Dégradation gracieuse — contrat ferme
 

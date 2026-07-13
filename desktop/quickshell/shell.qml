@@ -54,21 +54,31 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
 import Quickshell
+import Quickshell.Io
 import "vibed_client.js" as Vibed
 
 ShellRoot {
     id: root
 
-    // ----- HUD state (MOCK — see header for the Phase 2 socket wiring) -----
-    // Hardwired offline: vibed ships and runs in the image, but this shell
-    // does not open the socket yet — honest about the missing live wiring.
-    // DESIGN PREVIEW ONLY: flip to true to see the mocked "online" layout
-    // (agent chips, tier pills, gauges). Never ship it as true.
+    // ----- HUD state — LIVE from vibed over /run/vibed/mcp.sock -----
+    // vibedOnline is driven by the socket connection state (below): when vibed
+    // is unreachable — daemon down, or the user is not in the vibeos-agents
+    // group — the HUD renders its honest OFFLINE state and never fake "live"
+    // data (DESKTOP.md §6, graceful degradation). Empty initial values, filled
+    // only from real tool responses.
     property bool vibedOnline: false
-    property var osStatus:    Vibed.mockOsStatus()
-    property var memoryStatus: Vibed.mockMemoryQuery()
-    property var agents:      Vibed.mockAgents()
-    property var ollama:      Vibed.mockOllama()
+    property var osStatus: ({})
+    property var memoryStatus: ({})
+    // No agents.list tool yet — the roster is not derivable from vibed (see
+    // AgentStatus.qml). Stays [] until that tool lands; the panel shows offline.
+    property var agents: []
+    // ollama gauge keeps its own probe (OllamaGauge.qml, ollama API + nvidia-smi),
+    // not the vibed socket — honest default is "unavailable".
+    property var ollama: Vibed.mockOllama()
+    // Live reasoning of the most recent autonomous session (agent.sessions ->
+    // agent.thinking). [] until a session exists; ReasoningPanel shows offline.
+    property var reasoningLive: []
+    property string reasoningSession: ""
 
     // Derived global state (DESIGN-SYSTEM §11.4 "État global"):
     //   offline (gray) -> ready -> agents active (mauve) -> approval waiting (peach pulse).
@@ -80,26 +90,74 @@ ShellRoot {
         return false
     }
 
-    // v0.1 demo heartbeat: refreshes the mocks so the prototype feels alive.
-    // Purely cosmetic; deleted when the Phase 2 socket wiring lands.
-    Timer {
-        interval: 5000; running: true; repeat: true
-        onTriggered: {
-            root.osStatus = Vibed.mockOsStatus()
-            root.memoryStatus = Vibed.mockMemoryQuery()
-            root.agents = Vibed.mockAgents()
-            root.ollama = Vibed.mockOllama()
+    // ----- Live vibed client -------------------------------------------------
+    // A line-delimited JSON-RPC 2.0 client on the MCP socket. The HUD is
+    // STRICTLY AN OBSERVER: it only ever calls T0 read-only tools (os.status,
+    // memory.query, agent.sessions, agent.thinking) — never a T1+ tool, never
+    // an approval. Request/response shapes live in vibed_client.js.
+    Socket {
+        id: vibedSocket
+        path: Vibed.SOCKET_PATH
+        connected: true
+        parser: SplitParser { onRead: function (line) { root.handleVibedLine(line) } }
+        onConnectionStateChanged: {
+            root.vibedOnline = vibedSocket.connected
+            if (vibedSocket.connected) {
+                vibedSocket.write(Vibed.initializeRequest())
+                vibedSocket.write(Vibed.initializedNotification())
+                root.pollVibed()
+            } else {
+                // Lost the daemon: drop to the honest offline state, keep no
+                // stale "live" data around.
+                root.reasoningLive = []
+                root.reasoningSession = ""
+            }
         }
     }
 
-    // TODO(Phase 2): parse incoming socket lines here.
-    // function handleVibedLine(line) {
-    //     const msg = Vibed.parseLine(line); if (!msg) return
-    //     const res = Vibed.parseToolResult(msg)   // { tool, ok, data|error }
-    //     if (!res.ok) return                       // policy denial/error -> keep last good state
-    //     if (res.tool === "os.status")    root.osStatus = res.data
-    //     if (res.tool === "memory.query") root.memoryStatus = res.data
-    // }
+    // Poll the read-only tools. os.status + memory.query every tick; discover a
+    // reasoning session (agent.sessions) and, if one exists, tail its reasoning
+    // (agent.thinking). Observer-only cadence, never a write path.
+    function pollVibed() {
+        if (!vibedSocket.connected) return
+        vibedSocket.write(Vibed.toolsCallRequest("os.status", {}))
+        vibedSocket.write(Vibed.toolsCallRequest("memory.query", { query: "" }))
+        vibedSocket.write(Vibed.toolsCallRequest("agent.sessions", {}))
+        if (root.reasoningSession !== "")
+            vibedSocket.write(Vibed.toolsCallRequest("agent.thinking",
+                { session_id: root.reasoningSession, tail: 40 }))
+    }
+
+    Timer {   // steady poll while online
+        interval: 5000; running: root.vibedOnline; repeat: true
+        onTriggered: root.pollVibed()
+    }
+    Timer {   // reconnect probe while offline — degradation stays graceful
+        interval: 4000; running: !root.vibedOnline; repeat: true
+        onTriggered: vibedSocket.connected = true
+    }
+
+    // Route each socket line to the right piece of HUD state. A policy denial or
+    // error keeps the last good state (never a crash, never fake data).
+    function handleVibedLine(line) {
+        const msg = Vibed.parseLine(line); if (!msg) return
+        const res = Vibed.parseToolResult(msg)
+        if (!res.ok) return
+        if (res.tool === "os.status") {
+            root.osStatus = res.data
+        } else if (res.tool === "memory.query") {
+            root.memoryStatus = res.data
+        } else if (res.tool === "agent.sessions") {
+            // Follow the most recent session; clear reasoning when none.
+            const latest = (res.data && res.data.latest) ? res.data.latest : ""
+            if (latest !== root.reasoningSession) {
+                root.reasoningSession = latest
+                if (latest === "") root.reasoningLive = []
+            }
+        } else if (res.tool === "agent.thinking") {
+            root.reasoningLive = Vibed.reasoningToLive(res.data)
+        }
+    }
 
     PanelWindow {
         id: bar
@@ -261,14 +319,16 @@ ShellRoot {
                 // ---- hairline divider ----
                 Rectangle { Layout.alignment: Qt.AlignVCenter; width: 1; height: 16; color: Theme.hairline }
 
-                // ---- reasoning (3rd pillar "why" — Phase 2.5 scaffolding) ----
-                // Ships EMPTY (honesty rule): live/history stay [] until the
-                // Phase 2.5 agent supervisor publishes reasoning (tapped from the
-                // CLI stream, never the CLI transcript — docs/DECISIONS.md ADR-012).
-                // The chip shows "raisonnement — hors ligne" until then.
+                // ---- reasoning (3rd pillar "why" — Phase 2.5) ----
+                // LIVE: fed from agent.sessions -> agent.thinking over the vibed
+                // socket (tapped from the CLI stream, never the CLI transcript —
+                // docs/DECISIONS.md ADR-012). `live` is [] until an autonomous
+                // session has captured reasoning; the chip then shows offline.
+                // `history` still awaits a listing mode of agent.thinking.
                 ReasoningPanel {
                     Layout.alignment: Qt.AlignVCenter
                     online: root.vibedOnline
+                    live: root.reasoningLive
                 }
 
                 // ---- hairline divider ----
