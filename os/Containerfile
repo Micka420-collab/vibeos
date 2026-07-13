@@ -182,6 +182,86 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         fira-code-fonts \
     && dnf clean all
 
+# --- 1d-bis. Security toolkit (Fedora repos + RPM Fusion) --------------------
+# VibeOS is security-first: a professional pentest/DFIR toolkit ships in the
+# image, the way Kali/Parrot/BlackArch do. Every package here is a SIGNED
+# Fedora / RPM Fusion RPM (clean supply chain for an immutable OS); the wider
+# landscape (Go/pip tools, C2 frameworks, SDR GUIs) is curated in
+# docs/SECURITY-TOOLKIT.md and installed per-user (pipx/go) or via distrobox.
+#
+# GOVERNANCE — read docs/SECURITY-TOOLKIT.md §"Gouvernance" before extending:
+# these tools are available to the HUMAN operator in the shell. AI agents do
+# NOT get to run them freely: any future agent-invocation path goes through
+# vibed's policy engine, where active-against-a-target tools are T2 and
+# destructive ones T3 — both requiring out-of-band HUMAN APPROVAL (the Phase 4
+# approval flow). The T0 tool `sectools.list` lets an agent DISCOVER the
+# toolkit (read-only) without executing anything. Authorized-use only: the
+# operator's own systems, sanctioned engagements, CTF, and research.
+# Keep os/security-tools.txt in strict sync with this list.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        nmap \
+        nmap-ncat \
+        masscan \
+        tcpdump \
+        wireshark-cli \
+        hping3 \
+        ngrep \
+        tcpreplay \
+        arp-scan \
+        nbtscan \
+        dnsenum \
+        bind-utils \
+        whois \
+        macchanger \
+        proxychains-ng \
+        tor \
+        dsniff \
+        ettercap \
+        hydra \
+        john \
+        hashcat \
+        medusa \
+        ncrack \
+        aircrack-ng \
+        reaver \
+        pixiewps \
+        hcxtools \
+        kismet \
+        whatweb \
+        wfuzz \
+        gobuster \
+        ffuf \
+        radare2 \
+        rizin \
+        binwalk \
+        yara \
+        gdb \
+        strace \
+        ltrace \
+        patchelf \
+        upx \
+        checksec \
+        python3-pwntools \
+        sleuthkit \
+        foremost \
+        scalpel \
+        testdisk \
+        chntpw \
+        steghide \
+        perl-Image-ExifTool \
+        python3-impacket \
+        clamav \
+        rkhunter \
+        lynis \
+        chkrootkit \
+        aide \
+        openscap \
+        openscap-scanner \
+        scap-security-guide \
+        suricata \
+        age \
+    && dnf clean all
+
 # --- 1e. Vibecoding terminal stack (COPR) ------------------------------------
 # Tools not packaged in Fedora, from well-maintained COPRs (probed working on
 # Kinoite 42): starship (atim), zellij (varlad), lazygit (atim), ghostty

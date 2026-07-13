@@ -180,6 +180,7 @@ async fn handshake_tools_list_and_t0_call_end_to_end() {
         "pkg.install",
         "svc.restart",
         "svc.status",
+        "sectools.list",
         "memory.query",
         "memory.append",
     ] {

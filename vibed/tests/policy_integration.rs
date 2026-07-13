@@ -66,6 +66,13 @@ fn shipped_default_policy_canonical_decisions() {
         "svc.status (T0) must be allowed by the shipped policy"
     );
 
+    // sectools.list: read-only toolkit discovery is T0.
+    assert_eq!(
+        engine.evaluate("sectools.list", Some(Tier::T0), NO_CTX),
+        Decision::Allow,
+        "sectools.list (T0) must be allowed by the shipped policy"
+    );
+
     // The memory tools: T0 read and T1 governed append are both allowed.
     assert_eq!(
         engine.evaluate("memory.query", Some(Tier::T0), NO_CTX),

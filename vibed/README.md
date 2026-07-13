@@ -64,6 +64,7 @@ sequenceDiagram
 | `pkg.install` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucun paquet installé |
 | `svc.restart` | T2 | **RequireApproval** | Stub v0.1 : retourne `requires_approval`, aucune unité redémarrée |
 | `svc.status` | T0 | Allow | État d'une unité systemd en lecture seule (`systemctl show` : load/active/sub state, unit file state) ; validation stricte du nom d'unité en code (pas d'injection d'option ni de chemin), environnement vidé, chemin absolu |
+| `sectools.list` | T0 | Allow | Découverte **en lecture seule** de la trousse cybersécurité (`/usr/share/vibeos/security-tools.tsv`) : nom, catégorie, tier gouvernant l'invocation agent, présence — **n'exécute aucun outil** (lancer un outil T2/T3 = chemin séparé, approbation humaine ; voir [../docs/SECURITY-TOOLKIT.md](../docs/SECURITY-TOOLKIT.md)) |
 | `memory.query` | T0 | Allow | Recherche par sous-chaîne dans `/var/lib/vibeos/memory` ; arguments `query`, `scope` (identity/hardware/user/projects/journal/knowledge) et `limit` (plafond de résultats, drapeau `truncated`) — voir `docs/MEMORY.md` §9 |
 | `memory.append` | T1 | Allow | Écriture mémoire **strictement additive** : une ligne JSONL par appel, scopes `journal` (type/source/data, types réservés au système refusés) et `knowledge` (subject/fact/source[/confidence]) ; `ts` et `id` posés par vibed, ligne plafonnée à 16 KiB, `O_APPEND`+`O_NOFOLLOW`, aucun argument de chemin ; scopes `user`/`projects` = reste Phase 2/3 |
 
@@ -166,7 +167,7 @@ wsl -d Ubuntu
 cd "/mnt/f/je ne sais pas encore/vibed"   # attention aux espaces : garder les guillemets
 
 cargo build --locked      # Cargo.lock est commité (épinglage supply-chain, voir SECURITY.md)
-cargo test                 # 66 tests unitaires + 6 tests d'intégration
+cargo test                 # 71 tests unitaires + 6 tests d'intégration
                            # (2 politique réelle + 4 MCP bout-en-bout sur socketpair)
 ```
 

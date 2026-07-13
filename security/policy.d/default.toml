@@ -112,6 +112,13 @@ tier = "T0"
 action = "allow"
 reason = "Read-only systemd unit state (systemctl show); no state change, strict unit-name validation in code."
 
+[[rule]]
+id = "sectools-list"
+tools = ["sectools.list"]
+tier = "T0"
+action = "allow"
+reason = "Read-only discovery of the security toolkit manifest; executes no tool. Running a security tool is a separate, policy-gated path (T2/T3 = human approval)."
+
 # --- T1: user-scope mutation ------------------------------------------------
 
 [[rule]]

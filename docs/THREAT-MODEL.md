@@ -150,6 +150,7 @@ Phases de la [../ROADMAP.md](../ROADMAP.md) (qui fait foi) : Phase 1 = v0.1 Prem
 | S1 Injection → action système | Tiers T0–T3, défaut = refus (politique installée dès la v0.1) | Phase 2 |
 | S1 | Approbation humaine T2+ hors bande (spécifiée Phase 2, implémentée Phase 4) | Phase 4 |
 | S1 | `svc.status` (T0) : lecture seule d'état d'unité — validation stricte du nom (anti-injection d'option/chemin), `systemctl` par chemin absolu, environnement vidé | Phase 2 ✅ |
+| S1 | Trousse cybersécurité **gouvernée** : outils offensifs T2/T3 (approbation humaine) ; l'agent ne peut que les **découvrir** en lecture seule (`sectools.list`, T0), jamais les exécuter tant que le flux d'approbation (Phase 4) n'est pas livré | Phase 2 ✅ (découverte) / Phase 4 (exécution gouvernée) |
 | S1 | Sandbox par outil (systemd-run, seccomp, Landlock) | Phase 3 |
 | S1 | Taint tracking de provenance du contexte | Phase 6+ |
 | S2 Exfiltration mémoire | LUKS sur `/var/lib/vibeos/memory` | Phase 3 |

@@ -25,6 +25,7 @@ détaillées dans [`docs/HARDWARE.md`](../docs/HARDWARE.md).
 | `rootfs/etc/xdg/kdeglobals` | Pointeur système du Global Theme par défaut (`LookAndFeelPackage=org.vibeos.dark`) — cascade KConfig, surchargeable par utilisateur ; garde anti-collision dans le `Containerfile`. |
 | `rootfs/etc/skel/` | Dotfiles du premier `$HOME` : pile terminal vibecoding, autostart du HUD (`.config/autostart/vibeos-hud.desktop`), config MCP de Claude Code (`.claude.json` → socket `vibed`). |
 | `packages.txt` | Manifeste des paquets, catégorisé et épinglé — doit rester **strictement synchronisé** avec le `Containerfile`. |
+| `security-tools.txt` | Manifeste de la **trousse cybersécurité** embarquée (couche 1d-bis, RPM signés Fedora/RPM Fusion). Synchronisé avec le `Containerfile`, avec `rootfs/usr/share/vibeos/security-tools.tsv` (lu par `sectools.list`) et avec [../docs/SECURITY-TOOLKIT.md](../docs/SECURITY-TOOLKIT.md). |
 
 Deux contenus livrés par l'image ont leur source **hors de `os/`** (ne pas les
 éditer ici) :
