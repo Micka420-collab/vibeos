@@ -102,6 +102,11 @@ impl AuditLog {
             .open(&self.path)?;
         file.write_all(line.as_bytes())?;
         file.write_all(b"\n")?;
+        // Durability, not just crash-safety: the "audit before execution"
+        // invariant must hold across a power cut too — without this fsync, a
+        // 'started' record could vanish while its tool call DID run. sync_data
+        // costs ~ms per call, negligible at the v0.x tool-call rate.
+        file.sync_data()?;
         Ok(())
     }
 }
