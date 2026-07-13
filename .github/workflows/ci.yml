@@ -24,6 +24,7 @@ on:
       - "security/**"
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
+      - "os/rootfs/usr/lib/systemd/system-generators/**"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
@@ -32,6 +33,7 @@ on:
       - "security/**"
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
+      - "os/rootfs/usr/lib/systemd/system-generators/**"
       - ".github/workflows/ci.yml"
 
 permissions:
@@ -116,11 +118,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: shellcheck (genesis.sh, vibeos-hud, vibeos-agents-group.sh)
+      - name: shellcheck (scripts + systemd generator)
         run: |
           shellcheck memory/genesis.sh \
             os/rootfs/usr/bin/vibeos-hud \
-            os/rootfs/usr/libexec/vibeos/vibeos-agents-group.sh
+            os/rootfs/usr/libexec/vibeos/vibeos-agents-group.sh \
+            os/rootfs/usr/lib/systemd/system-generators/vibeos-amnesic-generator
 
   policy:
     name: policy.d — TOML schema validation

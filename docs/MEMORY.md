@@ -43,8 +43,8 @@ Trois principes non négociables :
 flowchart TD
     A[UEFI Secure Boot] --> B["Racine vérifiée — composefs/fs-verity<br/>(UKI mesurée : Phase 4)"]
     B --> C[systemd]
-    C --> D{"Mode amnésique ?<br/>(generator : Phase 3)"}
-    D -- "oui (vibeos.amnesic=1) — Phase 3" --> E[tmpfs monté sur /var/lib/vibeos/memory]
+    C --> D{"Mode amnésique ?<br/>(generator systemd, livré)"}
+    D -- "oui (vibeos.amnesic=1)" --> E[tmpfs monté sur /var/lib/vibeos/memory]
     D -- non --> F["v0.1 : répertoire en clair sous /var<br/>Phase 3 : déverrouillage LUKS TPM2 ou passphrase,<br/>montage du volume"]
     E --> G{.initialized présent ?}
     F --> G
@@ -53,7 +53,7 @@ flowchart TD
     H --> I
 ```
 
-En mode amnésique (**Phase 3**, §5) le tmpfs est toujours vide au boot, donc
+En mode amnésique (§5, generator livré) le tmpfs est toujours vide au boot, donc
 `.initialized` est toujours absent : **Genesis s'exécute à chaque démarrage** —
 c'est le mécanisme, pas un cas particulier.
 
@@ -249,7 +249,7 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
 5. Écriture d'`identity.toml` : hostname, machine-id (si lisible),
    `birth = date -Is`, `mode` (persistent par défaut, amnesic si la variable
    d'environnement `VIBEOS_MEMORY_MODE=amnesic` est injectée — par le generator
-   amnésique en Phase 3, cf. §5).
+   amnésique livré, cf. §5).
 6. Pose des `README.md` placeholders dans les quatre sous-répertoires.
 7. Premier événement du journal : `type: "genesis"` dans le fichier du jour.
 8. **En dernier** : écriture de `.initialized` (contenu : horodatage de naissance).
@@ -290,27 +290,33 @@ de la machine.
 
 ---
 
-## 5. Mode amnésique (cible Phase 3 — non livré en v0.1)
+## 5. Mode amnésique (generator livré ; validation VM = Phase 3)
 
 **Principe** (inspiré de Tails) : `/var/lib/vibeos/memory` est un **tmpfs**.
 La mémoire est reconstruite par Genesis **à chaque boot** et disparaît à
 l'extinction — elle n'a jamais existé sur le disque.
 
-**Activation (Phase 3)** : paramètre kernel `vibeos.amnesic=1` (entrée de boot
-dédiée), lu par un **generator systemd** — *non livré en v0.1, aucun generator
-n'existe encore dans l'image* — qui :
+**Activation** : paramètre kernel `vibeos.amnesic=1` (entrée de boot dédiée), lu
+par le **generator systemd** `os/rootfs/usr/lib/systemd/system-generators/vibeos-amnesic-generator`
+(**livré** dans l'image, shellcheck + tests fonctionnels verts). Il :
 
-1. montera un tmpfs sur `/var/lib/vibeos/memory` à la place du volume LUKS
-   (qui ne sera ni déverrouillé ni monté) ;
-2. injectera `VIBEOS_MEMORY_MODE=amnesic` dans l'environnement de
-   `vibeos-genesis.service` (drop-in), d'où `mode = "amnesic"` dans
-   `identity.toml`.
+1. génère un **mount unit tmpfs** `var-lib-vibeos-memory.mount`
+   (`mode=0700,nosuid,nodev,noexec,size=512M`) et le câble dans
+   `local-fs.target` — la mémoire est un tmpfs, le volume LUKS (Phase 3) n'est
+   ni déverrouillé ni monté ;
+2. injecte `VIBEOS_MEMORY_MODE=amnesic` (drop-in) dans `vibeos-genesis.service`
+   **et** `vibed.service`, et les ordonne après le montage
+   (`RequiresMountsFor`), d'où `mode = "amnesic"` dans `identity.toml` ;
+3. publie un marqueur non secret `/run/vibeos/memory-mode` (`amnesic` |
+   `persistent`) pour Genesis/vibed/HUD. `vibeos.amnesic=0` force persistent ;
+   toute cmdline non reconnue reste persistent (défaut sûr).
 
-Le tmpfs étant vide, `.initialized` sera absent et Genesis se rejouera : **aucun
+Le tmpfs étant vide, `.initialized` est absent et Genesis se rejoue : **aucun
 code spécifique** n'est nécessaire dans `genesis.sh`, le mécanisme d'idempotence
-suffit. Dès la v0.1, `genesis.sh` sait d'ailleurs déjà écrire `mode = "amnesic"`
-si on lui fournit `VIBEOS_MEMORY_MODE=amnesic` — c'est le seul morceau du mode
-amnésique livré aujourd'hui, et il est testable à la main.
+suffit ; `genesis.sh` lit `VIBEOS_MEMORY_MODE` et écrit `mode = "amnesic"`.
+**Reste Phase 3** : la validation en VM du cycle boot amnésique → reboot →
+vérification qu'aucune trace ne persiste (nécessite un vrai boot), et le swap
+volatil ci-dessous.
 
 **Cas d'usage** : machine partagée ou de démonstration ; poste de réponse à
 incident / forensics (aucune trace de la session) ; travail sur données sensibles ;
