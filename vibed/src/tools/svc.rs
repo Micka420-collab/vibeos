@@ -260,6 +260,25 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    /// Call `svc_restart_with`, retrying while the freshly-written fake binary
+    /// reports ETXTBSY ("Text file busy"). Under parallel `cargo test`, another
+    /// thread's `Command` fork() can transiently inherit our write fd to the
+    /// fake between fork and its own exec, so exec() of the fake momentarily
+    /// fails. This is a TEST-ONLY race — production only ever execs the static
+    /// `/usr/bin/systemctl`, never a just-written file.
+    #[cfg(unix)]
+    fn svc_restart_retry(args: &Value, bin: &str) -> Result<String, String> {
+        for _ in 0..50 {
+            match svc_restart_with(args, bin) {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        svc_restart_with(args, bin)
+    }
+
     #[cfg(unix)]
     #[test]
     fn svc_restart_actually_invokes_systemctl_and_confirms_state() {
@@ -269,7 +288,7 @@ mod tests {
         let marker = dir.join("restarted");
         let bin = fake_systemctl(&dir, &marker, 0);
 
-        let out = svc_restart_with(&json!({"unit": "vibed"}), &bin).expect("restart succeeds");
+        let out = svc_restart_retry(&json!({"unit": "vibed"}), &bin).expect("restart succeeds");
         let v: Value = serde_json::from_str(&out).unwrap();
 
         // The backend really ran `systemctl restart -- vibed.service`...
@@ -297,7 +316,7 @@ mod tests {
         let marker = dir.join("restarted");
         let bin = fake_systemctl(&dir, &marker, 1); // restart arm exits non-zero
 
-        let err = svc_restart_with(&json!({"unit": "vibed"}), &bin)
+        let err = svc_restart_retry(&json!({"unit": "vibed"}), &bin)
             .expect_err("a non-zero systemctl exit must be an error");
         assert!(
             err.contains("systemctl exited"),
