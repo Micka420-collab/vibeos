@@ -23,10 +23,21 @@
   petits-enfants, `read_thinking` borné, budget invalide → erreur).
 - **Durcissement systemd** : genesis + agents-group (options non-mount-namespace,
   contraintes respectées) ; generator amnésique déjà durci.
-- **Initiative « VibeOS pour Zed »** : **ADR-014** (décision + invariants +
-  **cartographie réelle** de `claude-code-acp` via investigation — 2 seams :
-  `canUseTool` + options de `createSession`), ROADMAP §9 bis (couches 0-3),
-  **couche 0** livrée en scaffolding (`/etc/skel/.config/zed/settings.json`).
+- **Initiative « VibeOS pour Zed »** (**ADR-014**, cible l'adaptateur
+  `claude-code-acp`, jamais le cœur de Zed) :
+  - **Investigation** du code réel avant tout patch : `canUseTool` public
+    (wrappable), `createSession` **privé**, `runAcp` construit la base en interne
+    → forme retenue = **patch de prototype de `canUseTool`** (vérifiée).
+  - **Couche 0/1** (config) : `settings.json` Zed + `CLAUDE_CONFIG_DIR` Zed-only
+    avec `permissions.deny` (Read/Write/Edit natifs off, terminal non affecté).
+  - **Groundwork couche 2** : outil MCP **T0 `policy.check`** dans vibed
+    (classification dry-run — allow/deny/require_approval, sans exécuter/approuver,
+    ne touche pas `approval.rs`).
+  - **Couche 2 (le fork)** : paquet `zed/vibeos-claude-acp` (TypeScript) qui
+    patche `canUseTool` → `vibeos:policy.check` (Allow T0/T1 sans prompt, T2/T3
+    jamais auto, fail-safe). **Vérifié** : `tsc` compile contre les vrais types
+    amont + **8 tests vitest**. Innovation : mode auto piloté par MOTEUR DE
+    POLITIQUES (pas classifieur LLM). Reste : install image + intégration Zed live.
 - **README multilingue** (FR canonique + EN/ES/DE).
 - **Hygiène PR** : PR #5 (branche→main) mergée à l'état du matin ; ~44 commits
   d'après-midi orphelins → nouvelle **PR draft #11 (branche → main)** pour les
