@@ -87,9 +87,9 @@ Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance*
 | Mode amnésique (tmpfs recréé à chaque boot, generator systemd) | 🛣️ Phase 3 |
 | Interview de naissance (prototype : `agent/genesis_interview.py`, non câblé en v0.1) | 🛣️ Phase 3 |
 | Bac à sable par outil (systemd-run, seccomp, landlock) | 🛣️ Phase 3 |
-| **Superviseur d'agent** budgété + **mode autonome always-on** (T0/T1 total, T2/T3 en file asynchrone — plancher jamais levé) | 🛣️ Phase 2.5 (proposé) |
-| **Capture du raisonnement** des agents (tap sur flux `stream-json`) + outil T0 `agent.thinking` | 🛣️ Phase 2.5 (proposé) |
-| **Auth par abonnement** (setup-token) scellée TPM2 + allowlist d'egress par unité | 🛣️ Phase 2.5 (proposé) |
+| **Superviseur d'agent** `vibectl agent run/stop/thinking` (budgets wall-clock + nb d'appels, kill-switch opérateur ; T2/T3 restent gérés par vibed, non bloquant) | ✅ Livré (Phase 2.5, mécanisme) |
+| **Capture du raisonnement** des agents (tap sur flux `stream-json` → `memory/reasoning/`) + outil T0 `agent.thinking` | ✅ Livré (Phase 2.5, mécanisme) |
+| Unité `vibeos-agent@.service` (always-on par défaut) · **Auth par abonnement** (setup-token) scellée TPM2 · allowlist d'egress par unité | 🛣️ Phase 2.5 |
 | UKI / boot mesuré, audit chaîné par hachage, SELinux dédiée, `User=vibed` | 🛣️ Phase 4 |
 | Installateur guidé, chiffrement disque par défaut | 🛣️ Phase 5 |
 

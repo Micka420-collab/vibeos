@@ -160,7 +160,7 @@ gantt
 
 **Objectif** : permettre des sessions d'agents longues, non supervisées en continu, **dans le contrat T0/T1 existant** — sans toucher au moteur de politiques ni anticiper le flux d'approbation T2/T3 de la Phase 4. En parallèle, sécuriser la façon dont ces agents s'authentifient auprès de leurs fournisseurs de modèles (abonnement plutôt que clé API quand c'est pertinent) et gouverner leurs appels réseau sortants.
 
-> **Statut : proposé (non commencé)**. Périmètre **figé à T0/T1** dès le lancement : aucun livrable de cette phase n'ouvre une capacité T2/T3 ni n'anticipe l'approbation humaine (Phase 4). Le scellement TPM2 des jetons est un morceau du travail Phase 3 (LUKS/TPM2) **avancé** ici parce que nécessaire à l'auth externe.
+> **Statut : partiellement implémenté (2026-07-13)**. Périmètre **figé à T0/T1** : aucun livrable n'ouvre une capacité T2/T3 ni n'anticipe l'approbation humaine (Phase 4). **Livré** : le **superviseur d'agent** (`vibectl agent run/stop/thinking` — budgets wall-clock + nombre d'appels, kill-switch opérateur), la **capture du raisonnement** (store `memory/reasoning/`, outil T0 `agent.thinking`, tap `stream-json`, HUD `ReasoningPanel.qml`), le type de journal réservé `autonomous_session` — voir ADR-012/013. **Reste** : l'unité systemd template `vibeos-agent@.service` (always-on par défaut), l'auth par abonnement scellée TPM2, l'allowlist d'egress par unité. Le scellement TPM2 des jetons est un morceau du travail Phase 3 (LUKS/TPM2) **avancé** ici parce que nécessaire à l'auth externe.
 
 ### Livrables
 

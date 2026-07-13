@@ -319,9 +319,16 @@ pas le cross-user) ; (c) pas d'outil de log — statu quo, mais prive l'agent d'
 auto-diagnostic légitime. La forme (1)–(5) est le compromis retenu ; son
 implémentation attend la revue de l'allowlist et du rédacteur.
 
-## ADR-012 — Capture du raisonnement par tap sur le flux, jamais via le transcript du CLI — *proposé, cible Phase 2.5*
+## ADR-012 — Capture du raisonnement par tap sur le flux, jamais via le transcript du CLI — *implémenté (mécanisme), cible Phase 2.5*
 
-**Statut** : proposé (non implémenté). Ouvert le 2026-07-13.
+**Statut** : **mécanisme implémenté** (2026-07-13). Livré : le module `reasoning`
+(store `memory/reasoning/<session>.jsonl`, `append_thinking`/`read_thinking`,
+`safe_session_id` anti-traversal), l'outil MCP **T0 `agent.thinking`**, le
+superviseur `vibectl agent run` qui tape le flux `stream-json` et extrait les
+blocs `thinking` (`supervisor::extract_thinking`), et le composant HUD
+`ReasoningPanel.qml`. **Reste** : le schéma `stream-json` exact par fournisseur
+n'est pas contractuel — l'extraction est défensive et doit être vérifiée contre
+la version packagée du CLI à l'intégration ; rétention/purge du store à trancher.
 
 **Contexte.** Le raisonnement affiché par les CLI IA (Claude Code compris) n'est,
 pour les modèles actuels, pas persisté sur disque par le CLI lui-même — seule une
@@ -351,9 +358,18 @@ l'observabilité, pas un fait appris sur l'humain).
   que ce qu'il facture (modèles cloud résumés), VibeOS ne peut pas voir plus loin ; la
   note de transparence du HUD (`ReasoningPanel.qml`) le dit explicitement.
 
-## ADR-013 — Mode autonome permanent (« always-on ») : autonomie totale T0/T1, T2/T3 en file asynchrone, plancher jamais levé — *proposé, cible Phase 2.5*
+## ADR-013 — Mode autonome permanent (« always-on ») : autonomie totale T0/T1, T2/T3 en file asynchrone, plancher jamais levé — *implémenté (mécanisme), cible Phase 2.5*
 
-**Statut** : proposé (non implémenté). Ouvert le 2026-07-13 à la demande explicite
+**Statut** : **mécanisme implémenté** (2026-07-13). Livré : le superviseur
+`vibectl agent run` (budgets wall-clock + nombre d'appels, kill-switch opérateur
+`agent stop` — jamais un outil MCP), qui tourne l'agent en continu ; les T2/T3
+restent gérés **par `vibed`** (`pending_approval` non bloquant + grant one-shot)
+— le superviseur **ne touche jamais `approval.rs`** et ne lève jamais le plancher.
+**Reste** : l'unité systemd template `vibeos-agent@.service` (mode always-on par
+défaut au démarrage) et l'orchestration fine du basculement T0/T1 quand un T2/T3
+est en attente (aujourd'hui : l'agent reçoit `pending_approval` et poursuit).
+
+Contexte (conservé) — ouvert le 2026-07-13 à la demande explicite
 d'un « mode autonome always pour tout ».
 
 **Contexte.** L'utilisateur veut que l'IA travaille en **autonomie permanente, pour
