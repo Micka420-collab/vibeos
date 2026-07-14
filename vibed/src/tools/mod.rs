@@ -5,6 +5,7 @@
 //! one family, with its own tests.
 
 pub(crate) mod fs;
+pub(crate) mod log;
 pub(crate) mod memory;
 pub(crate) mod sectools;
 pub(crate) mod svc;

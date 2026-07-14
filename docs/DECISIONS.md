@@ -267,11 +267,25 @@ résoudra `/proc/<pid>/exe` (chemin réel, canonicalisé) et l'exposera dans le
 - Ce mécanisme ne remplace **pas** le tiering ni l'approbation humaine T2/T3 ; il
   affine *qui* peut demander *quoi* en amont.
 
-## ADR-011 — Lecture du journal système par un agent (`log.read`, T0) — *proposé, cible Phase 2*
+## ADR-011 — Lecture du journal système par un agent (`log.read`, T0) — *implémenté, cible Phase 2*
 
-**Statut** : proposé (non implémenté). Ouvert le 2026-07-13. Concrétise le
-livrable Phase 2 « lecture du journal » resté ouvert précisément *parce qu'il
-demande une conception anti-exfiltration* — ce document est ce garde-fou.
+**Statut** : **implémenté (2026-07-14)**. Ouvert le 2026-07-13. Livré exactement
+selon la forme (1)–(5) ci-dessous : outil `tools/log.rs` (`journalctl --unit`
+borné, chemin absolu, env vidé, nom d'unité validé), **allowlist d'unités** via
+`[rule.services].allowed` (défaut refus, évaluée AVANT le plancher de tier dans
+`policy.rs::apply_rule`), **sortie bornée** (≤ 200 lignes + 64 Kio), **rédaction
+best-effort** (marqueurs connus + jetons à forte entropie), **aucun filtre
+libre**, et **audit** de l'unité via `handle_tools_call`. Tests : refus d'une
+unité hors-liste avant approbation (`policy.rs`), sortie bornée + rédaction
+(`tools/log.rs`).
+
+> **Choix d'implémentation.** L'ADR nommait `[rule.units].allowed` ; réalisé via
+> le sous-table **existant `[rule.services]`** (auquel on a ajouté `allowed`),
+> puisque `CallContext.service` est déjà « l'unité systemd cible » et que
+> `svc.*` le contraint déjà — un `[rule.units]` parallèle serait redondant. Le
+> changement touche **`policy.rs`** (cœur sécurité) : un champ `allowed` +
+> l'application `allowed` (calquée sur les paths, denied gagne) — **à revoir
+> explicitement en revue humaine** (invariant projet).
 
 **Contexte.** Un agent qui débogue a besoin de lire les logs (« pourquoi mon
 service a-t-il échoué ? »). Mais les journaux système sont un **canal
@@ -318,8 +332,9 @@ lecture de log n'est livré tant que sa forme sûre n'est pas arrêtée.
 (exfiltration + cross-user) ; (b) laisser l'agent lire `/var/log` via `fs.read`
 — rejeté (journald est binaire, et la denylist bloque déjà beaucoup ; ne règle
 pas le cross-user) ; (c) pas d'outil de log — statu quo, mais prive l'agent d'un
-auto-diagnostic légitime. La forme (1)–(5) est le compromis retenu ; son
-implémentation attend la revue de l'allowlist et du rédacteur.
+auto-diagnostic légitime. La forme (1)–(5) est le compromis retenu et
+**implémenté** ; l'allowlist livrée (`vibed.service`, `vibeos-agent@*.service`)
+et le rédacteur best-effort restent à **revoir/ajuster en revue humaine**.
 
 ## ADR-012 — Capture du raisonnement par tap sur le flux, jamais via le transcript du CLI — *implémenté (mécanisme), cible Phase 2.5*
 

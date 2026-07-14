@@ -402,7 +402,7 @@ async fn handle_tools_call(
     // internally, AFTER the decision, so "vibed"/"sshd" would slip past the deny
     // rule and reach the T2 approval queue instead of an outright Deny. An
     // invalid unit falls through to the raw name (execution rejects it anyway).
-    let canonical_unit: Option<String> = if name.starts_with("svc.") {
+    let canonical_unit: Option<String> = if name.starts_with("svc.") || name == "log.read" {
         raw_service.and_then(|u| crate::tools::svc::validate_unit_name(u).ok())
     } else {
         None
@@ -826,6 +826,18 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"unit": {"type": "string"}}}),
         ),
         (
+            "log.read",
+            Tier::T0,
+            "Read the last N lines (default 50, hard cap 200) of ONE systemd unit's \
+             journal — EXFILTRATION-SENSITIVE (ADR-011). NOT a generic journalctl: the \
+             unit must be on the policy allowlist ([rule.services].allowed) or the call \
+             is denied; output is byte-capped and passes a best-effort secret-redaction \
+             pass (defense in depth, not a guarantee). No free grep/regex filter",
+            json!({"type": "object", "required": ["unit"],
+                   "properties": {"unit": {"type": "string"},
+                                  "lines": {"type": "integer", "minimum": 1, "maximum": 200}}}),
+        ),
+        (
             "sectools.list",
             Tier::T0,
             "Discover the VibeOS security toolkit (read-only, executes nothing): lists the \
@@ -975,6 +987,7 @@ fn execute_tool(
         .to_string()),
         "svc.restart" => crate::tools::svc::svc_restart(args),
         "svc.status" => crate::tools::svc::svc_status(args),
+        "log.read" => crate::tools::log::log_read(args),
         "sectools.list" => crate::tools::sectools::sectools_list(args),
         "fs.list" => crate::tools::fs::fs_list(args, policy, caller),
         "memory.query" => crate::tools::memory::memory_query(args),
@@ -1032,7 +1045,7 @@ fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     }
 
     let tier = tool_tier(tool);
-    let service = if tool.starts_with("svc.") {
+    let service = if tool.starts_with("svc.") || tool == "log.read" {
         target
     } else {
         None

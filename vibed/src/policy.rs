@@ -133,7 +133,13 @@ pub struct PathConstraints {
 /// `[rule.services]` sub-table: constraints on the service/unit argument.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ServiceConstraints {
-    /// A service matching any entry is denied.
+    /// When present, the unit MUST match at least one entry (default-deny).
+    /// This is the unit allowlist ADR-011 requires for `log.read`: an agent may
+    /// read only the journals of explicitly listed units, never the full system
+    /// journal. `svc.restart` uses only `denied`; `log.read` uses `allowed`.
+    #[serde(default)]
+    pub allowed: Option<Vec<String>>,
+    /// A service matching any entry is denied (denied wins over allowed).
     #[serde(default)]
     pub denied: Vec<String>,
 }
@@ -350,10 +356,18 @@ fn apply_rule(rule: &Rule, registry_tier: Tier, ctx: CallContext<'_>) -> Decisio
                     }
                 }
             }
-            // Service constraints: denied wins.
+            // Service/unit constraints: denied wins; when an allowed list is
+            // present the unit MUST match it (default-deny — the unit allowlist
+            // ADR-011 requires for log.read). A unit outside the allowlist is
+            // denied here, BEFORE the tier floor, so it never reaches approval.
             if let (Some(service), Some(constraints)) = (ctx.service, rule.services.as_ref()) {
                 if constraints.denied.iter().any(|p| glob_match(p, service)) {
                     return Decision::Deny;
+                }
+                if let Some(allowed) = &constraints.allowed {
+                    if !allowed.iter().any(|p| glob_match(p, service)) {
+                        return Decision::Deny;
+                    }
                 }
             }
             // Tier floor: a rule can never lower the intrinsic tier of a tool,
@@ -754,6 +768,42 @@ mod tests {
         assert_eq!(
             e.evaluate("svc.restart", Some(Tier::T2), ctx("sshd.service")),
             Decision::RequireApproval
+        );
+    }
+
+    #[test]
+    fn unit_allowlist_denies_units_outside_the_list_before_approval() {
+        // ADR-011: log.read is T0-allow but gated by a unit allowlist. A unit not
+        // on the list is DENIED outright (not allowed, and never sent to the
+        // approval queue), exactly like svc.restart's deny-list refuses upstream.
+        let e = engine(
+            r#"
+            [[rule]]
+            id = "log-read"
+            tools = ["log.read"]
+            tier = "T0"
+            action = "allow"
+            [rule.services]
+            allowed = ["vibed.service", "vibeos-agent@*.service"]
+            "#,
+        );
+        let ctx = |s: &'static str| CallContext {
+            path: None,
+            service: Some(s),
+        };
+        // Allowlisted units: allowed (T0, no approval).
+        assert_eq!(
+            e.evaluate("log.read", Some(Tier::T0), ctx("vibed.service")),
+            Decision::Allow
+        );
+        assert_eq!(
+            e.evaluate("log.read", Some(Tier::T0), ctx("vibeos-agent@0001.service")),
+            Decision::Allow
+        );
+        // A unit OUTSIDE the allowlist is denied — never the full system journal.
+        assert_eq!(
+            e.evaluate("log.read", Some(Tier::T0), ctx("sshd.service")),
+            Decision::Deny
         );
     }
 
