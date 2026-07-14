@@ -153,6 +153,15 @@ pub fn is_tool_use(event: &Value) -> bool {
 /// Count the `tool_use` blocks in this event. An assistant turn can carry SEVERAL
 /// parallel tool calls in one message; counting them (not just "any") keeps the
 /// `--calls` budget honest against batching. Defensive, same schema caveat.
+///
+/// BEST-EFFORT (not a security boundary): the `--calls` budget is driven ONLY by
+/// the tool_use blocks the CLI reports on its `stream-json` stream (a
+/// non-contractual schema). A CLI that performs tool calls without emitting them
+/// there — or with a schema we do not recognize — is undercounted, so the
+/// call-count deadline may never fire. This bounds *cost/verbosity*, not the
+/// security envelope: every real tool call still passes vibed's audit, per-uid
+/// rate limit and approval gate independently, and the WALL-CLOCK budget still
+/// caps total runtime regardless of what the stream reports.
 pub fn count_tool_use(event: &Value) -> usize {
     match event.get("type").and_then(Value::as_str) {
         Some("assistant") => event

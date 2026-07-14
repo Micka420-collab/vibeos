@@ -23,14 +23,24 @@
 //! `prev` (the SHA-256 of the PREVIOUS record's line — genesis IV = 64 × 0),
 //! and `hash` (the SHA-256 of THIS record serialized without `hash`). The
 //! chain is CONTINUOUS across daily files: `seq`/`prev` never reset at a day
-//! boundary, so a whole day's file cannot be dropped undetected. Altering,
-//! removing or reordering any record breaks the chain, which `verify_chain`
-//! detects and localizes across the whole directory. The chain proves
-//! integrity of every record except possibly the very last (an append-only log
-//! cannot self-seal its tail); external anchoring of the head hash (TPM / Rekor
-//! transparency log) is the remaining Phase 4 step (see
-//! `docs/SECURITY-ARCHITECTURE.md` §8). The SHA-256 is vibed's own
-//! dependency-free implementation (`crate::sha256`).
+//! boundary, so altering, removing or reordering any record *in the interior*
+//! of the chain breaks it, which `verify_chain` detects and localizes across
+//! the whole directory (e.g. dropping a whole MIDDLE day leaves a `seq`/`prev`
+//! discontinuity).
+//!
+//! SCOPE, honestly stated. The chain is KEYLESS and has no external anchor, so
+//! it detects tampering by a party that CANNOT recompute it — not by one that
+//! can. It gives two guarantees against such a party, and no more: (1) integrity
+//! of every record except the tail — an append-only log cannot self-seal its
+//! last record(s), so **tail truncation** (dropping the most-recent records, or
+//! the most-recent daily file) is NOT detectable here; (2) it does NOT resist an
+//! attacker who can *write* the audit directory and recompute every subsequent
+//! `seq`/`prev`/`hash`. Both gaps close the same way: external anchoring of the
+//! head hash (TPM / Rekor transparency log), the remaining **Phase 4** step (see
+//! `docs/SECURITY-ARCHITECTURE.md` §8). Until then, the operative protection is
+//! access control — the store is root-only and on vibed's built-in hard denylist
+//! (`/var/lib/vibeos/audit/**`), so a confined agent cannot write it at all.
+//! The SHA-256 is vibed's own dependency-free implementation (`crate::sha256`).
 //!
 //! Each record is fsync'd before the call proceeds, so the "audit before
 //! execution" invariant survives a power cut, not just a process crash.
@@ -83,6 +93,9 @@ impl AuditLog {
     /// from the existing daily files so a restart continues the same chain. An
     /// empty/absent directory starts a fresh chain (seq 0, prev = IV).
     pub fn new(dir: PathBuf) -> Self {
+        // Roll back a torn trailing record BEFORE recovering the chain head, so
+        // the next append never merges un-terminated bytes with a fresh record.
+        truncate_trailing_partial(&dir);
         let state = recover_chain_state(&dir);
         Self {
             dir,
@@ -205,9 +218,40 @@ fn utc_date(epoch_secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// Roll back a torn trailing record in the most-recent daily file: if the file
+/// does not end on a record boundary (final byte != '\n'), truncate it to just
+/// after its last newline, dropping the un-terminated tail.
+///
+/// Why: `record()` writes the JSON line, then '\n', then fsyncs and only THEN
+/// returns Ok (and the Allow path executes only after that Ok). A power loss
+/// mid-`record()` can leave a record's bytes on disk without their terminating
+/// newline. Left as-is, the next `O_APPEND` write lands immediately after those
+/// bytes, merging `{torn}{next}\n` into ONE physical line that `verify_chain`
+/// can never parse — a permanent, false "broken chain". A record whose newline
+/// never reached disk was never committed (the daemon crashed before `record()`
+/// returned, so its action never ran), so rolling it back is correct, not a
+/// loss of durable audit. Runs once at daemon start.
+fn truncate_trailing_partial(dir: &Path) {
+    let Some(file) = daily_files(dir).into_iter().next_back() else {
+        return; // no files yet
+    };
+    let Ok(bytes) = fs::read(&file) else {
+        return;
+    };
+    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        return; // already on a clean record boundary
+    }
+    let keep = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    if let Ok(f) = fs::OpenOptions::new().write(true).open(&file) {
+        let _ = f.set_len(keep as u64);
+    }
+}
+
 /// Recover `(next_seq, last_hash)` from the last valid record across ALL daily
 /// files (chronological). Tolerant of a trailing partial line (crash
 /// mid-write): scans for the last line that parses with both `seq` and `hash`.
+/// (Belt-and-suspenders: `truncate_trailing_partial` already removed a torn
+/// tail at open, but recovery stays tolerant of one anyway.)
 fn recover_chain_state(dir: &Path) -> ChainState {
     let mut recovered: Option<(u64, String)> = None;
     for file in daily_files(dir) {
@@ -359,6 +403,60 @@ mod tests {
         let files = daily_files(dir);
         assert_eq!(files.len(), 1, "expected exactly one daily file: {files:?}");
         files.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn torn_trailing_write_is_rolled_back_and_chain_still_verifies() {
+        let dir = temp_test_dir("torn");
+        let caller = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(1),
+        };
+
+        // One cleanly-committed record (seq 0, terminated by '\n').
+        let log = AuditLog::new(dir.clone());
+        log.record("os.status", &json!({}), None, "allow", "ok", caller)
+            .expect("first record");
+
+        // Simulate a power loss mid-`record()`: a full, VALID record whose bytes
+        // reached disk but whose terminating newline did not. Left as-is,
+        // `recover_chain_state` would even parse it (seq 1) and the next append
+        // would merge `{torn}{next}\n` into one unparseable physical line.
+        let day = sole_daily_file(&dir);
+        {
+            use std::io::Write;
+            let mut f = fs::OpenOptions::new().append(true).open(&day).unwrap();
+            f.write_all(b"{\"seq\":1,\"tool\":\"torn\",\"hash\":\"deadbeef\"}")
+                .unwrap();
+        }
+
+        // Daemon restart: the torn tail is rolled back, and a fresh record lands
+        // on a clean boundary.
+        let log2 = AuditLog::new(dir.clone());
+        log2.record(
+            "fs.read",
+            &json!({}),
+            Some("/etc/os-release"),
+            "allow",
+            "ok",
+            caller,
+        )
+        .expect("second record after recovery");
+
+        // No false break: the chain verifies, and the torn record was rolled
+        // back (seq 1 re-used by the real second record), not merged/counted.
+        let report = verify_chain(&dir).expect("verify runs");
+        assert!(
+            report.ok,
+            "a torn trailing write must not break the chain: {report:?}"
+        );
+        assert_eq!(
+            report.records, 2,
+            "torn record rolled back, exactly two committed records: {report:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

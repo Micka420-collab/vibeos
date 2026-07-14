@@ -314,6 +314,14 @@ fn write_session_journal(mem: &Path, event: &Value, epoch: u64) {
 /// keep the reader thread blocked. Shells out to `kill` (util-linux, always
 /// present) so vibed's TCB stays dependency-free; a negative target is the
 /// process group.
+///
+/// LIMIT (best-effort): a grandchild that detaches its own process group
+/// (`setsid`/`setpgid`) escapes the group signal and can leak as an orphan.
+/// This is inherent to signal-based group kill. It is a resource-leak concern,
+/// NOT a liveness one: the bounded drain below means such a grandchild can never
+/// hang `agent_run` even while holding the stdout pipe (see the C2 regression
+/// test). True containment of detached descendants is a Phase 4 sandbox concern
+/// (a per-run cgroup/scope kills the whole subtree regardless of pgid).
 fn terminate_group(pid: u32) {
     let group = format!("-{pid}");
     let _ = Command::new("kill").arg("-TERM").arg(&group).status();
