@@ -115,6 +115,23 @@ action = "allow"
 reason = "Read-only systemd unit state (systemctl show); no state change, strict unit-name validation in code."
 
 [[rule]]
+id = "log-read"
+tools = ["log.read"]
+tier = "T0"
+action = "allow"
+reason = "Agent self-debugging (ADR-011): read its OWN units' journal, allowlisted + bounded + best-effort redacted. Exfiltration-sensitive — the allowlist below is the real control."
+
+# ADR-011 unit ALLOWLIST (default-deny): log.read may return ONLY these units'
+# journals — never the full system journal, never another user's unit. A unit
+# absent here is DENIED before the tier floor (see policy.rs apply_rule). Keep
+# this list narrow and free of units known to log secrets. Globs per glob.rs.
+[rule.services]
+allowed = [
+  "vibed.service",           # the daemon itself
+  "vibeos-agent@*.service",  # the user's own governed agent units
+]
+
+[[rule]]
 id = "sectools-list"
 tools = ["sectools.list"]
 tier = "T0"
