@@ -12,39 +12,22 @@
 // ---------------------------------------------------------------------------
 // DATA SOURCE — read this before touching anything (honesty rule)
 // ---------------------------------------------------------------------------
-// Current state (this file, shipped): every value comes from the MOCK functions
-// in vibed_client.js. `vibedOnline` is hardwired false — /usr/bin/vibed IS
-// shipped in the image and runs at boot (Phase 2), but this QML does not open
-// the socket yet: the live wiring below is the remaining Phase 2 work. The HUD
-// MUST render a clean "daemon offline" state:
-// never crash, never show fake "live" data (DESKTOP.md §6, graceful degradation).
+// Current state (this file, shipped): the LIVE vibed client is WIRED. This QML
+// opens a Quickshell.Io Socket on /run/vibed/mcp.sock (line-delimited JSON-RPC
+// 2.0, one object per line — the transport of vibed/src/mcp.rs) and drives every
+// value from real T0 tool responses — see the `Socket` + `pollVibed()` +
+// `handleVibedLine()` below (os.status, memory.query, agents.list,
+// agent.sessions -> agent.thinking). `vibedOnline` is DRIVEN by the socket
+// connection state, NOT hardwired: when vibed is unreachable (daemon down, or
+// the user is not in the vibeos-agents group) the HUD renders its honest OFFLINE
+// state — never a crash, never fake "live" data (DESKTOP.md §6). The OllamaGauge
+// keeps its own local probe (ollama HTTP + nvidia-smi), independent of vibed.
 //
-// TODO(Phase 2): replace the mocks with a real client on the vibed MCP socket
-// /run/vibed/mcp.sock (line-delimited JSON-RPC 2.0, one object per line — exactly
-// the transport of vibed/src/mcp.rs). Reference wiring sketch:
-//
-//   import Quickshell.Io
-//   Socket {
-//       id: vibedSocket
-//       path: "/run/vibed/mcp.sock"          // root:vibeos-agents 0660 — session
-//       connected: true                       // user must be in vibeos-agents group
-//       parser: SplitParser { onRead: line => root.handleVibedLine(line) }
-//       onConnectionStateChanged: {
-//           root.vibedOnline = connected
-//           if (connected) { write(Vibed.initializeRequest()); write(Vibed.initializedNotification()) }
-//       }
-//   }
-//   Timer { // poll the two T0 read-only tools; the HUD is strictly an observer
-//       interval: 5000; running: root.vibedOnline; repeat: true
-//       onTriggered: {
-//           vibedSocket.write(Vibed.toolsCallRequest("os.status", {}))
-//           vibedSocket.write(Vibed.toolsCallRequest("memory.query", { query: "" }))
-//       }
-//   }
-//   (+ a reconnect timer while offline — degradation must stay graceful)
-//
-// Request/response shapes live in vibed_client.js and MUST stay in sync with
-// vibed/src/mcp.rs.
+// NOT YET VALIDATED VISUALLY: this wiring has never run on a booted Plasma +
+// Quickshell (no headless path — BLOCKERS.md). The remaining Phase 2 work is the
+// on-machine visual check, plus deleting the dead `mock*` reference functions
+// still kept at the bottom of vibed_client.js. Request/response shapes live in
+// vibed_client.js and MUST stay in sync with vibed/src/mcp.rs.
 //
 // Install target (image build, read-only at runtime):
 //   /usr/share/vibeos/quickshell/shell.qml
@@ -69,8 +52,8 @@ ShellRoot {
     property bool vibedOnline: false
     property var osStatus: ({})
     property var memoryStatus: ({})
-    // No agents.list tool yet — the roster is not derivable from vibed (see
-    // AgentStatus.qml). Stays [] until that tool lands; the panel shows offline.
+    // Filled from the agents.list T0 tool (see handleVibedLine). Stays [] while
+    // offline or before any agent has registered, so the panel shows offline.
     property var agents: []
     // ollama gauge has its OWN local probe (below), independent of vibed — it
     // must keep working when vibed is offline. Honest default: unavailable.
