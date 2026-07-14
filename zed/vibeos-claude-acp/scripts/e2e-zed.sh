@@ -93,7 +93,7 @@ cat > "$settings" <<JSON
     "vibeos-claude-acp": {
       "command": "node",
       "args": ["$bundle"],
-      "env": { "VIBED_SOCKET": "$socket" }
+      "env": { "VIBED_MCP_SOCKET": "$socket" }
     }
   },
   "context_servers": {
