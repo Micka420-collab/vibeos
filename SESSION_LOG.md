@@ -7,6 +7,18 @@
 > (empilée sur les draft PRs Phase 2, cible `phase2-supply-chain`) est **antérieure
 > et superseded** par #11 ; son sort (fermeture) est laissé à l'humain.
 
+## 🔧 Session 2026-07-14 (nuit, autonome) — log.read + revue adversariale → 2 vrais bugs sécurité corrigés
+
+**Travail codable du mandat** :
+- **[PR #37](https://github.com/Micka420-collab/vibeos/pull/37) `log.read` (T0, ADR-011)** : lecture de journal **allowlistée** (`[rule.services].allowed`, défaut refus, évaluée avant le plancher de tier), **bornée** (≤ 200 lignes + 64 Kio), **rédaction best-effort**, aucun filtre libre, audit de l'unité. **Touche `policy.rs`** (ajout `allowed` à `ServiceConstraints`) → flaggé revue humaine. Doc synchronisée (README surface d'outils + THREAT-MODEL mitigation S2).
+- **`pkg.install`** : ADR-016 complet, allowlist non tranchée → rien codé.
+
+**Revue adversariale (4 sous-agents parallèles)** sur le code neuf + la surface d'exfiltration. Résultat : `log.read`, l'allowlist `policy.rs`, et le pipeline `mcp.rs` (rate-limit → denylist → policy → approbation → exec) **CLEAN, aucun bypass** (canonicalisation d'unité identique des deux côtés, allowlist default-deny, plancher T2/T3 intact). `audit.rs`/`sha256.rs` robustes. **Deux vrais bugs trouvés (vibed lit en ROOT, `/proc`/`/run`/`/etc` sont « system read prefixes »)**, vérifiés contre le code puis corrigés :
+- **[PR #38](https://github.com/Micka420-collab/vibeos/pull/38)** (HIGH) : denylist étendue — `/proc/kcore`+`/proc/kallsyms` (mémoire noyau + défaite KASLR), `/proc/*/mem`+`/proc/*/pagemap`, `/run/user/**`+`/run/secrets/**` (cross-user), secrets `/etc` non-standard (krb5/sssd/ipsec/pki private). Synchronisé code + miroir `default.toml` + commentaire. Test dédié.
+- **[PR #39](https://github.com/Micka420-collab/vibeos/pull/39)** : `confine_read` confine désormais `/proc/<pid>` à l'uid **propriétaire** (fail-closed) — ferme la recon cross-user résiduelle (maps/status/net d'autres users).
+
+Mineurs traités : re-cap octets après rédaction dans `log.read` (borne 64 Kio honnête, #37). Latent noté : check load-time `services.allowed` sur outils sans unité. **Aucun merge/fermeture par l'agent** ; `policy.rs`/`fs.rs` flaggés.
+
 ## 🔧 Session 2026-07-14 (soir) — garde-fou anti-dérive + trajectoire + branding boot
 
 Après l'analyse complète du dépôt, deux priorités **avant tout code** :
