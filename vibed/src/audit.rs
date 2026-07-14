@@ -136,8 +136,11 @@ impl AuditLog {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Build the record WITHOUT `hash`, using the current chain head as
-        // `prev`. serde_json::Value serializes object keys in sorted order, so
-        // the byte stream hashed here is reproduced exactly by `verify_chain`.
+        // `prev`. The integrity guarantee does NOT depend on WHICH key order
+        // serde_json uses: `record` (here) and `verify_chain` serialize the same
+        // Value through the identical code path, so the exact byte stream hashed
+        // here is reproduced byte-for-byte at verification. (With the default
+        // BTreeMap backing that order is sorted; it stays consistent either way.)
         let mut entry = json!({
             "seq": state.next_seq,
             "prev": state.last_hash,

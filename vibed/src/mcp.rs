@@ -717,8 +717,13 @@ fn try_journal_tool_call(name: &str, tier: Option<Tier>, target: Option<&str>, c
     }
 }
 
-/// Current unix time in whole seconds (0 on a clock error — the approval store
-/// then treats any grant as effectively immediate/expired, fail-safe).
+/// Current unix time in whole seconds (0 on a clock error). Honest note: with
+/// `now == 0`, the TTL comparisons in `approval.rs` (`now >= expires`,
+/// `now - ts >= TTL`) never fire, so grants are NOT force-expired and stale
+/// pendings are NOT pruned. That is not a bypass: grant consumption stays
+/// one-shot (atomic unlink) and the per-uid/global pending caps still bound the
+/// store — a stuck clock can neither grant nor replay anything. A system clock
+/// at the unix epoch is itself a catastrophic failure, well outside this model.
 fn now_epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
