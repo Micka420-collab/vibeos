@@ -269,6 +269,25 @@ construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erre
   17 vitest + smoke ACP + bundle Zed ; clippy/fmt/shellcheck propres ; **CI Rust
   verte sur le commit de fix** ; PR #11 MERGEABLE.
 
+**Prolongation (jusqu'à 09h) — CI, README, 2ᵉ revue** :
+- **Flaky ETXTBSY corrigé** : le monitoring CI a attrapé un test que j'avais
+  introduit (`svc_restart_surfaces_a_systemctl_failure` — exec d'un fake systemctl
+  fraîchement écrit → « Text file busy » sous cargo test parallèle, invisible en
+  local/MSRV). Fix : retry sur ETXTBSY (artefact de test ; la prod exécute
+  `/usr/bin/systemctl` statique). CI re-verte.
+- **README (4 langues) mis à jour** et synchronisé (HUD live, svc.restart réel,
+  agents.list, Phase 2.5 « largement implémentée ») — corrigé les affirmations
+  périmées « HUD mocked »/« Phase 2.5 proposed » dans EN/ES/DE. FR canonique.
+- **2ᵉ revue adversariale** (primitives cœur : audit/sha256/ratelimit/approval/
+  superviseur) : **saines, aucun défaut exploitable**. 1 vrai bug LOW corrigé —
+  **écriture déchirée → fausse rupture `verify_chain`** (rollback de la queue non
+  terminée au démarrage + test). Docs rendues honnêtes : portée de la
+  tamper-evidence (keyless, troncature de queue non détectée sans ancrage Phase 4),
+  budget `--calls` best-effort, petit-fils `setsid()` (fuite jamais hang).
+  **Extension Zed** relue : gate de gouvernance sain (fail-safe partout).
+- **État prolongation** : **149 tests vibed verts** + 17 vitest ; clippy/fmt/
+  shellcheck propres ; PR #11 MERGEABLE, CI Rust verte.
+
 ## 🔧 En cours / non terminé (checkpoint final 2026-07-13 nuit)
 
 - **Zed — E2E Tier B (round-trip éditeur)** : le **Tier A est validé sur socket
