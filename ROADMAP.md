@@ -121,7 +121,6 @@ gantt
 
 **Objectif** : le système devient pilotable par des agents IA, au niveau OS, de façon gouvernée. Premier daemon fonctionnel, premiers outils T0/T1, moteur de politiques actif, audit complet.
 
-### Livrables
 
 - **`vibed` fonctionnel** (Rust, tokio) : binaire `/usr/bin/vibed`, unité `vibed.service` activée, serveur MCP (JSON-RPC 2.0) sur le socket unix `/run/vibed/mcp.sock` (`root:vibeos-agents`, mode `0660` — groupe créé par sysusers.d).
 - **Outils T0 (observe, lecture seule)** : infos système, état des services, lecture du journal, lecture de fichiers autorisés, métriques.

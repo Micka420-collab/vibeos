@@ -15,16 +15,15 @@
 //     vram_total_mb: 8192 }
 //
 // ---------------------------------------------------------------------------
-// DATA SOURCE — v0.1 vs Phase 2
-// ---------------------------------------------------------------------------
-// v0.1: MOCK reads from vibed_client.js (mockOllama() -> available:false).
-// TODO(Phase 2): two local, read-only sources (no vibed dependency — this gauge
-// must keep working when vibed is offline, and show "—" when ollama itself is
-// unreachable):
+// DATA SOURCE — two local, read-only probes wired in shell.qml (probeOllama() +
+// the nvidia-smi Process), independent of vibed so the gauge keeps working when
+// vibed is offline and shows "—" when ollama itself is unreachable:
 //   1. model + activity: GET http://127.0.0.1:11434/api/ps (behind `ollama ps`);
 //   2. VRAM: `nvidia-smi --query-gpu=memory.used,memory.total
 //      --format=csv,noheader,nounits` via Quickshell.Io.Process — graceful
 //      fallback to "—" on non-NVIDIA (AMD: amdgpu sysfs mem_info_vram_used/total).
+// Any failure degrades to available:false (never fake). Not yet validated on a
+// booted Plasma with a real GPU (machine-gated).
 // ---------------------------------------------------------------------------
 
 import QtQuick

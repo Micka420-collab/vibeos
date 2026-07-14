@@ -22,16 +22,16 @@
 //     turnCount, byteSize }
 //
 // ---------------------------------------------------------------------------
-// DATA SOURCE — v0.1 (honesty rule, identique à AgentStatus.qml)
+// DATA SOURCE — live-wired, honesty rule (identique à AgentStatus.qml)
 // ---------------------------------------------------------------------------
 // Ce fichier ne ships avec AUCUNE donnée : `live`/`history` valent [] par
 // défaut, le panneau affiche son placeholder "aucune session". Rien n'est
-// mocké ici — contrairement à os.status/memory.query il n'existe encore
-// aucun outil vibed à mocker (agent.thinking n'existe pas avant Phase 2.5).
-// TODO(Phase 2.5): alimenter `live` depuis le superviseur d'agent (canal
-// local qu'il publie — socket, ou le store reasoning/ interrogé via
-// vibed_client.js) et `history` depuis l'outil T0 `agent.thinking` une fois
-// spécifié dans vibed/src/mcp.rs.
+// mocké. `agent.sessions` + `agent.thinking` existent dans vibed/src/mcp.rs et
+// shell.qml câble `live` en direct : agent.sessions suit la session la plus
+// récente, agent.thinking tail son raisonnement (mappé par reasoningToLive).
+// `live` reste [] tant qu'aucune session n'existe ou que vibed est hors-ligne.
+// TODO(Phase 2.5): brancher `history` (sessions passées) — pas encore lié dans
+// shell.qml. Rendu visuel jamais validé sur un Plasma booté (machine-gated).
 // ---------------------------------------------------------------------------
 
 import QtQuick
