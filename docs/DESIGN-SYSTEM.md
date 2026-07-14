@@ -3,7 +3,7 @@
 > Version : v0.1 (fondation du langage visuel) — Date : 2026-07-03
 > Statut : document de référence **design** du chantier bureau. Amont : [DESKTOP.md](DESKTOP.md) (expérience bureau, triptyque Agent/Contexte/Confiance), [desktop/theme/palette.md](../desktop/theme/palette.md) (palette exacte), [desktop/theme/vibeos-dark.colors](../desktop/theme/vibeos-dark.colors) (schéma Plasma). Prose **FR**, tokens/code/commentaires **EN**.
 >
-> **Règle d'honnêteté (invariant projet).** Ce document définit le langage de design *cible*, complet et ambitieux. La couche réellement embarquée en v0.1 se limite au schéma de couleurs, aux dotfiles terminal et aux polices. Le **Global Theme**, le **panneau/dock verre**, le **HUD Quickshell** et ses données vives sont des livrables **Phase 2** ; **SDDM**, **Plymouth**, **wallpapers** et branding relèvent de la **Phase 5**. Chaque surface porte sa phase. Aucune donnée du HUD n'est « live » aujourd'hui : elle se conçoit finie, se livre mockée et labellisée.
+> **Règle d'honnêteté (invariant projet).** Ce document définit le langage de design *cible*, complet et ambitieux. La couche réellement embarquée en v0.1 se limite au schéma de couleurs, aux dotfiles terminal et aux polices. Le **Global Theme** et le **HUD Quickshell** (rendu + client live du socket) sont **livrés/câblés** (Phase 2) ; le **panneau/dock verre** et la **validation visuelle du HUD** restent **Phase 2** ; **SDDM**, **Plymouth**, **wallpapers** et branding relèvent de la **Phase 5**. Chaque surface porte sa phase. Le HUD lit ses données **vives** du socket `vibed`, mais ce rendu **n'a jamais été validé** sur un Plasma booté (machine-gated) — la règle tient : chaque surface se conçoit finie et porte son statut.
 >
 > **Portée & non-régression.** Le design system *élève* l'identité « VibeOS Dark » sans casser ses invariants : palette Mocha verbatim, accent Mauve unique, code couleur des tiers T0–T3 stable dans tout l'OS. Il **ajoute** une grammaire (surfaces, élévation, verre, mouvement, typographie, formes) — il ne remplace ni la palette ni la sémantique existantes.
 
@@ -391,14 +391,14 @@ Chaque surface applique les tokens ci-dessus. La **règle d'or** clôt chaque bl
 - **Pager d'activités** : Vibe (halo mauve) · Focus (Void, notifications off) · Review (teinte verte discrète) — cohérent avec les wallpapers (§7).
 - **Règle d'or** : le verre du panneau et du dock partage la recette `glass-chrome` ; l'accent d'activité = Mauve, jamais une autre teinte.
 
-### 11.4 HUD agents — Quickshell · ✅ livré et auto-démarré (données mockées, labellisées — branchement live : Phase 2)
+### 11.4 HUD agents — Quickshell · ✅ livré et auto-démarré (client live du socket câblé — validation visuelle : Phase 2)
 
 - **Barre HUD** : `glass-panel` (Crust 66 %, `blur-heavy`), ancrée en haut (DESKTOP §2.4), couche additionnelle au panneau Plasma.
 - **État global** : point/anneau — gris `Overlay1` (vibed hors ligne) → Mauve `glow-agent-active` (agents actifs) → Peach pulsé (approbation T2 attendue). Voir §10.
 - **Panneau Agents** : cartes `surface-3` `radius-lg` `elevation-2` ; chaque agent = anneau `grad-signature` + nom (`type-body-strong`) + projet/durée/dernier outil en `type-mono-sm` `text-tertiary`.
 - **Panneau Confiance** : tiers T0–T3 en pastilles/anneaux/cadenas (§10), compteurs mono tabulaires.
 - **Panneau Ressources** : jauges CPU/RAM en `grad-signature-soft`, VRAM ollama en Sky.
-- **Dégradation gracieuse (impérative)** : toute dépendance absente (vibed, ollama, policy) ⇒ **état affiché propre**, jamais une exception (DESKTOP §6). Les données non live sont **mockées et clairement labellisées « Phase 2 / vibed hors ligne »**.
+- **Dégradation gracieuse (impérative)** : toute dépendance absente (vibed, ollama, policy) ⇒ **état affiché propre**, jamais une exception (DESKTOP §6). Une dépendance absente donne un **état propre labellisé « vibed hors ligne »**, jamais de fausses données.
 - **Règle d'or** : le HUD est *la* vitrine du système de design — il concentre verre, tiers, accent, mono, mouvement. Tout token défini ici doit y être exact.
 
 ### 11.5 Terminal — Ghostty · ✅ v0.1
