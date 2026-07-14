@@ -1,5 +1,7 @@
 # SESSION_LOG — session autonome du 2026-07-13
 
+> 👉 **Pour merger la pile #11→#12→#13 :** ouvre **[docs/MERGE-GUIDE.md](docs/MERGE-GUIDE.md)** (une page, ordre + garde-fous).
+
 > ## 🧊 PR #11 GELÉE INTENTIONNELLEMENT — NE PLUS RIEN Y AJOUTER
 > **[PR #11](https://github.com/Micka420-collab/vibeos/pull/11)** (branche
 > `worktree-amelioration-2026-07-13`, HEAD `9cee9c6`) est **gelée dans cet état** :
