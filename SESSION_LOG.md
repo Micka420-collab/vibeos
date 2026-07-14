@@ -18,6 +18,34 @@
 > (empilée sur les draft PRs Phase 2, cible `phase2-supply-chain`) est **antérieure
 > et superseded** par #11 ; son sort (fermeture) est laissé à l'humain.
 
+## 🆕 Mandat court 2026-07-14 (post-gel PR #11) — petites PR empilées
+
+PR #11 **gelée à `9cee9c6`, zéro commit supplémentaire**. Tout le travail de ce
+mandat vit sur des branches séparées et petites, empilées :
+
+`worktree-amelioration-2026-07-13` (PR #11, gelée)
+  └─ `f6-fs-refactor` → **[PR #12](https://github.com/Micka420-collab/vibeos/pull/12)** (draft)
+       └─ `fs-home-alias-deny` → **[PR #13](https://github.com/Micka420-collab/vibeos/pull/13)** (draft)
+
+- **F6 fs.rs (PR #12)** — dernière famille d'outils extraite de `mcp.rs` vers
+  `tools/fs.rs` + `test_support.rs` (helpers de test partagés). Déplacement pur,
+  zéro changement de comportement ; `mcp.rs` 2872 → 1754 lignes. 149 tests
+  inchangés, verts. C'était l'extraction « entrelacée, session dédiée » du
+  ROADMAP — faite dans un espace propre.
+- **Revue adversariale fs.read/fs.write + fix (PR #13)** — recherche ciblée de
+  l'angle mort **symétrique** du bypass `svc.restart` par nom brut. **1 finding
+  LOW confirmé** : sur bootc `/home` est un lien vers `/var/home` ; une règle
+  opérateur `paths.denied` en `/home/*/...` était contournable en adressant le
+  fichier via `/var/home/...` (même fichier, deux orthographes). Corrigé dans
+  `apply_rule` (`path_glob_match` replie l'alias avant matching — ne resserre que
+  les deny). Les 5 autres pistes de bypass : propres (recheck canonique + denylist
+  duale + confinement ferment le trou style-svc). Test de régression ajouté,
+  150 tests verts.
+
+Invariants tenus : plancher T2/T3 jamais levé ; build+test+clippy+fmt avant chaque
+commit ; commits atomiques conventionnels + push ; aucun merge/fermeture de PR par
+l'agent. Arrêt à 12h00 (mandat court).
+
 ## ✅ Fait (livré, testé, poussé)
 
 **Session étendue (16h → 23h, 2026-07-13)** :
