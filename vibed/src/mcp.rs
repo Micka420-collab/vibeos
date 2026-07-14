@@ -108,11 +108,19 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "**/.kube/config",          // kubernetes cluster credentials
     "**/.netrc",                // machine login credentials
     "/root/**",                 // root's home directory
-    "/proc/*/environ",          // process environments may leak secrets
-    "/proc/**/environ",         // ...including per-thread /proc/<pid>/task/<tid>/environ
-    "/proc/**/cmdline",         // command lines may carry secrets/tokens
-    "/run/credentials/**",      // decrypted systemd credentials
-    "/boot/**",                 // boot chain is none of the agent's business
+    // OSTree/bootc symlinks /root -> /var/roothome, and the fs tools canonicalize
+    // before re-checking, so the raw glob above must be mirrored on the canonical
+    // spelling too (builtin_denied uses glob_match, which is alias-blind). Reads
+    // are already blocked by confine_read for non-root callers; this keeps the
+    // denylist itself alias-consistent with the policy matcher. It is the only
+    // alias-sensitive entry here — the others are **/-anchored (spelling-agnostic)
+    // or under non-symlinked roots (/etc, /proc, /run, /boot, /var/lib/vibeos).
+    "/var/roothome/**",    // canonical form of /root on OSTree (see above)
+    "/proc/*/environ",     // process environments may leak secrets
+    "/proc/**/environ",    // ...including per-thread /proc/<pid>/task/<tid>/environ
+    "/proc/**/cmdline",    // command lines may carry secrets/tokens
+    "/run/credentials/**", // decrypted systemd credentials
+    "/boot/**",            // boot chain is none of the agent's business
     // Credentials of the AI agents themselves and of the developer tooling
     // shipped in the image. fs.read is NOT confined to the caller's home
     // (vibed runs as root), so without these entries any agent could read
@@ -1512,6 +1520,31 @@ mod tests {
                 "{path} must be read-denied by the built-in denylist"
             );
         }
+    }
+
+    #[test]
+    fn builtin_denylist_covers_root_via_ostree_alias() {
+        // On OSTree/bootc, /root is a symlink to /var/roothome; the fs tools
+        // canonicalize before re-checking, so root's home must be denied under
+        // BOTH spellings (builtin_denied is alias-blind by itself).
+        for path in [
+            "/root",
+            "/root/.bashrc",
+            "/root/.ssh/id_ed25519",
+            "/var/roothome",
+            "/var/roothome/.bashrc",
+            "/var/roothome/notes.txt",
+            "/var/roothome/.ssh/id_ed25519",
+        ] {
+            assert!(
+                builtin_denied(path, false).is_some(),
+                "{path} must be read-denied (root home, either OSTree spelling)"
+            );
+        }
+        // A sibling under /var that is NOT root's home stays readable — the alias
+        // entry must not over-match.
+        assert!(builtin_denied("/var/lib/vibeos/x", false).is_none());
+        assert!(builtin_denied("/var/roothomeXYZ", false).is_none());
     }
 
     #[test]
