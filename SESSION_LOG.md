@@ -7,6 +7,33 @@
 > (empilée sur les draft PRs Phase 2, cible `phase2-supply-chain`) est **antérieure
 > et superseded** par #11 ; son sort (fermeture) est laissé à l'humain.
 
+## 🔧 Session 2026-07-14 (après-midi) — récupération de contenu échoué hors de `main`
+
+**Contexte** : après merge de #11 et #14 dans `main`, les ex-PR **#12 (F6)** et
+**#13 (fix sécurité alias `/home`↔`/var/home`)** ont été marquées *merged* par
+GitHub **mais dans leurs bases intermédiaires empilées**, pas dans `main`. Vérifié :
+`fold_home_alias` et `tools/fs.rs` **absents de `main`** ⇒ la vuln alias était
+**vivante sur `main`** et F6 non appliqué. Piège classique des PR empilées mergées
+dans le désordre.
+
+**Récupération** (les ex-PR closes non ré-ouvrables ⇒ PR fraîches, **indépendantes,
+base=`main`** — ne peuvent plus s'échouer) :
+- **[PR #20](https://github.com/Micka420-collab/vibeos/pull/20)** `security-home-alias-fix` — cherry-pick du fix (`policy.rs`), **150 tests verts** sur la base `main` réelle. + bannière ultra-visible en tête de `STATUS.md`, `docs/MERGE-GUIDE.md` réécrit (post-mortem), éval Dependabot, note sécurité §3.3.
+- **[PR #19](https://github.com/Micka420-collab/vibeos/pull/19)** `f6-fs-extraction` — cherry-pick de F6 (`mcp.rs`→`tools/fs.rs`), **149 tests**, CI verte. Fichiers **disjoints** de #20 (`mcp.rs`/`tools/` vs `policy.rs`) ⇒ merge quelconque ordre.
+- **Rien mergé/fermé par l'agent** (invariant, d'autant plus après la confusion).
+
+**Autres livrables** :
+- **Dependabot #15/#16/#17** évaluées **sûres** (bumps CI/Actions, pinning SHA
+  maintenu, #16/#17 = re-pin même version, #15 checkout v4→v7 CI verte) — consigné
+  dans `STATUS.md` pour une décision de merge informée.
+- **Revue adversariale alias OSTree × denylist intégrée** : `builtin_denied` est
+  alias-aveugle (`/root/**` ne couvre pas `/var/roothome/**`) mais **aucun exploit
+  agent non-root** — `confine_read` (lectures) + `USER_WRITE_PREFIXES`/
+  `confine_to_caller_home` (écritures) rattrapent tout (tracé ligne par ligne).
+  Durcissements défense-en-profondeur consignés dans `SECURITY-ARCHITECTURE.md`
+  §3.3 (à faire après stabilisation de `mcp.rs` sur `main`).
+- **Santé de `main` confirmée** post-merges : 149 tests verts, clippy propre.
+
 ## ✅ Fait (livré, testé, poussé)
 
 **Session étendue (16h → 23h, 2026-07-13)** :
