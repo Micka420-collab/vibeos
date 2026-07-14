@@ -7,6 +7,18 @@
 > (empilée sur les draft PRs Phase 2, cible `phase2-supply-chain`) est **antérieure
 > et superseded** par #11 ; son sort (fermeture) est laissé à l'humain.
 
+## 🔧 Session 2026-07-14 (soir) — garde-fou anti-dérive + trajectoire + branding boot
+
+Après l'analyse complète du dépôt, deux priorités **avant tout code** :
+
+- **PRIORITÉ 1 — [PR #33](https://github.com/Micka420-collab/vibeos/pull/33) `verify-roadmap-truth` (mergée)** : `scripts/verify-roadmap-truth.sh` + workflow CI `roadmap-truth.yml`. Vérifie **mécaniquement** la doc de statut (ROADMAP/STATUS/DECISIONS) contre le dépôt réel, à chaque push vers `main`. **HARD FAIL** (non ambigu) : lien markdown mort, fichier repo cité mais absent. **WARNING** (heuristique) : plus grand compteur de tests annoncé vs réel `#[test]`, PR citée « mergée » absente de l'historique. L'en-tête **dit explicitement** qu'il n'attrape que le mécanique — « proposé/en cours/fait » reste un jugement humain. Le script a **trouvé 2 vraies dérives dès sa 1re exécution** (`scripts/e2e-zed.sh` mal cité dans STATUS/DECISIONS), corrigées dans la PR.
+- **PRIORITÉ 2 — [PR #34](https://github.com/Micka420-collab/vibeos/pull/34) note de trajectoire Phase 4 (mergée)** : note **datée** en tête de la section Phase 4 du ROADMAP. Constat honnête : Phase 4 (durcissement, « chemin critique » auto-déclaré, 4–6 mois) **n'a pas démarré** 11 jours après la Phase 0 (SELinux/boot mesuré/sandbox à zéro, `vibed` encore root) pendant que la Phase 2.5 avançait hors chemin critique. **La note pose la décision de séquencement à Micka sans la trancher** — l'agent ne démarre pas Phase 4 sans go explicite.
+
+**Aussi** :
+- **[PR #35](https://github.com/Micka420-collab/vibeos/pull/35) splash de boot Plymouth (mergée)** : les 3 assets manquants (`ring`/`mark`/`wordmark`) **générés** par `desktop/plymouth/generate-assets.py` (œuvre originale, reproductible, Pillow) — **spirale galactique** mauve→blue (le motif de marque des wallpapers). Le thème existant dégradait en fond nu faute d'assets ; il rend maintenant l'animation (spirale qui tourne + cœur qui respire). Rendu Plymouth **animé non validé sur machine bootée** (machine-gated) ; activation reste 🛣️ Phase 5.
+- **`pkg.install`** (ADR-016) : allowlist **non tranchée** (choix layering-vs-distrobox), ADR déjà complet avec options concrètes → **rien codé** (conforme).
+- **`log.read`** (ADR-011, T0) : **non démarré** — optionnel (« si le temps le permet après 1 et 2 »), prêt à implémenter selon l'ADR.
+
 ## 🔧 Session 2026-07-14 (après-midi) — récupération de contenu échoué hors de `main`
 
 **Contexte** : après merge de #11 et #14 dans `main`, les ex-PR **#12 (F6)** et
