@@ -96,7 +96,7 @@
   - **F6 : 3/4 familles** (svc, sectools, memory) extraites dans `tools/*.rs` (impl+tests) — **mcp.rs 4257 → 2777 lignes (−35 %)** ; `fs` reste (entrelacé, session dédiée).
   - **ADR-016** : `pkg.install` backend **reporté** (allowlist non tranchée sur OS immuable) ; **agent.sessions** documenté (ADR-012) ; **WITH_ZED_AGENT=0** verrouillé (ADR-015).
   - **Revue adversariale** (sous-agent) → 1 HIGH + 2 MED corrigés ; durcissement des helpers agent-runner (validation d'instance).
-  - **148 tests vibed verts** (137 unit + 8 e2e MCP + 3 politique) + **17 vitest** + smoke ACP + bundle Zed ; clippy/fmt/shellcheck propres.
+  - **149 tests vibed verts** (138 unit + 8 e2e MCP + 3 politique) + **17 vitest** + smoke ACP + bundle Zed ; clippy/fmt/shellcheck propres (incl. durcissements fs + fix audit torn-write).
 
 ## 📋 Reste à faire (court terme)
 
