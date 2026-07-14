@@ -501,6 +501,15 @@ enum ReadScope {
 /// cannot be leveraged to read personal data. The built-in denylist is applied
 /// separately (before this) and always wins.
 fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<ReadScope, String> {
+    // A per-process /proc/<pid> tree is confined to the caller's OWN process(es).
+    // vibed reads as root, so without this any caller could enumerate every
+    // user's process metadata (maps/status/net/... — cross-user reconnaissance).
+    // Kernel-memory and environ/cmdline files are denied for ALL owners by the
+    // built-in denylist (applied before this); this closes the residual recon
+    // over the remaining /proc/<pid> files (adversarial review 2026-07-14).
+    if let Some(pid) = proc_pid_of(canonical) {
+        return confine_proc_pid(tool, caller, pid, canonical);
+    }
     if SYSTEM_READ_PREFIXES
         .iter()
         .any(|p| canonical == p.trim_end_matches('/') || canonical.starts_with(p))
@@ -536,6 +545,58 @@ fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<ReadScope
         "{tool}: '{canonical}' is neither a readable system path nor inside uid {uid}'s own home; \
          cross-user reads are refused"
     ))
+}
+
+/// The pid of a per-process `/proc/<pid>[/...]` path, or None for global /proc
+/// files (`/proc/cpuinfo`, `/proc/sys/...`) and non-/proc paths. `canonical` is
+/// already symlink-resolved, so `/proc/self` never reaches here as literal text.
+fn proc_pid_of(canonical: &str) -> Option<u32> {
+    canonical
+        .strip_prefix("/proc/")?
+        .split('/')
+        .next()?
+        .parse::<u32>()
+        .ok()
+}
+
+/// Real uid owning process `pid`, from `/proc/<pid>/status` `Uid:` (real uid =
+/// the first field). None if the pid is gone or its status is unreadable.
+fn proc_pid_owner(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// Confine a `/proc/<pid>` read to the caller's own process(es). Fail-closed: an
+/// unknown caller uid, or a vanished/unreadable pid, is refused. A process the
+/// caller owns yields `System` scope (it is a /proc file, not the caller's home).
+fn confine_proc_pid(
+    tool: &str,
+    caller: Caller,
+    pid: u32,
+    canonical: &str,
+) -> Result<ReadScope, String> {
+    let uid = caller.uid.ok_or_else(|| {
+        format!(
+            "{tool}: '{canonical}' is a per-process /proc tree and the caller uid is \
+             unavailable (SO_PEERCRED); refusing (fail-closed)"
+        )
+    })?;
+    let owner = proc_pid_owner(pid).ok_or_else(|| {
+        format!("{tool}: cannot determine the owner of /proc/{pid} (gone or unreadable); refusing")
+    })?;
+    if owner == uid {
+        Ok(ReadScope::System)
+    } else {
+        Err(format!(
+            "{tool}: /proc/{pid} belongs to uid {owner}, not the caller (uid {uid}); \
+             cross-user process reads are refused"
+        ))
+    }
 }
 
 /// True when `path` is `base` itself or a descendant of it, comparing whole
@@ -932,6 +993,41 @@ mod tests {
             .expect("reading through a symlink must still work");
         assert_eq!(out, "via symlink");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proc_pid_of_parses_only_per_process_paths() {
+        assert_eq!(proc_pid_of("/proc/1234/maps"), Some(1234));
+        assert_eq!(proc_pid_of("/proc/1234"), Some(1234));
+        assert_eq!(proc_pid_of("/proc/1234/task/56/status"), Some(1234));
+        assert_eq!(proc_pid_of("/proc/cpuinfo"), None);
+        assert_eq!(proc_pid_of("/proc/sys/kernel/hostname"), None);
+        assert_eq!(proc_pid_of("/etc/passwd"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_pid_read_is_confined_to_the_owning_caller() {
+        let me = std::process::id();
+        let my_uid = proc_pid_owner(me).expect("own pid status is readable");
+        // Own process, own uid -> allowed (System scope, not Home).
+        assert_eq!(
+            confine_read("fs.read", caller_uid(my_uid), &format!("/proc/{me}/maps")),
+            Ok(ReadScope::System)
+        );
+        // Own process, a DIFFERENT uid -> refused (cross-user recon blocked).
+        assert!(confine_read(
+            "fs.read",
+            caller_uid(my_uid.wrapping_add(1)),
+            &format!("/proc/{me}/status")
+        )
+        .is_err());
+        // Unknown caller uid -> refused (fail-closed).
+        assert!(confine_read("fs.read", Caller::default(), &format!("/proc/{me}/maps")).is_err());
+        // A vanished pid -> refused (fail-closed), never opened.
+        assert!(confine_read("fs.read", caller_uid(my_uid), "/proc/4000000/maps").is_err());
+        // A GLOBAL /proc file is not per-process and stays readable.
+        assert!(confine_read("fs.read", Caller::default(), "/proc/cpuinfo").is_ok());
     }
 
     #[test]
