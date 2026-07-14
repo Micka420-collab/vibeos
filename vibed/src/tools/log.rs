@@ -94,7 +94,11 @@ fn log_read_with(args: &Value, journalctl: &str) -> Result<String, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let (capped, truncated) = cap_bytes(&stdout, MAX_BYTES);
-    let (text, redacted) = redact(&capped);
+    let (redacted_text, redacted) = redact(&capped);
+    // A redaction mask can be longer than the token it replaces, so re-cap after
+    // redaction to keep the returned `output` honestly within MAX_BYTES.
+    let (text, retruncated) = cap_bytes(&redacted_text, MAX_BYTES);
+    let truncated = truncated || retruncated;
 
     Ok(json!({
         "unit": unit,
