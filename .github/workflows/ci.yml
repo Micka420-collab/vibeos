@@ -146,6 +146,10 @@ jobs:
           shellcheck memory/genesis.sh \
             os/rootfs/usr/bin/vibeos-hud \
             os/rootfs/usr/libexec/vibeos/vibeos-agents-group.sh \
+            os/rootfs/usr/libexec/vibeos/vibeos-agent-egress.sh \
+            os/rootfs/usr/libexec/vibeos/vibeos-agent-run.sh \
+            os/rootfs/usr/libexec/vibeos/vibeos-agent-seal-token.sh \
+            os/rootfs/usr/libexec/vibeos/vibeos-selfcheck.sh \
             os/rootfs/usr/lib/systemd/system-generators/vibeos-amnesic-generator \
             scripts/verify-roadmap-truth.sh
 
