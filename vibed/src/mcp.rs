@@ -844,14 +844,17 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             "Query the VibeOS memory store (/var/lib/vibeos/memory): substring-match files by \
              name and content, returning each match WITH a bounded content snippet (read the \
              memory in one call, no follow-up fs.read). Optional 'scope' \
-             (identity/hardware/user/projects/journal/knowledge) and 'limit' (docs/MEMORY.md §9)",
+             (identity/hardware/user/projects/journal/knowledge) and 'limit'. With 'fold': true \
+             on scope 'user' or 'projects', returns the CONSOLIDATED current view (last-write-wins \
+             fold of the append-only log) instead of raw matches (docs/MEMORY.md §9)",
             json!({"type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "scope": {"type": "string",
                           "enum": ["identity", "hardware", "user",
                                    "projects", "journal", "knowledge"]},
-                "limit": {"type": "integer", "minimum": 1}
+                "limit": {"type": "integer", "minimum": 1},
+                "fold": {"type": "boolean"}
             }}),
         ),
         (

@@ -83,6 +83,39 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
         .to_string());
     }
 
+    // `fold`: for the `user`/`projects` scopes, return the CONSOLIDATED current
+    // view — the last-write-wins fold of the append-only `updates.jsonl` — rather
+    // than the raw file walk. This is the SAME fold `vibectl memory profile /
+    // projects` exposes to the operator (docs/MEMORY.md §3.3/§3.4), surfaced here
+    // so an AGENT can read the current profile/index in ONE T0 call instead of
+    // re-folding the raw log itself. Additive: default false; only user/projects.
+    let fold = match args.get("fold") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("memory.query: 'fold' must be a boolean".to_string()),
+    };
+    if fold {
+        match scope.map(|(name, _, _)| name) {
+            Some("user") => {
+                let mut out = crate::vibectl::memory_profile_at(root);
+                out["scope"] = json!("user");
+                out["folded"] = json!(true);
+                return Ok(out.to_string());
+            }
+            Some("projects") => {
+                let mut out = crate::vibectl::memory_projects_at(root);
+                out["scope"] = json!("projects");
+                out["folded"] = json!(true);
+                return Ok(out.to_string());
+            }
+            _ => {
+                return Err(
+                    "memory.query: 'fold' applies only to scope 'user' or 'projects'".to_string(),
+                )
+            }
+        }
+    }
+
     // Bounded iterative walk: no recursion, hard cap on visited files, and
     // NEVER follows symlinks (entry.file_type() / symlink_metadata do not
     // traverse) — a link planted inside the store cannot route the walk (or
@@ -535,6 +568,57 @@ mod tests {
         // a scope never leaks files from another scope.
         let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
         assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_fold_returns_consolidated_user_and_projects_views() {
+        let root = memory_scratch("qfold");
+        // Append-only user updates: the SAME key written twice — last wins.
+        std::fs::write(
+            root.join("user").join("updates.jsonl"),
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"key\":\"preferences.editor\",\"value\":\"vim\",\"source\":\"agent\"}\n\
+             {\"ts\":\"2026-01-02T00:00:00Z\",\"key\":\"preferences.editor\",\"value\":\"zed\",\"source\":\"agent\"}\n\
+             {\"ts\":\"2026-01-02T00:00:00Z\",\"key\":\"profile.lang\",\"value\":\"fr\",\"source\":\"agent\"}\n",
+        )
+        .unwrap();
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"scope": "user", "fold": true}),
+        ));
+        assert_eq!(payload["folded"], true);
+        assert_eq!(payload["scope"], "user");
+        assert_eq!(
+            payload["profile"]["preferences.editor"], "zed",
+            "last write wins per key"
+        );
+        assert_eq!(payload["profile"]["profile.lang"], "fr");
+
+        // projects fold: last-write-wins per path.
+        std::fs::write(
+            root.join("projects").join("updates.jsonl"),
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"path\":\"/home/dev/proj\",\"name\":\"old\",\"source\":\"agent\"}\n\
+             {\"ts\":\"2026-01-02T00:00:00Z\",\"path\":\"/home/dev/proj\",\"name\":\"new\",\"source\":\"agent\"}\n",
+        )
+        .unwrap();
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"scope": "projects", "fold": true}),
+        ));
+        assert_eq!(payload["folded"], true);
+        let projects = payload["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1, "folded by path");
+        assert_eq!(projects[0]["name"], "new", "last write wins per path");
+
+        // fold on a non-user/projects scope is an error.
+        assert!(memory_query_at(&root, &json!({"scope": "journal", "fold": true})).is_err());
+        assert!(memory_query_at(&root, &json!({"fold": true})).is_err());
+        // fold=false (the default) keeps the raw walk behavior unchanged.
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "user"})));
+        assert!(
+            payload.get("folded").is_none(),
+            "an un-folded query keeps the raw file-walk shape"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
