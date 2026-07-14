@@ -45,6 +45,11 @@ pub const PENDING_TTL_SECS: u64 = 3600;
 /// requests are refused (bounded disk) until the operator triages or they age
 /// out. A flood is already audited per call, so it cannot pass unnoticed.
 pub const MAX_PENDING: usize = 64;
+/// Per-uid cap on simultaneously-pending requests. A single agent (one uid) must
+/// not be able to fill the whole queue and STARVE other users' approval
+/// requests — so each uid's footprint is bounded well below `MAX_PENDING`, which
+/// stays as the global backstop. Fail-closed like the global cap.
+pub const MAX_PENDING_PER_UID: usize = 16;
 
 fn pending_dir(root: &Path) -> PathBuf {
     root.join("pending")
@@ -95,8 +100,10 @@ pub fn request_approval(
     let dir = pending_dir(root);
     std::fs::create_dir_all(&dir)?;
 
-    // Prune stale requests, then scan what remains for a duplicate and a count.
+    // Prune stale requests, then scan what remains for a duplicate and a count
+    // (both global and for the requesting uid).
     let mut live = 0usize;
+    let mut same_uid = 0usize;
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -122,12 +129,21 @@ pub fn request_approval(
                 .get("caller_uid")
                 .and_then(Value::as_u64)
                 .map(|u| u as u32);
+            if r_uid == caller_uid {
+                same_uid += 1;
+            }
             if r_tool == Some(tool) && r_target == target && r_uid == caller_uid {
                 if let Some(existing) = req.get("id").and_then(Value::as_str) {
                     return Ok(existing.to_string());
                 }
             }
         }
+    }
+    // Per-uid cap first: one agent must not starve other users' approvals.
+    if same_uid >= MAX_PENDING_PER_UID {
+        return Err(std::io::Error::other(
+            "approval store full for this uid: too many pending requests",
+        ));
     }
     if live >= MAX_PENDING {
         return Err(std::io::Error::other(
@@ -497,27 +513,71 @@ mod tests {
     fn pending_store_is_capped() {
         let root = store("cap");
         let now = 7_000_000;
-        // Fill the store with MAX_PENDING distinct requests.
+        // Fill the store with MAX_PENDING distinct requests, SPREAD across uids so
+        // the per-uid cap never binds first — this asserts the GLOBAL cap. (Each
+        // uid gets exactly MAX_PENDING_PER_UID; MAX_PENDING is a multiple of it.)
         for i in 0..MAX_PENDING {
             let svc = format!("svc{i}.service");
-            request_approval(&root, "svc.restart", Some(&svc), "T2", Some(1000), now)
+            let uid = 1000 + (i as u32 / MAX_PENDING_PER_UID as u32);
+            request_approval(&root, "svc.restart", Some(&svc), "T2", Some(uid), now)
                 .unwrap_or_else(|_| panic!("request {i} within cap"));
         }
         assert_eq!(list_pending(&root).len(), MAX_PENDING);
-        // One more distinct request is refused — the store cannot grow past the cap.
+        // One more distinct request from a FRESH uid is refused by the GLOBAL cap
+        // (that uid has 0 pending, so only the global limit can stop it).
         assert!(
             request_approval(
                 &root,
                 "svc.restart",
                 Some("overflow.service"),
                 "T2",
-                Some(1000),
+                Some(9999),
                 now
             )
             .is_err(),
             "request beyond MAX_PENDING is refused (fail-closed)"
         );
         assert_eq!(list_pending(&root).len(), MAX_PENDING, "store did not grow");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn per_uid_cap_prevents_one_uid_from_starving_others() {
+        let root = store("cap-uid");
+        let now = 9_000_000;
+        // One uid fills its per-uid quota with distinct targets.
+        for i in 0..MAX_PENDING_PER_UID {
+            let svc = format!("svc{i}.service");
+            request_approval(&root, "svc.restart", Some(&svc), "T2", Some(1000), now)
+                .unwrap_or_else(|_| panic!("request {i} within per-uid cap"));
+        }
+        // The SAME uid's next distinct request is refused by the per-uid cap,
+        // even though the GLOBAL store is far from full.
+        assert!(
+            request_approval(
+                &root,
+                "svc.restart",
+                Some("more.service"),
+                "T2",
+                Some(1000),
+                now
+            )
+            .is_err(),
+            "uid 1000 beyond its per-uid cap is refused"
+        );
+        // ...but a DIFFERENT uid is not starved — it can still queue an approval.
+        assert!(
+            request_approval(
+                &root,
+                "svc.restart",
+                Some("other.service"),
+                "T2",
+                Some(2000),
+                now
+            )
+            .is_ok(),
+            "a different uid must not be starved by uid 1000's flood"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -538,7 +598,10 @@ mod tests {
                 let ok = &ok;
                 s.spawn(move || {
                     let svc = format!("svc{i}.service");
-                    if request_approval(root, "svc.restart", Some(&svc), "T2", Some(1000), now)
+                    // Spread uids so no single uid attempts more than its per-uid
+                    // cap — the GLOBAL cap is what must bind here.
+                    let uid = 1000 + (i as u32 / MAX_PENDING_PER_UID as u32);
+                    if request_approval(root, "svc.restart", Some(&svc), "T2", Some(uid), now)
                         .is_ok()
                     {
                         ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

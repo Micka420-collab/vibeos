@@ -416,16 +416,17 @@ La mémoire est portable — elle appartient à l'humain, pas au matériel.
 
 Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
 `vibed`, désormais **embarqué dans l'image et démarré au boot**).
-`memory.query` (arguments `query`, `scope`, `limit`) et `memory.append`
+`memory.query` (arguments `query`, `scope`, `limit`, `fold`) et `memory.append`
 (scopes `journal`, `knowledge`, `user`, `projects` — tous append-only) sont
 **implémentés, testés et exposés** par le démon `vibed`. La **vue courante**
-(fold last-write-wins des scopes `user`/`projects`) est matérialisée par
-`vibectl memory profile` et `vibectl memory projects` (**livré**). Reste une
-**cible ultérieure** : la recherche sémantique par embeddings.
+(fold last-write-wins des scopes `user`/`projects`) est matérialisée pour
+l'opérateur par `vibectl memory profile`/`projects` **et pour les agents** par
+`memory.query` avec `fold: true` (T0, un seul appel) — les deux **livrés**.
+Reste une **cible ultérieure** : la recherche sémantique par embeddings.
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
-| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** | ✅ **livré** (scope/limit + extraits depuis v0.2) |
+| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** ; `fold:true` sur `user`/`projects` = vue consolidée | ✅ **livré** (scope/limit + extraits + fold) |
 | `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`, `knowledge`, `user`, `projects` (tous append-only) |
 
 Points durs :
