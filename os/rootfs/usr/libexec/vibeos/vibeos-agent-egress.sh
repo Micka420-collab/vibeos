@@ -47,6 +47,26 @@ for f in "$conf" "$extra"; do
     done < "$f"
 done
 
+# True (0) for a non-routable address that must NEVER enter the allowlist. A
+# public AI provider is never at a loopback / link-local / private / cloud-
+# metadata address, so a hostname resolving there (DNS poisoning, rebinding, or a
+# CNAME to an internal host) would punch a hole through the default-deny egress
+# wall to internal infrastructure — 169.254.169.254 (cloud metadata), RFC1918,
+# etc. Dropping these keeps the allowlist "public providers only": it can only
+# narrow reachability, never open it to the inside.
+is_internal_ip() {
+    case "$1" in
+        127.*|0.*|255.255.255.255) return 0 ;;                 # loopback / this-host / broadcast
+        169.254.*) return 0 ;;                                 # link-local incl. cloud metadata
+        10.*|192.168.*) return 0 ;;                            # RFC1918
+        172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;    # RFC1918 172.16/12
+        ::1|::|::ffff:*) return 0 ;;                            # v6 loopback / unspecified / v4-mapped
+        [fF][eE]8*:*|[fF][eE]9*:*|[fF][eE][aAbB]*:*) return 0 ;; # v6 link-local fe80::/10
+        [fF][cCdD]*:*) return 0 ;;                              # v6 ULA fc00::/7
+    esac
+    return 1
+}
+
 mkdir -p "$dropin_dir"
 
 {
@@ -66,6 +86,10 @@ mkdir -p "$dropin_dir"
         echo "# ${h}"
         while IFS= read -r ip; do
             [ -n "$ip" ] || continue
+            if is_internal_ip "$ip"; then
+                echo "# ${h}: ${ip} DROPPED (non-routable/internal range — refusing to open the egress wall to the inside)"
+                continue
+            fi
             echo "IPAddressAllow=${ip}"
         done <<< "$ips"
     done
