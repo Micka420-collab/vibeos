@@ -21,10 +21,14 @@
 # /etc/shadow*,
 # /etc/gshadow*, **/.ssh/**, **/.gnupg/**, /etc/ssh/* (+ /etc/ssh/ssh_host_*),
 # **/.aws/**, **/.config/gcloud/**,
-# /etc/NetworkManager/system-connections/**, **/.docker/config.json,
+# /etc/NetworkManager/system-connections/**, /etc/krb5.keytab, /etc/sssd/**,
+# /etc/ipsec.secrets, /etc/ipsec.d/private/**, /etc/pki/**/private/**,
+# **/.docker/config.json,
 # **/.kube/config, **/.netrc, /root/**, /proc/*/environ, /proc/**/environ,
-# /proc/**/cmdline, /run/credentials/**, /boot/**, plus the credentials of
-# the AI agents / dev tooling shipped in the image: **/.claude/**,
+# /proc/**/cmdline, kernel-memory pseudo-files (/proc/kcore, /proc/kallsyms,
+# /proc/kmsg, /proc/*/mem, /proc/*/pagemap), per-user runtime dirs
+# (/run/user/**, /run/secrets/**), /run/credentials/**, /boot/**, plus the
+# credentials of the AI agents / dev tooling shipped in the image: **/.claude/**,
 # **/.claude.json, **/.config/gh/**, **/.gemini/**, **/.codex/**,
 # **/.local/share/opencode/**, **/.ollama/**, **/.npmrc, **/.git-credentials,
 # **/.config/sops/** ; and for WRITES only:
@@ -83,6 +87,11 @@ denied = [
   "**/.aws/**",                # AWS credentials, config, SSO cache — whole dir
   "**/.config/gcloud/**",      # Google Cloud credentials store
   "/etc/NetworkManager/system-connections/**", # Wi-Fi/VPN PSKs and certs
+  "/etc/krb5.keytab",          # Kerberos service keys
+  "/etc/sssd/**",              # SSSD: LDAP/AD bind credentials
+  "/etc/ipsec.secrets",        # IPsec PSK/keys
+  "/etc/ipsec.d/private/**",   # IPsec private keys
+  "/etc/pki/**/private/**",    # TLS/PKI private keys (public certs stay readable)
   "**/.docker/config.json",    # container registry auth tokens
   "**/.kube/config",           # kubernetes cluster credentials
   "**/.netrc",                 # machine login credentials
@@ -90,6 +99,17 @@ denied = [
   "/proc/*/environ",           # process environments may leak secrets
   "/proc/**/environ",          # ...including /proc/<pid>/task/<tid>/environ
   "/proc/**/cmdline",          # command lines may carry secrets/tokens
+  # Kernel-memory pseudo-files: vibed reads as root → kernel memory / KASLR to
+  # any caller. Per-user runtime dirs (0700) → cross-user. (Review 2026-07-14.)
+  "/proc/kcore",               # kernel core image (physical RAM)
+  "/proc/kallsyms",            # kernel symbol addresses (defeats KASLR)
+  "/proc/kmsg",                # kernel ring buffer
+  "/proc/*/mem",               # a process's address space
+  "/proc/**/mem",              # ...including per-thread task/<tid>/mem
+  "/proc/*/pagemap",           # virtual->physical page mapping
+  "/proc/**/pagemap",
+  "/run/user/**",              # XDG_RUNTIME_DIR of every user (mode 0700)
+  "/run/secrets/**",           # systemd/container secrets convention
   "/run/credentials/**",       # decrypted systemd-creds exposed to services
   "/boot/**",                  # boot chain is none of the agent's business
   # Credentials of the AI agents / dev tooling shipped in the image — vibed
