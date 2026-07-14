@@ -4,15 +4,16 @@
 //   alongside the assets: mark.png, ring.png, wordmark.png (see README).
 // Source: desktop/plymouth/vibeos/vibeos.script (COPY-ed into the image).
 //
-// STATUS — 🛣️ Phase 5 (branding). Original artwork: the mark, the ring and the
-// motion are drawn for VibeOS, not copied from any existing theme (the
-// adi1090x pack is explicitly rejected for unclear asset provenance —
-// docs/DESKTOP.md §5.4).
+// STATUS — assets présents (générés par generate-assets.py) ; activation du
+// thème = 🛣️ Phase 5 (régénération de l'initramfs au build de l'image). Œuvre
+// ORIGINALE VibeOS dessinée par code (generate-assets.py), aucune source tierce
+// — le pack adi1090x est écarté pour provenance floue (docs/DESKTOP.md §5.4).
 //
 // DESIGN — docs/DESIGN-SYSTEM.md §11.1 (Boot). The boot is "the first chord of
-// the score": Crust backdrop (never pure #000), a calm breathing mark, a thin
-// mauve→blue signature ring — the SAME Crust and the SAME signature gradient the
-// login card (§11.2) will show a moment later. Minimal, but in key.
+// the score": Crust backdrop (never pure #000), a calm breathing core, a slow
+// mauve→blue signature SPIRAL (the VibeOS galaxy mark, same motif as the
+// wallpapers) — the SAME Crust and the SAME signature gradient the login card
+// (§11.2) shows a moment later. Minimal, but in key.
 //
 // GRACEFUL DEGRADATION — if the PNG assets are missing, GetWidth() is 0 and the
 // corresponding sprites simply stay invisible: the splash falls back to the bare
@@ -40,8 +41,8 @@ cx = Window.GetX() + screen_w / 2;
 cy = Window.GetY() + screen_h / 2;
 
 // ---- assets (see desktop/plymouth/README.md "assets to generate") ----------
-mark_image = Image("mark.png");        // central glyph, Text #cdd6f4, ~128px
-ring_image = Image("ring.png");        // signature ring stroke (mauve→blue), ~200px
+mark_image = Image("mark.png");        // calm core: luminous dot + halo, Text #cdd6f4, 128px (breathes)
+ring_image = Image("ring.png");        // signature spiral galaxy, mauve→blue gradient, 256px (rotates)
 word_image = Image("wordmark.png");    // "VibeOS" wordmark, faint (optional)
 
 // central mark — breathes (opacity oscillates)
@@ -51,7 +52,7 @@ mark.SetX(cx - mark_image.GetWidth() / 2);
 mark.SetY(cy - mark_image.GetHeight() / 2);
 mark.SetZ(10);
 
-// signature ring — rotates slowly (re-imaged each frame)
+// signature spiral galaxy — rotates slowly (re-imaged each frame)
 ring = Sprite();
 ring.SetImage(ring_image);
 ring.SetZ(5);
@@ -88,8 +89,8 @@ fun refresh ()
     breath = 0.72 + 0.28 * (0.5 + 0.5 * Math.Sin(t * 2.6));
     mark.SetOpacity(breath);
 
-    // Signature ring: slow constant spin, gently accelerated by boot progress,
-    // so the sweep reads as "advancing" without a gaudy percentage bar (§11.1).
+    // Signature spiral: slow constant spin, gently accelerated by boot progress,
+    // so the galaxy sweep reads as "advancing" without a gaudy percentage bar (§11.1).
     angle = t * 0.9 + progress * 3.0;                // radians
     rotated = ring_image.Rotate(angle);
     ring.SetImage(rotated);
