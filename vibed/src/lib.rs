@@ -12,5 +12,7 @@ pub mod ratelimit;
 pub mod reasoning;
 pub mod sha256;
 pub mod supervisor;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tools;
 pub mod vibectl;
