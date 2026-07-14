@@ -23,6 +23,8 @@
 //! moves on to other T0/T1 work. The supervisor's part is to keep running and to
 //! record the pending item — it never lifts the T2/T3 floor.
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 /// Parse a human budget like `8h`, `30m`, `45s`, `8h30m`, `90` (bare = seconds)
@@ -68,25 +70,32 @@ pub fn parse_duration(s: &str) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
-/// A running session's budget. `deadline_unix` is `start + wall_secs`.
+/// A running session's budget: an optional wall-clock allowance and an optional
+/// tool-call cap.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
-    pub deadline_unix: u64,
+    /// Wall-clock allowance. Enforced against a MONOTONIC elapsed time (see
+    /// `wall_expired`), NOT the system clock — a clock step (NTP correction, VM
+    /// snapshot resume, boot-with-wrong-RTC then sync) must never extend a
+    /// runaway agent's run past its budget.
+    pub wall: Option<Duration>,
     pub max_tool_calls: Option<u64>,
 }
 
 impl Budget {
-    /// Build from a start time and optional wall-clock seconds / tool-call cap.
-    /// With no wall budget the deadline is `u64::MAX` (effectively unbounded).
-    pub fn new(start_unix: u64, wall_secs: Option<u64>, max_tool_calls: Option<u64>) -> Self {
+    /// Build from optional wall-clock seconds and an optional tool-call cap.
+    /// `None` wall = effectively unbounded on time.
+    pub fn new(wall_secs: Option<u64>, max_tool_calls: Option<u64>) -> Self {
         Self {
-            deadline_unix: wall_secs.map_or(u64::MAX, |w| start_unix.saturating_add(w)),
+            wall: wall_secs.map(Duration::from_secs),
             max_tool_calls,
         }
     }
-    /// Wall-clock budget exhausted at `now`?
-    pub fn wall_expired(&self, now: u64) -> bool {
-        now >= self.deadline_unix
+    /// Wall-clock budget exhausted after `elapsed`? `elapsed` MUST come from a
+    /// monotonic clock (`Instant::elapsed`) so the check cannot be defeated by a
+    /// backward system-clock step.
+    pub fn wall_expired(&self, elapsed: Duration) -> bool {
+        self.wall.is_some_and(|w| elapsed >= w)
     }
     /// Tool-call budget exhausted at `count`?
     pub fn tool_calls_exhausted(&self, count: u64) -> bool {
@@ -234,16 +243,15 @@ mod tests {
 
     #[test]
     fn budget_wall_and_tool_limits() {
-        let b = Budget::new(1_000, Some(3600), Some(10));
-        assert_eq!(b.deadline_unix, 4_600);
-        assert!(!b.wall_expired(4_599));
-        assert!(b.wall_expired(4_600));
+        let b = Budget::new(Some(3600), Some(10));
+        // Wall budget is checked against MONOTONIC elapsed time (a Duration).
+        assert!(!b.wall_expired(Duration::from_secs(3599)));
+        assert!(b.wall_expired(Duration::from_secs(3600)));
         assert!(!b.tool_calls_exhausted(9));
         assert!(b.tool_calls_exhausted(10));
-        // Unbounded wall.
-        let u = Budget::new(1_000, None, None);
-        assert_eq!(u.deadline_unix, u64::MAX);
-        assert!(!u.wall_expired(u64::MAX - 1));
+        // Unbounded wall: never expires however much time elapses.
+        let u = Budget::new(None, None);
+        assert!(!u.wall_expired(Duration::from_secs(u64::MAX / 1_000)));
         assert!(!u.tool_calls_exhausted(1_000_000));
     }
 

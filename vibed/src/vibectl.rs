@@ -424,7 +424,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
     if reasoning::safe_session_id(&sid).is_none() {
         return (json!({"error": "invalid session id"}), false);
     }
-    let budget = supervisor::Budget::new(start, opts.budget_secs, opts.max_calls);
+    let budget = supervisor::Budget::new(opts.budget_secs, opts.max_calls);
 
     // START journal event (reserved `autonomous_session` type — unforgeable by agents).
     write_session_journal(
@@ -524,16 +524,28 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
         reader_done.store(true, Ordering::Release);
     }
 
-    // Poll loop: enforce budget + stop marker; end when the child exits.
+    // Poll loop: enforce budget + stop marker; end when the child exits. The
+    // wall budget is measured from a MONOTONIC Instant — immune to system-clock
+    // steps (NTP correction, VM snapshot resume, boot-with-wrong-RTC then sync) —
+    // unlike the epoch timestamps used for journaling. A backward clock step must
+    // never let a runaway agent outlive its `--budget`.
+    let run_started = std::time::Instant::now();
     let mut reason = "completed";
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(_) => break,
+            Ok(Some(_)) => break, // the child exited on its own
+            Ok(None) => {}        // still running — enforce the budget below
+            Err(_) => {
+                // Unknown child state: kill best-effort and stop, rather than
+                // fall through to a wait() that could block on a still-live child.
+                let pid = child.id();
+                let _ = child.kill();
+                terminate_group(pid);
+                reason = "wait_error";
+                break;
+            }
         }
-        let now = now_epoch_secs();
-        let over_wall = budget.wall_expired(now);
+        let over_wall = budget.wall_expired(run_started.elapsed());
         let over_calls = budget.tool_calls_exhausted(tool_calls.load(Ordering::Relaxed));
         let stopped = stopfile.exists();
         if over_wall || over_calls || stopped {
