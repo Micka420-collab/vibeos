@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "VibeOSVerou",
+        "Name": "VibeOS Lock",
+        "Name[fr]": "VibeOS Verrouillage",
+        "Description": "VibeOS lock-screen wallpaper.",
+        "Description[fr]": "Fond d'écran de l'écran de verrouillage VibeOS.",
+        "License": "Apache-2.0",
+        "Version": "0.1",
+        "Website": "https://github.com/Micka420-collab/vibeos",
+        "Authors": [
+            {
+                "Name": "VibeOS Project"
+            }
+        ]
+    }
+}
