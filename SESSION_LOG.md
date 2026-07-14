@@ -285,6 +285,21 @@ construites, `bootc container lint` OK (11 checks, 2 warnings d'hygiène, 0 erre
   tamper-evidence (keyless, troncature de queue non détectée sans ancrage Phase 4),
   budget `--calls` best-effort, petit-fils `setsid()` (fuite jamais hang).
   **Extension Zed** relue : gate de gouvernance sain (fail-safe partout).
+- **3ᵉ revue adversariale** (confinement fs — la surface sécurité la plus
+  critique) : machinerie symlink/canonicalize/dev-ino **saine** (pas de bypass de
+  lecture cross-user), mais **3 gaps corrigés** :
+  - **#1 (MED, DoS réel)** — `fs.read` sur un **FIFO** bloquait le worker (guard
+    `is_file()` après l'`open()` bloquant) → épuisement du pool = déni cross-tenant.
+    Fix : type vérifié **avant** l'open + `O_NONBLOCK` + test FIFO.
+  - **#2 (MED, blind spot hardlink)** — denylist path-based aveugle aux hardlinks.
+    Fix : lecture confinée au home → inode owned par l'appelant (`fstat st_uid`),
+    bloque l'escalade cross-owner ; system reads exemptés (`ReadScope`).
+  - **#4 (LOW, fail-open)** — home résolu à `/` → confinement inopérant → refus.
+  - Résidu documenté : TOCTOU parent intermédiaire de `fs.write` (openat2 = Phase 3).
+  - **Bug e2e** corrigé (relecture `index.ts`) : nom d'env socket (`VIBED_MCP_SOCKET`).
+- **Bilan des 3 revues** : 1 HIGH (bypass deny-list svc.restart) + plusieurs
+  MED/LOW, tous corrigés. Couverture : code de la nuit, primitives cœur
+  (audit/ratelimit/approval/superviseur), confinement fs, extension Zed.
 - **État prolongation** : **149 tests vibed verts** + 17 vitest ; clippy/fmt/
   shellcheck propres ; PR #11 MERGEABLE, CI Rust verte.
 
