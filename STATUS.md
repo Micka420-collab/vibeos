@@ -1,5 +1,16 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
+> # ⚠️ ACTION HUMAINE REQUISE — 2 PR À MERGER DANS `main`
+> Deux correctifs ont été **échoués hors de `main`** par un merge de pile mal
+> orienté (les ex-PR #12/#13 ont été mergées dans des branches intermédiaires,
+> pas dans `main`). **Ils NE SONT PAS sur `main` :**
+> 1. 🔒 **fix sécurité** alias `/home`↔`/var/home` (**vuln vivante sur `main`**) — *cette branche, `security-home-alias-fix`*
+> 2. **refactor F6** (`fs.*` hors de `mcp.rs`) — **[PR #19](https://github.com/Micka420-collab/vibeos/pull/19)** (`f6-fs-extraction`)
+>
+> **Les deux sont des PR indépendantes basées sur `main` — merge-les toutes les
+> deux** (n'importe quel ordre). **NE PAS** les re-merger via des branches
+> empilées. Détail : **[docs/MERGE-GUIDE.md](docs/MERGE-GUIDE.md)**.
+
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
 > Dernière mise à jour : **2026-07-13 (nuit)** — `svc.restart` T2 réel, extension Zed câblée dans l'image (bundle, gardée), Phase 2.5 (unité agent + TPM2 + egress), E2E Zed turnkey (Tier A validé live), HUD branché en live. **PR #11 → main MERGEABLE, CI Rust verte.**
 
