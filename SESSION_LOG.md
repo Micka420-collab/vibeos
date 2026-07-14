@@ -48,6 +48,31 @@ Invariants tenus : plancher T2/T3 jamais levé ; build+test+clippy+fmt avant cha
 commit ; commits atomiques conventionnels + push ; aucun merge/fermeture de PR par
 l'agent. Arrêt à 12h00 (mandat court).
 
+## 🆕 Mandat 2026-07-14 (après-midi, jusqu'à 18h) — friction de revue + harnais
+
+Priorité : **réduire la friction de revue, pas ajouter du code**. **Aucune 4ᵉ
+branche empilée** sur `fs-home-alias-deny` — le travail indépendant part de `main`.
+
+- **Guide de merge (`docs/MERGE-GUIDE.md`)** — une page : ordre impératif
+  #11→#12→#13, 2-3 phrases par PR (contenu / pourquoi sûr / ce qui casse si
+  désordonné), mécanique de retargeting GitHub, garde-fous. Committé sur le tip de
+  la pile (pas une nouvelle branche). Pointeur en tête de ce fichier. Objectif :
+  merger les trois en ~10 min sans relire les diffs.
+- **Harnais de validation E2E/boot** → **[PR #14](https://github.com/Micka420-collab/vibeos/pull/14)**
+  (branche `vibeos-validation-harness`, **base `main`, indépendante de la pile**) :
+  `os/rootfs/usr/libexec/vibeos/vibeos-selfcheck.sh` (validateur de boot on-image,
+  **100 % lecture seule**, sortie humaine + `--json`, tolérant aux versions) +
+  `docs/VALIDATION.md` (Tier A auto / B semi-manuel / C matériel, consolide les
+  checklists éparpillées). Testé en simulation contre un vibed scratch (toute la
+  surface MCP + denylist + plancher T2 + audit PASS, JSON valide) — **jamais lancé
+  sur une vraie machine**. shellcheck vert en CI.
+- **Cohérence docs** : la seule dérive (ROADMAP liste encore « F6 fs différé ») ne
+  peut être corrigée ni sur la pile (interdit) ni en base=main sans conflit avec
+  PR #11 → **consignée dans le guide** (marquer F6 terminé post-merge), comme prévu.
+
+État : pile #11→#12→#13 (draft, CLEAN) + PR #14 indépendante (draft). Invariants
+identiques tenus. Arrêt à 18h00.
+
 ## ✅ Fait (livré, testé, poussé)
 
 **Session étendue (16h → 23h, 2026-07-13)** :
