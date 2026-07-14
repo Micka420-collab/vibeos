@@ -25,9 +25,9 @@
 //
 // NOT YET VALIDATED VISUALLY: this wiring has never run on a booted Plasma +
 // Quickshell (no headless path — BLOCKERS.md). The remaining Phase 2 work is the
-// on-machine visual check, plus deleting the dead `mock*` reference functions
-// still kept at the bottom of vibed_client.js. Request/response shapes live in
-// vibed_client.js and MUST stay in sync with vibed/src/mcp.rs.
+// on-machine visual check; the dead `mock*` scaffolding has been removed from
+// vibed_client.js. Request/response shapes live in vibed_client.js and MUST stay
+// in sync with vibed/src/mcp.rs.
 //
 // Install target (image build, read-only at runtime):
 //   /usr/share/vibeos/quickshell/shell.qml

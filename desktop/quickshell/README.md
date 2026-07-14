@@ -1,13 +1,15 @@
 # HUD Quickshell — le tableau de bord agents de VibeOS
 
-> Statut : **runtime livré, données mockées.** Le runtime Quickshell est désormais
-> **compilé dans l'image** (étage `quickshell-builder` d'`os/Containerfile` — aucun
-> paquet n'existe pour Fedora 42) et le HUD est **auto-démarré** en session Plasma
+> Statut : **runtime livré, données live-câblées, validation visuelle en attente.**
+> Le runtime Quickshell est désormais **compilé dans l'image** (étage
+> `quickshell-builder` d'`os/Containerfile` — aucun paquet n'existe pour Fedora 42)
+> et le HUD est **auto-démarré** en session Plasma
 > (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`).
-> Toutes les données affichées restent **mockées** (voir §4) : le branchement live
-> du QML sur le socket de `vibed` (`Quickshell.Io`) est le reste du chantier
-> Phase 2. Règle D20 : rien ici ne prétend être branché sur `vibed` tant que ce
-> n'est pas le cas — le HUD affiche « vibed hors ligne ».
+> Le QML est **branché en direct** sur le socket de `vibed` (`Quickshell.Io`, voir
+> §4) — plus aucune donnée mockée dans le HUD ; ce qui reste est la **validation
+> visuelle** sur un Plasma booté (pas de chemin headless). Règle D20 : rien ici ne
+> prétend être branché sur `vibed` tant que ce n'est pas le cas — le HUD affiche
+> « vibed hors ligne » dès que le socket est injoignable.
 >
 > **Langage visuel.** Le HUD applique à la lettre le système de design
 > [`docs/DESIGN-SYSTEM.md`](../../docs/DESIGN-SYSTEM.md) : verre frosté (glass-panel,
@@ -83,23 +85,25 @@ Source de vérité unique : le **socket MCP de `vibed`**, `/run/vibed/mcp.sock`
 transport de `vibed/src/mcp.rs`). Le HUD est un client MCP comme un autre : il n'a
 aucun chemin privilégié (invariant n°1 de `docs/ARCHITECTURE.md`).
 
-Échange prévu (Phase 2) :
+Échange (implémenté dans `shell.qml`) :
 
 1. `initialize` → le serveur répond `protocolVersion: "2024-11-05"`,
    `serverInfo.name: "vibed"` ;
 2. notification `notifications/initialized` ;
-3. toutes les ~5 s, `tools/call` :
-   - `os.status` (T0) → uptime, loadavg, mémoire, montages ;
-   - `memory.query` (T0, `{"query": ""}`) → mémoire initialisée ? combien de fichiers ?
+3. toutes les ~5 s, `tools/call` (tous T0, lecture seule) :
+   - `os.status` → uptime, loadavg, mémoire, montages ;
+   - `memory.query` (`{"query": ""}`) → mémoire initialisée ? combien de fichiers ?
+   - `agents.list` → roster confiné à l'uid appelant ;
+   - `agent.sessions` puis `agent.thinking` → raisonnement de la session courante.
 
-Le format exact des requêtes/réponses est documenté et implémenté (côté mock) dans
-[`vibed_client.js`](vibed_client.js) — il doit rester aligné sur `vibed/src/mcp.rs`.
+Le format exact des requêtes/réponses et le mappage du raisonnement vivent dans
+[`vibed_client.js`](vibed_client.js) — ils doivent rester alignés sur `vibed/src/mcp.rs`.
 
 Prérequis d'accès : le socket est `root:vibeos-agents` en `0660` ; l'utilisateur de
 session doit appartenir au groupe **`vibeos-agents`** pour que le HUD puisse s'y
 connecter. Sinon → état « hors ligne » (voir §5), jamais une erreur.
 
-## 4. Ce qui est live vs encore mocké
+## 4. Ce qui est live (données réelles du socket)
 
 | Donnée | Statut | Source |
 |---|---|---|
@@ -126,7 +130,7 @@ est absent (c'est le cas nominal de la Phase 1) :
 - socket inexistant, connexion refusée, groupe manquant, réponse invalide →
   pastille **« vibed hors ligne »** grise, agents remplacés par un texte neutre,
   jauges en état « — », zéro dialogue d'erreur ;
-- le HUD réessaie en tâche de fond (Phase 2 : timer de reconnexion) ;
+- le HUD réessaie en tâche de fond (timer de reconnexion, sonde 4 s hors-ligne) ;
 - si `ollama` ne répond pas, la jauge passe en « — » sans affecter le reste ;
 - aucune écriture nulle part : le HUD est strictement **lecteur** (outils T0).
 
@@ -138,9 +142,9 @@ est absent (c'est le cas nominal de la Phase 1) :
 | `shell.qml` | racine Quickshell : `PanelWindow` frosté (barre haute verre, ombre d'élévation, marque + état global + triptyque) qui compose les widgets, détient l'état et le point de branchement Phase 2 |
 | `AgentStatus.qml` | chips d'agents élevés : anneau-avatar signature (Mauve→Blue), nom, pastille de tier, élévation au survol, tooltip verre (activité/projet/durée) |
 | `PolicyTierIndicator.qml` | pastille de tier en dégradé + anneau conique T0–T3, glyphe cadenas dessiné et pulsation douce quand T2+ attend une approbation |
-| `ReasoningPanel.qml` | 3ᵉ pilier « pourquoi » : chip + popup verre du **raisonnement des agents** (live streaming + historique par session), toggle de capture, note de transparence (résumé fournisseur vs brut local). **Scaffolding Phase 2.5** : ship avec `[]` (règle d'honnêteté) — alimenté par le superviseur d'agent (tap sur flux, jamais le transcript CLI — `docs/DECISIONS.md` ADR-012) et l'outil T0 `agent.thinking` |
+| `ReasoningPanel.qml` | 3ᵉ pilier « pourquoi » : chip + popup verre du **raisonnement des agents** (live streaming + historique par session), toggle de capture, note de transparence (résumé fournisseur vs brut local). **`live` câblé** (règle d'honnêteté : ship avec `[]`, alimenté en direct par `agent.sessions`→`agent.thinking`, jamais le transcript CLI — `docs/DECISIONS.md` ADR-012) ; `history` (sessions passées) reste à brancher (Phase 2.5) |
 | `OllamaGauge.qml` | anneau VRAM circulaire à dégradé (arc Canvas, cap arrondi) + modèle chargé + Gio, seuils Sky→Peach→Red, « — » honnête hors ligne |
-| `vibed_client.js` | formats JSON-RPC du socket MCP (alignés sur `vibed/src/mcp.rs`) + données mock v0.1 (`available:false` par défaut) |
+| `vibed_client.js` | formats JSON-RPC du socket MCP (alignés sur `vibed/src/mcp.rs`) : constructeurs de requêtes + parseurs (`os.status`, `memory.query`, `agents.list`, `agent.sessions`/`agent.thinking`) + mappeur de raisonnement `reasoningToLive` |
 
 > **Cohérence par les tokens.** `Theme.qml` transcrit `DESIGN-SYSTEM.md §12.2` et
 > l'étend (élévation, glows, dégradés, aides de tiers, drapeaux a11y). Cible image :

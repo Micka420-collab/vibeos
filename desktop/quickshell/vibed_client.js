@@ -3,9 +3,9 @@
 // STATUS: LIVE. shell.qml opens a Quickshell.Io Socket on SOCKET_PATH and drives
 // the request builders + parsers below (os.status, memory.query, agent.sessions
 // -> agent.thinking). The `reasoningToLive` mapper turns agent.thinking into the
-// ReasoningPanel shape. Only `mockOllama()` (an honest `available:false` default)
-// remains from the mock era; the other mock* functions below are kept ONLY as
-// wire-shape reference and are no longer called by the shell.
+// ReasoningPanel shape. The v0.1 `mock*` scaffolding has been removed now that
+// the live wiring drives the HUD — the request builders + parsers below are the
+// only data path. (OllamaGauge keeps its own local probe; see its QML header.)
 //
 // ---------------------------------------------------------------------------
 // WIRE FORMAT — must stay in sync with vibed/src/mcp.rs
@@ -204,84 +204,4 @@ function agentsListToRoster(data) {
             elapsed: idle !== null ? ("actif il y a " + idle + "s") : ""
         };
     });
-}
-
-// ---------------------------------------------------------------------------
-// MOCK DATA — v0.1 only. TODO(Phase 2): delete everything below once the
-// socket wiring in shell.qml replaces it.
-// Shapes mirror the real payloads above so the QML bindings will not change
-// when the live data arrives.
-// ---------------------------------------------------------------------------
-
-// Mirrors the os.status text payload of mcp.rs.
-function mockOsStatus() {
-    return {
-        uptime_seconds: 8423.5,
-        loadavg_1_5_15: [
-            (0.2 + Math.random() * 0.8).toFixed(2), "0.35", "0.28"
-        ],
-        mem_total_kb: 32768000,
-        mem_available_kb: 18200000 + Math.floor(Math.random() * 2000000),
-        mounts: [
-            { device: "/dev/nvme0n1p3", mountpoint: "/sysroot", fstype: "btrfs" }
-        ],
-        note: "MOCK v0.1 — not read from vibed"
-    };
-}
-
-// Mirrors the memory.query text payload of mcp.rs (initialized store).
-function mockMemoryQuery() {
-    return {
-        initialized: true,
-        query: "",
-        scanned_files: 12,
-        matches: [
-            { file: "identity.toml" },
-            { file: "hardware.json" },
-            { file: "journal/2026-07-03.jsonl" }
-        ],
-        note: "MOCK v0.1 — not read from vibed"
-    };
-}
-
-// HONESTY NOTE: vibed v0.1 exposes NO agents.list tool — an agent roster is
-// not derivable from the daemon yet. This mock exists purely so the HUD
-// design can be seen with data in it. TODO(Phase 2): specify agents.list
-// (or an audit-derived stream keyed by SO_PEERCRED pid) with the vibed track,
-// then replace this. The extra `project`/`elapsed` fields feed the AgentStatus
-// hover tooltip; they mirror what an audit-derived roster would expose.
-function mockAgents() {
-    var approvalPending = Math.random() < 0.3; // demo: occasional T2 lock
-    return [
-        { name: "claude-code", tier: 1, awaitingApproval: false,
-          activity: "fs.write ~/projects/app/src/main.rs (T1)",
-          project: "~/projects/app", elapsed: "4m12s" },
-        { name: "opencode", tier: 0, awaitingApproval: false,
-          activity: "fs.read journalctl output (T0)",
-          project: "~/projects/api", elapsed: "1m03s" },
-        { name: "opencode", tier: approvalPending ? 2 : 0,
-          awaitingApproval: approvalPending,
-          activity: approvalPending
-              ? "pkg.install ripgrep — EN ATTENTE D'APPROBATION HUMAINE (T2)"
-              : "idle",
-          project: "~/projects/tools", elapsed: "0m48s" }
-    ];
-}
-
-// v0.1 HONEST DEFAULT: report ollama as UNAVAILABLE so the gauge renders
-// "ollama —" instead of inventing a loaded model and random VRAM figures.
-// TODO(Phase 2): replace with GET http://127.0.0.1:11434/api/ps (ollama) +
-// nvidia-smi via Quickshell.Io Process — see OllamaGauge.qml header.
-function mockOllama() {
-    return { available: false };
-
-    // TODO(Phase 2) design-preview demo data ONLY — never shipped as the
-    // default. Flip the early return above to preview the "online" gauge:
-    // return {
-    //     available: true,
-    //     model: "qwen2.5-coder:7b",
-    //     generating: Math.random() < 0.4,
-    //     vram_used_mb: 4800 + Math.floor(Math.random() * 1200),
-    //     vram_total_mb: 8192   // RTX 3070 Ti budget (docs/ECOSYSTEM.md)
-    // };
 }
