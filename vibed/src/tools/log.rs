@@ -127,8 +127,9 @@ fn cap_bytes(s: &str, max: usize) -> (String, bool) {
 }
 
 /// Best-effort redaction (ADR-011 §3). Line by line: mask `key=value` where the
-/// key looks sensitive, the token after `Bearer`, standalone high-entropy blobs,
-/// and flag PEM key markers. NEVER a guarantee — a whitelisted unit that logs a
+/// key looks sensitive, the token after `Bearer`, the password in a URI
+/// (`scheme://user:pass@host`), standalone high-entropy blobs, and flag PEM key
+/// markers. NEVER a guarantee — a whitelisted unit that logs a
 /// secret in an unrecognized shape will still leak; the real controls are the
 /// allowlist, the byte/line bound, and the audit trail.
 fn redact(text: &str) -> (String, bool) {
@@ -174,6 +175,18 @@ fn redact_line(line: &str) -> (String, bool) {
                 out.push(format!("{k}={MASK}"));
                 hit = true;
                 continue;
+            }
+        }
+        // Credentials embedded in a URI: scheme://user:password@host — mask the
+        // password only (DB/AMQP connection strings echoed by services are a
+        // common leak the key=value / high-entropy passes miss on their own).
+        if let Some((scheme, rest)) = tok.split_once("://") {
+            if let Some((userinfo, host)) = rest.split_once('@') {
+                if let Some((user, _pass)) = userinfo.split_once(':') {
+                    out.push(format!("{scheme}://{user}:{MASK}@{host}"));
+                    hit = true;
+                    continue;
+                }
             }
         }
         // Standalone high-entropy blob (long base64/hex-like token).
@@ -330,9 +343,21 @@ mod tests {
         let (m2, h2) = redact("password=hunter2trombone was set");
         assert!(h2 && m2.contains("password=«redacted»"));
 
+        // URI credentials: the password is masked, the rest of the DSN survives.
+        let (m4, h4) = redact("DB at postgres://app:s3cr3tp4ss@db.internal:5432/prod ready");
+        assert!(h4);
+        assert!(
+            m4.contains("postgres://app:«redacted»@db.internal:5432/prod")
+                && !m4.contains("s3cr3tp4ss"),
+            "URI password must be masked, host/db kept: {m4}"
+        );
+
         // A short, low-entropy token is not masked (no false positive on IDs).
         let (m3, h3) = redact("session id=42 user=alice");
         assert!(!h3, "short values must not be masked: {m3}");
+        // A plain URL without credentials is left untouched.
+        let (m5, h5) = redact("fetched https://example.com/api/v1 ok");
+        assert!(!h5, "a credential-free URL must not be redacted: {m5}");
     }
 
     #[test]
