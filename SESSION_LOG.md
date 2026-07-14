@@ -17,7 +17,7 @@ Après l'analyse complète du dépôt, deux priorités **avant tout code** :
 **Aussi** :
 - **[PR #35](https://github.com/Micka420-collab/vibeos/pull/35) splash de boot Plymouth (mergée)** : les 3 assets manquants (`ring`/`mark`/`wordmark`) **générés** par `desktop/plymouth/generate-assets.py` (œuvre originale, reproductible, Pillow) — **spirale galactique** mauve→blue (le motif de marque des wallpapers). Le thème existant dégradait en fond nu faute d'assets ; il rend maintenant l'animation (spirale qui tourne + cœur qui respire). Rendu Plymouth **animé non validé sur machine bootée** (machine-gated) ; activation reste 🛣️ Phase 5.
 - **`pkg.install`** (ADR-016) : allowlist **non tranchée** (choix layering-vs-distrobox), ADR déjà complet avec options concrètes → **rien codé** (conforme).
-- **`log.read`** (ADR-011, T0) : **non démarré** — optionnel (« si le temps le permet après 1 et 2 »), prêt à implémenter selon l'ADR.
+- **[PR #37](https://github.com/Micka420-collab/vibeos/pull/37) `log.read` (ADR-011, T0)** : implémenté exactement selon la forme (1)–(5) de l'ADR — allowlist d'unités (`[rule.services].allowed`, défaut refus, évaluée avant le plancher de tier), sortie bornée (≤ 200 lignes + 64 Kio), rédaction best-effort, aucun filtre libre, audit de l'unité. **Touche `policy.rs`** (cœur sécurité) → flaggé pour revue humaine dans la PR. 159 tests verts.
 
 ## 🔧 Session 2026-07-14 (après-midi) — récupération de contenu échoué hors de `main`
 
