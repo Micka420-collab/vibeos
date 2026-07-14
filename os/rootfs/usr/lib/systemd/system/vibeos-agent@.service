@@ -1,0 +1,90 @@
+# vibeos-agent@.service — VibeOS governed autonomous agent (always-on capable).
+#
+# Runs a shipped CLI (claude, codex, gemini, opencode) under the vibectl
+# supervisor for the human account %i: wall-clock/tool-call budgets, reasoning
+# capture, operator-only kill-switch (`vibectl agent stop`). The instance %i is
+# the USER the agent acts as — never root — so its file access is naturally that
+# user's, and system actions still go through vibed's policy engine (T0..T3,
+# approval). Phase 2.5 (ADR-012/013).
+#
+# NOT preset-enabled: a template unit has no instance to start at boot. The
+# operator arms one per user, AFTER sealing that user's token, e.g.
+#   printf '%s' "$TOKEN" | /usr/libexec/vibeos/vibeos-agent-seal-token.sh alice
+#   $EDITOR /etc/vibeos/agent.d/alice.conf        # AGENT_COMMAND=(…), TOKEN_ENV=…
+#   systemctl enable --now vibeos-agent@alice.service
+#
+# v0.2.5 honesty: shipped + statically validated (systemd-analyze verify), but
+# boot behaviour (TPM2 unseal, live egress enforcement) needs a real machine
+# with a TPM and a booted vibed — see BLOCKERS.md and docs/DECISIONS.md ADR-013.
+
+[Unit]
+Description=VibeOS governed autonomous agent for %i
+Documentation=https://github.com/Micka420-collab/vibeos
+# Skip (never fail) until the supervisor, the instance config, and the sealed
+# token all exist — an unconfigured instance stays cleanly inactive.
+ConditionPathExists=/usr/bin/vibectl
+ConditionPathExists=/etc/vibeos/agent.d/%i.conf
+ConditionPathExists=/etc/vibeos/credentials/%i-token.cred
+# vibed must be up: every system action the agent takes is gated by it.
+Requires=vibed.service
+After=vibed.service
+# The egress allowlist must be resolved into a drop-in before we start.
+Wants=vibeos-agent-egress@%i.service
+After=vibeos-agent-egress@%i.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+# The agent acts AS the human account, not root: its files are that user's, and
+# it reaches the vibed socket via the vibeos-agents group.
+User=%i
+SupplementaryGroups=vibeos-agents
+ExecStart=/usr/libexec/vibeos/vibeos-agent-run.sh %i
+Restart=on-failure
+RestartSec=5s
+
+# --- TPM2-sealed subscription token ------------------------------------------
+# Decrypted by systemd (TPM2) into $CREDENTIALS_DIRECTORY at start — unit-private
+# tmpfs, wiped at stop; the plaintext never touches persistent disk. Seal it
+# first with vibeos-agent-seal-token.sh %i.
+LoadCredentialEncrypted=vibeos-agent-token:/etc/vibeos/credentials/%i-token.cred
+
+# --- Network egress: default-deny, provider hostnames allowed -----------------
+# Deny all egress except loopback (local ollama; the vibed socket is AF_UNIX and
+# needs no IP). vibeos-agent-egress@%i.service adds IPAddressAllow= for the
+# resolved provider hostnames (/etc/vibeos/agent-egress.conf). A compromised or
+# runaway agent thus cannot exfiltrate to an arbitrary host — only to its
+# declared providers.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+# --- Sandboxing / hardening (mirrors vibed.service, minus JIT-hostile bits) ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+# The agent works in its user's $HOME (that is the point of vibecoding); system
+# writes go through vibed. ProtectHome stays open; /usr /etc /boot are read-only.
+ProtectHome=no
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOTE: no MemoryDenyWriteExecute — the shipped agent CLIs are Node.js (V8 JIT)
+# and need W^X-violating pages; that guard is correct for vibed (Rust) only.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+DevicePolicy=closed
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_TIME CAP_AUDIT_CONTROL
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @swap @reboot @obsolete @cpu-emulation @raw-io
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

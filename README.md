@@ -11,6 +11,8 @@
 [![Desktop](https://img.shields.io/badge/bureau-KDE%20Plasma%206-1d99f3.svg)](docs/DESKTOP.md)
 [![Statut](https://img.shields.io/badge/statut-pré--alpha%20v0.1-orange.svg)](STATUS.md)
 
+**🌐 Français · [English](README.en.md) · [Español](README.es.md) · [Deutsch](README.de.md)**
+
 </div>
 
 VibeOS est une distribution Linux **AI-native, immuable et sécurisée par conception**, dédiée au *vibecoding*. Dérivée de Fedora Kinoite (KDE Plasma 6) et construite en mode image avec bootc/OSTree, elle expose le contrôle du système aux agents IA à travers un contrat strict — un démon système (`vibed`), un serveur MCP, un moteur de politiques et un journal d'audit — plutôt qu'un accès brut au shell. L'OS est livré **vierge** : sa mémoire est créée au premier démarrage par une séquence *Genesis* et appartient à son utilisateur, et à personne d'autre (le chiffrement LUKS de cette mémoire arrive en **Phase 3** — voir [ROADMAP.md](ROADMAP.md)). Projet pluriannuel : la fondation v0.1 est posée — image multi-arch signée, deux ISO, démon `vibed` actif au boot, bureau vibecoding livré.
@@ -22,10 +24,10 @@ VibeOS est une distribution Linux **AI-native, immuable et sécurisée par conce
 ## Fonctionnalités clés
 
 ### 🌱 Naissance vierge — Genesis
-L'image OS ne contient **aucune mémoire d'usine**. Au premier démarrage, `vibeos-genesis.service` (gardé par `ConditionPathExists=!/var/lib/vibeos/memory/.initialized`) exécute `/usr/libexec/vibeos/genesis.sh` et construit la mémoire de la machine à partir de zéro dans `/var/lib/vibeos/memory` — **en clair en v0.1** ; le chiffrement LUKS/TPM2 du volume est un livrable de la **Phase 3**. Le **mode amnésique** (inspiré de Tails), qui recréera cette mémoire en tmpfs **à chaque démarrage** — rien ne survivra à l'extinction — est lui aussi un livrable **Phase 3** (generator systemd). La spécification complète est dans [docs/MEMORY.md](docs/MEMORY.md).
+L'image OS ne contient **aucune mémoire d'usine**. Au premier démarrage, `vibeos-genesis.service` (gardé par `ConditionPathExists=!/var/lib/vibeos/memory/.initialized`) exécute `/usr/libexec/vibeos/genesis.sh` et construit la mémoire de la machine à partir de zéro dans `/var/lib/vibeos/memory` — **en clair en v0.1** ; le chiffrement LUKS/TPM2 du volume est un livrable de la **Phase 3**. Le **mode amnésique** (inspiré de Tails) recrée cette mémoire en tmpfs **à chaque démarrage** — rien ne survit à l'extinction : le **generator systemd** est **livré** (activation par le paramètre kernel `vibeos.amnesic=1`) ; sa validation en VM reste **Phase 3**. La spécification complète est dans [docs/MEMORY.md](docs/MEMORY.md).
 
 ### 🤖 L'IA, citoyenne de l'OS — vibed + MCP + politiques
-> **Statut :** le binaire `vibed` est **embarqué dans l'image** (compilé en multi-stage dans `os/Containerfile`, installé en `/usr/bin/vibed`). Au boot, `vibed.service` (activé par preset) démarre, **charge et applique la politique installée** (`/etc/vibeos/policy.d/`, fail-closed), **sert le serveur MCP** sur `/run/vibed/mcp.sock` et **audite** chaque appel sous `/var/lib/vibeos`. Côté client, l'image livre la **config MCP de Claude Code** (`/etc/skel/.claude.json`) : le serveur `vibeos` est découvert **sans configuration manuelle** (prérequis : groupe `vibeos-agents`). Restent à venir : le **bac à sable par outil** (systemd-run, seccomp, landlock — **Phase 3**) et le durcissement (SELinux dédiée `vibed_t`, `User=vibed`, audit chaîné par hachage — **Phase 4**). Le crate `vibed` est testé (77 tests verts, dont 4 tests d'intégration MCP bout-en-bout sur socket).
+> **Statut :** le binaire `vibed` est **embarqué dans l'image** (compilé en multi-stage dans `os/Containerfile`, installé en `/usr/bin/vibed`). Au boot, `vibed.service` (activé par preset) démarre, **charge et applique la politique installée** (`/etc/vibeos/policy.d/`, fail-closed), **sert le serveur MCP** sur `/run/vibed/mcp.sock` et **audite** chaque appel sous `/var/lib/vibeos`. Côté client, l'image livre la **config MCP de Claude Code** (`/etc/skel/.claude.json`) : le serveur `vibeos` est découvert **sans configuration manuelle** (prérequis : groupe `vibeos-agents`). Restent à venir : le **bac à sable par outil** (systemd-run, seccomp, landlock — **Phase 3**) et le durcissement (SELinux dédiée `vibed_t`, `User=vibed`, ancrage externe TPM/Rekor de la chaîne d'audit — **Phase 4**). Le crate `vibed` est testé (149 tests verts, dont 8 tests d'intégration MCP bout-en-bout sur socket + 3 de politique) ; le journal d'audit est **chaîné par hachage SHA-256** (`vibed --verify-audit`).
 
 Le démon système `vibed` (Rust, tokio, unité `vibed.service`) expose le contrôle de l'OS via un **serveur MCP** (JSON-RPC 2.0) sur la socket unix `/run/vibed/mcp.sock`. Chaque action d'un agent passe par un **moteur de politiques** (`/etc/vibeos/policy.d/*.toml`, la première règle qui matche gagne, refus par défaut) organisé en niveaux de capacités :
 
@@ -36,7 +38,9 @@ Le démon système `vibed` (Rust, tokio, unité `vibed.service`) expose le contr
 | **T2** | Modification système (paquets, services) | **Oui, toujours** |
 | **T3** | Destructif (disque, identifiants, identité réseau) | **Oui, toujours** |
 
-Chaque appel d'outil est consigné dans un **journal d'audit JSONL append-only** (`/var/lib/vibeos/audit/vibed.jsonl`), avec l'identité de l'appelant (uid/gid/pid). Le chaînage cryptographique du journal est prévu en **Phase 4**.
+Chaque appel d'outil est consigné dans un **journal d'audit JSONL append-only, chaîné par hachage SHA-256, avec rotation par jour UTC** (`/var/lib/vibeos/audit/vibed-<date>.jsonl`), avec l'identité de l'appelant (uid/gid/pid) — toute altération est détectée par `vibed --verify-audit`. L'ancrage externe de la chaîne (TPM/Rekor) reste **Phase 4**.
+
+Le **flux d'approbation humaine T2/T3** est livré côté plomberie : une demande crée une requête tracée, l'opérateur exécute `vibectl approve <id>`, et un **grant à usage unique** (borné `(outil, cible, uid)`, expirant) autorise le ré-appel — un agent ne peut **jamais** approuver sa propre requête (store root-only), et l'audit garde la trace de *qui* a approuvé (`ok_approved(by_uid=N)`). Un **rate-limiting par uid** (token bucket) borne un agent emballé ou compromis (anti-flood, refus audité). **Premier backend T2 réel livré** : `svc.restart` redémarre réellement une unité systemd derrière l'approbation, avec une **allowlist de cibles** (les unités d'accès/audit/approbation — `sshd`, `vibed`, `dbus`, `user@*`… — sont refusées **avant** la file d'approbation) et le nom d'unité canonicalisé avant la décision. `pkg.install` reste un stub (backend reporté sur OS immuable, [ADR-016](docs/DECISIONS.md)). Surface d'outils actuelle : T0 `os.status`/`fs.read`/`fs.list`/`svc.status`/`sectools.list`/`memory.query`/`agent.thinking`/`agent.sessions`/`agents.list`/`policy.check`, T1 `fs.write`/`memory.append`, T2 `svc.restart`/`pkg.install`. Le dialogue Plasma/HUD d'approbation arrive en **Phase 4**.
 
 ### 🔒 Immuabilité & sécurité vérifiable
 Livré dès la v0.1 : racine en lecture seule, mises à jour atomiques et retour d'usine (bootc/OSTree), SELinux `enforcing` (politique targeted de Fedora), images OS **signées avec sigstore/cosign en CI**, image de base épinglée par digest et CLIs IA épinglées en versions exactes. Planifié : chaîne de démarrage mesurée **UEFI Secure Boot → UKI → dm-verity/composefs** (**Phase 4**), bac à sable par outil — systemd-run, seccomp, landlock (**Phase 3**), politique SELinux dédiée `vibed_t` (**Phase 4**). Référence d'image : `ghcr.io/micka420-collab/vibeos`.
@@ -51,7 +55,7 @@ VibeOS est **security-first** : une trousse d'outils de pentest/DFIR professionn
 VibeOS cible **linux/amd64 et linux/arm64**. Depuis la release `v0.1.0-dev`, la CI construit les deux architectures sur **runners natifs**, publie le **manifest multi-arch signé cosign** (keyless, journal Rekor) sur ghcr.io et génère **une ISO par architecture** en artefacts de release. La couche pilote **NVIDIA** (akmod, RPM Fusion) est compilée au build de l'image, sur amd64 uniquement ; sa **validation sur le PC de référence** (RTX 3070 Ti) est un critère de sortie de la Phase 1, encore ouvert — voir [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ### 🎨 Une expérience de bureau pensée pour le vibecoding
-Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance**. La session s'ouvre en **Global Theme « VibeOS Dark »** (défaut système, moteur Kvantum inclus) avec le **HUD agents** (Quickshell, compilé dans l'image, auto-démarré — il affichera l'état des agents, le tier de politique courant et les jauges du modèle local ; **données mockées tant que son branchement live sur `vibed` n'est pas codé**, honnêteté oblige). Le terminal est prêt à l'emploi dès le premier boot : Ghostty + fish + Starship + Zellij avec le layout signature « agent + lazygit + audit », preset Neovim « VibeVim ». Cette sélection est le fruit d'une **curation de 113 projets open-source**, filtrée par licence redistribuable et cohérence — détaillée dans [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) et [docs/DESKTOP.md](docs/DESKTOP.md).
+Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance**. La session s'ouvre en **Global Theme « VibeOS Dark »** (défaut système, moteur Kvantum inclus) avec le **HUD agents** (Quickshell, compilé dans l'image, auto-démarré — état des agents, tier de politique courant et jauges du modèle local ; **branché en live sur `vibed`** via `Quickshell.Io.Socket` : `os.status`, `memory.query`, raisonnement (`agent.sessions`→`agent.thinking`) et roster (`agents.list`, confiné à l'uid) sont réels, dégradation gracieuse hors ligne). Le terminal est prêt à l'emploi dès le premier boot : Ghostty + fish + Starship + Zellij avec le layout signature « agent + lazygit + audit », preset Neovim « VibeVim ». Cette sélection est le fruit d'une **curation de 113 projets open-source**, filtrée par licence redistribuable et cohérence — détaillée dans [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) et [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ---
 
@@ -69,19 +73,28 @@ Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance*
 | Binaire `vibed` embarqué dans l'image (démarre au boot) | ✅ Livré v0.1 |
 | Serveur MCP `vibed` sur `/run/vibed/mcp.sock` | ✅ Livré v0.1 |
 | Chargement / application des politiques par `vibed` (fail-closed) | ✅ Livré v0.1 |
-| Journal d'audit JSONL (`/var/lib/vibeos/audit/vibed.jsonl`) avec identité de l'appelant | ✅ Livré v0.1 |
+| Journal d'audit JSONL chaîné SHA-256 (`/var/lib/vibeos/audit/`, un fichier par jour) avec identité de l'appelant | ✅ Livré v0.1 |
+| **Flux d'approbation humaine T2/T3** (plomberie : `vibectl approve/deny`, grants à usage unique, approbateur audité) | ✅ Livré (Phase 2) |
+| **Rate-limiting par uid** (token bucket, anti-flood ; store d'approbation borné) | ✅ Livré (Phase 2) |
 | Genesis au premier boot (mémoire créée **en clair**, unité + `genesis.sh`) | ✅ Livré v0.1 |
 | Global Theme **VibeOS Dark par défaut** (`/etc/xdg/kdeglobals` + Kvantum) | ✅ Livré (Phase 2) |
-| **HUD Quickshell** installé + auto-démarré (runtime compilé dans l'image) | ✅ Livré (Phase 2) — données mockées |
+| **HUD Quickshell** installé + auto-démarré (runtime compilé dans l'image) | ✅ Livré (Phase 2) |
 | **Config MCP Claude Code** livrée (`/etc/skel/.claude.json` → socket `vibed`) | ✅ Livré (Phase 2) |
-| Branchement **live** du HUD sur le socket `vibed` (QML `Quickshell.Io`) | 🛣️ Phase 2 |
+| Branchement **live** du HUD sur le socket `vibed` (`Quickshell.Io.Socket` : os.status, memory.query, raisonnement, roster) | ✅ Livré (Phase 2.5) |
+| **`svc.restart` (T2) — backend réel** derrière approbation + allowlist de cibles (refus des unités d'accès/audit/approbation avant la file) | ✅ Livré (Phase 2.5) |
+| **`agents.list` (T0)** — roster HUD dérivé de l'audit, confiné à l'uid appelant | ✅ Livré (Phase 2.5) |
 | **`memory.append`** (T1, additif : journal + knowledge) · `scope`/`limit` de `memory.query` | ✅ Livré (Phase 2) |
 | Outils **T1 réels** supplémentaires · scopes `user`/`projects` de `memory.append` | 🛣️ Phase 2 |
 | Chiffrement LUKS/TPM2 de la mémoire | 🛣️ Phase 3 |
 | Mode amnésique (tmpfs recréé à chaque boot, generator systemd) | 🛣️ Phase 3 |
 | Interview de naissance (prototype : `agent/genesis_interview.py`, non câblé en v0.1) | 🛣️ Phase 3 |
 | Bac à sable par outil (systemd-run, seccomp, landlock) | 🛣️ Phase 3 |
-| UKI / boot mesuré, audit chaîné par hachage, SELinux dédiée, `User=vibed` | 🛣️ Phase 4 |
+| **Superviseur d'agent** `vibectl agent run/stop/thinking` (budgets wall-clock + nb d'appels, kill-switch opérateur ; T2/T3 restent gérés par vibed, non bloquant) | ✅ Livré (Phase 2.5, mécanisme) |
+| **Capture du raisonnement** des agents (tap sur flux `stream-json` → `memory/reasoning/`) + outil T0 `agent.thinking` | ✅ Livré (Phase 2.5, mécanisme) |
+| Unité `vibeos-agent@.service` (always-on, `User=%i` durcie) · **jeton d'abonnement scellé TPM2** (`LoadCredentialEncrypted`) · **allowlist d'egress par nom d'hôte** | ✅ Livré (Phase 2.5, scaffolding validé statiquement — enforcement au boot) |
+| **Initiative « VibeOS pour Zed »** — extension `vibeos-claude-acp` gouverne l'agent ACP via `policy.check` ([ADR-014](docs/DECISIONS.md)) ; câblage image bundlé, gardé off jusqu'à l'E2E ([ADR-015](docs/DECISIONS.md)) | ✅ Cœur livré & vérifié hors Zed ; E2E Tier B = machine réelle |
+| Découpe de `vibed/src/mcp.rs` en modules `tools/*` (F6) | 🔄 3/4 (svc, sectools, memory) ; `fs` = session dédiée |
+| UKI / boot mesuré, ancrage externe TPM/Rekor de l'audit, SELinux dédiée, `User=vibed` | 🛣️ Phase 4 |
 | Installateur guidé, chiffrement disque par défaut | 🛣️ Phase 5 |
 
 Règle de rédaction du projet : aucun mécanisme non implémenté n'est décrit au présent — chaque document distingue « livré en v0.1 » de « Phase N (spécifié) ».
@@ -101,7 +114,7 @@ flowchart LR
     subgraph VIBED["vibed — démon système (Rust)"]
         MCP["Serveur MCP · JSON-RPC 2.0<br/>/run/vibed/mcp.sock"]
         POL["Moteur de politiques<br/>/etc/vibeos/policy.d/*.toml<br/>T0 → T3"]
-        AUD["Journal d'audit JSONL<br/>/var/lib/vibeos/audit/vibed.jsonl"]
+        AUD["Journal d'audit JSONL<br/>/var/lib/vibeos/audit/ (par jour)"]
     end
     subgraph OS["VibeOS immuable (bootc/OSTree)"]
         SYS["Services · paquets · fichiers"]
@@ -125,7 +138,8 @@ flowchart LR
 |---|---|
 | `docs/` | Documentation : architecture, build ([docs/BUILD.md](docs/BUILD.md)), matériel de référence ([docs/HARDWARE.md](docs/HARDWARE.md)), mémoire, sécurité, décisions |
 | `os/` | Définition de l'image bootc/OSTree (dérivée de Fedora Kinoite, KDE Plasma 6, multi-arch) |
-| `vibed/` | Démon système `vibed` (Rust, tokio) : serveur MCP, moteur de politiques, audit |
+| `vibed/` | Démon système `vibed` (Rust, tokio) : serveur MCP, moteur de politiques, audit, superviseur d'agent (`vibectl`), outils découpés par famille (`src/tools/*`) |
+| `zed/` | Extension **VibeOS pour Zed** (`vibeos-claude-acp`) : gouverne l'agent ACP hébergé via `vibeos:policy.check` — Allow (T0/T1) sans prompt, T2/T3 jamais auto ([ADR-014/015](docs/DECISIONS.md)) |
 | `agent/` | Runtime d'agents : intégration Claude Code / Agent SDK, ollama, opencode, prototype d'interview Genesis |
 | `memory/` | Sous-système mémoire : séquence Genesis (`memory/genesis.sh`) |
 | `security/` | Politiques (`policy.d`), durcissement, signature |
@@ -153,12 +167,16 @@ Les **ISO installables** (une par architecture) sont produites en artefacts de l
 
 ### Parler à `vibed` depuis une session VibeOS
 
-```bash
-# Prérequis (première barrière d'accès au socket, voulue) :
-sudo usermod -aG vibeos-agents $USER   # puis rouvrir la session
+Accès au socket : **les administrateurs (groupe `wheel`) sont enrôlés
+automatiquement** dans `vibeos-agents` à chaque boot (`vibeos-agents-group.service`)
+— ils ont déjà `sudo`, donc c'est *moins* que ce qu'ils détiennent. Un compte
+**non-`wheel`** reste opt-in : `sudo usermod -aG vibeos-agents <user>` (puis
+rouvrir la session). L'appartenance devient effective à la connexion suivante.
 
+```bash
 # Claude Code découvre le serveur MCP « vibeos » automatiquement
-# (config livrée dans ~/.claude.json). Test manuel sans client MCP :
+# (config livrée dans ~/.claude.json ; instructions dans ~/.claude/CLAUDE.md).
+# Test manuel sans client MCP :
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
   | socat - UNIX-CONNECT:/run/vibed/mcp.sock
 ```
@@ -181,11 +199,11 @@ podman build -t vibeos:dev -f os/Containerfile .
 
 | | |
 |---|---|
-| **Phase** | Pré-alpha — Phase 1 « Première ISO » (validation VM restante) · Phase 2 « vibed + MCP » en cours |
-| **Dernière mise à jour** | 2026-07-13 |
+| **Phase** | Pré-alpha — Phase 1 « Première ISO » (validation VM restante) · Phase 2 « vibed + MCP » bien avancée · Phase 2.5 « Autonomie encadrée » largement implémentée (superviseur, capture du raisonnement, `svc.restart` réel, agent-runner + TPM2 + egress, HUD live) |
+| **Dernière mise à jour** | 2026-07-14 |
 | **Image OS** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — manifest amd64 + arm64, **signé cosign** (Rekor) |
 | **ISO** | amd64 (7,0 Go) + arm64 (6,3 Go) — artefacts CI de la release `v0.1.0-dev` |
-| **Build** | CI verte (runners natifs, ~15 min/arch) · `bootc container lint` OK · 77 tests `vibed` verts |
+| **Build** | CI verte (runners natifs, ~15 min/arch) · `bootc container lint` OK · 149 tests `vibed` verts (+ 17 tests de l'extension Zed) |
 | **Machine de référence** | Ryzen 7 3700X + RTX 3070 Ti + 16 Go — [docs/HARDWARE.md](docs/HARDWARE.md) |
 | **Attendez-vous à** | Des ruptures, des refontes, zéro garantie de stabilité |
 

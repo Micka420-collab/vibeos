@@ -37,7 +37,8 @@ fn repo_policy_dir() -> PathBuf {
 struct Server {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
-    audit_path: PathBuf,
+    audit_dir: PathBuf,
+    approval_dir: PathBuf,
     scratch: PathBuf,
 }
 
@@ -46,15 +47,23 @@ impl Server {
     /// main.rs does after accept(): shipped policy, JSONL audit log, caller
     /// identity captured at accept time.
     fn start(tag: &str) -> Self {
+        // Generous limiter so the e2e handshake + a few calls never trip it.
+        Self::start_with_limiter(tag, vibed::ratelimit::RateLimiter::default())
+    }
+
+    /// Like `start`, but with a caller-provided rate limiter (for the flood test).
+    fn start_with_limiter(tag: &str, limiter: vibed::ratelimit::RateLimiter) -> Self {
         let scratch =
             std::env::temp_dir().join(format!("vibed-mcp-e2e-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch).expect("create scratch dir");
-        let audit_path = scratch.join("audit.jsonl");
+        let audit_dir = scratch.join("audit");
+        let approval_dir = scratch.join("approvals");
 
         let policy =
             Arc::new(PolicyEngine::load_dir(&repo_policy_dir()).expect("shipped policy must load"));
-        let audit = Arc::new(AuditLog::new(audit_path.clone()));
+        let audit = Arc::new(AuditLog::new(audit_dir.clone()));
+        let limiter = Arc::new(limiter);
         let caller = Caller {
             uid: Some(TEST_UID),
             gid: Some(TEST_UID),
@@ -62,13 +71,21 @@ impl Server {
         };
 
         let (client, server) = UnixStream::pair().expect("unix socketpair");
-        tokio::spawn(mcp::handle_connection(server, policy, audit, caller));
+        tokio::spawn(mcp::handle_connection(
+            server,
+            policy,
+            audit,
+            limiter,
+            caller,
+            approval_dir.clone(),
+        ));
 
         let (read_half, write_half) = client.into_split();
         Self {
             reader: BufReader::new(read_half),
             writer: write_half,
-            audit_path,
+            audit_dir,
+            approval_dir,
             scratch,
         }
     }
@@ -127,15 +144,31 @@ impl Server {
         (is_error, text)
     }
 
-    /// Parsed audit records written so far. handle_connection audits before
-    /// responding, so once a response was read the records are on disk.
+    /// Parsed audit records written so far, across the daily files in the audit
+    /// directory (chronological). handle_connection audits before responding,
+    /// so once a response was read the records are on disk.
     fn audit_records(&self) -> Vec<Value> {
-        let Ok(content) = std::fs::read_to_string(&self.audit_path) else {
+        let Ok(read_dir) = std::fs::read_dir(&self.audit_dir) else {
             return Vec::new();
         };
-        content
-            .lines()
-            .map(|l| serde_json::from_str(l).expect("audit line is valid JSON"))
+        let mut files: Vec<PathBuf> = read_dir
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("vibed-") && n.ends_with(".jsonl"))
+            })
+            .collect();
+        files.sort();
+        files
+            .iter()
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+            .flat_map(|c| {
+                c.lines()
+                    .map(|l| serde_json::from_str(l).expect("audit line is valid JSON"))
+                    .collect::<Vec<Value>>()
+            })
             .collect()
     }
 
@@ -276,6 +309,211 @@ async fn t2_refusal_and_builtin_denylist_are_explicit_and_audited() {
     for record in &records {
         assert_eq!(record["caller_uid"], TEST_UID);
     }
+
+    srv.cleanup();
+}
+
+/// Regression for the deny-list bypass: a BARE critical unit name (no
+/// `.service` suffix) must be DENIED outright by the shipped policy, not merely
+/// queued for approval. The dispatcher canonicalizes the unit (`sshd` ->
+/// `sshd.service`) BEFORE the policy decision, so the fully-qualified deny-list
+/// matches it. Without that, an agent evaded the deny-list by dropping the
+/// suffix and could then have `vibed`/`sshd` restarted via an approval that
+/// looked routine. Exercised over the REAL socket (the canonicalization lives
+/// in handle_tools_call, not in policy.evaluate).
+#[tokio::test]
+async fn svc_restart_bare_critical_unit_is_denied_not_merely_pending() {
+    let mut srv = Server::start("svc-restart-bare-deny");
+
+    for bare in ["vibed", "sshd", "polkit"] {
+        let (is_error, text) = srv
+            .tool_call(1, "svc.restart", json!({ "unit": bare }))
+            .await;
+        assert!(is_error, "restart of bare '{bare}' must be refused");
+        assert!(
+            text.contains("denied"),
+            "bare '{bare}' must be DENIED outright, not queued for approval; got: {text}"
+        );
+        assert!(
+            !text.contains("requires human approval"),
+            "bare '{bare}' must NOT reach the approval queue (deny-list bypass): {text}"
+        );
+    }
+
+    // The audit trail confirms the decision was `deny` (not require_approval),
+    // and the canonicalized unit is the recorded target.
+    let records = srv.audit_records();
+    let svc: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["tool"] == "svc.restart")
+        .collect();
+    assert_eq!(svc.len(), 3, "three svc.restart attempts audited");
+    for r in &svc {
+        assert_eq!(
+            r["decision"], "deny",
+            "must be denied, not require_approval: {r}"
+        );
+    }
+    assert!(
+        svc.iter().any(|r| r["target"] == "vibed.service"),
+        "the canonicalized unit (vibed.service) must be the audit target: {svc:?}"
+    );
+
+    srv.cleanup();
+}
+
+/// Full T2 human-approval chain over the real socket: an agent's `svc.restart`
+/// is refused (tier floor), the operator grants it out of band (as `vibectl
+/// approve` does), the agent re-issues the SAME call, the one-shot grant flips
+/// the decision to Allow, the backend runs, and the audit trail records WHO
+/// approved. This is the "agent asks -> human approves -> action executes ->
+/// audit proves it" demonstration, minus the real systemctl success (asserted
+/// hermetically in the `svc_restart_actually_invokes_systemctl` unit test — a
+/// non-root test process cannot restart a real unit).
+#[tokio::test]
+async fn t2_svc_restart_human_approval_chain_end_to_end() {
+    let mut srv = Server::start("svc-restart-approval");
+    let unit = "vibeos-approval-e2e.service";
+
+    // 1. No grant yet: the T2 floor refuses and records a pending request.
+    let (is_error, text) = srv.tool_call(1, "svc.restart", json!({"unit": unit})).await;
+    assert!(is_error, "a T2 svc.restart without a grant must be refused");
+    assert!(
+        text.contains("requires human approval"),
+        "the refusal must explain why: {text}"
+    );
+
+    // 2. Operator approves out of band — exactly what `vibectl approve <id>`
+    //    does: read the one pending request and mint a one-shot grant for it.
+    let pending = vibed::approval::list_pending(&srv.approval_dir);
+    assert_eq!(
+        pending.len(),
+        1,
+        "one pending approval expected: {pending:?}"
+    );
+    let id = pending[0]["id"].as_str().expect("pending id").to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    const OPERATOR_UID: u32 = 0;
+    vibed::approval::approve(&srv.approval_dir, &id, Some(OPERATOR_UID), now)
+        .expect("operator approve mints a grant");
+
+    // 3. Agent re-issues the identical call. The one-shot grant is consumed and
+    //    the decision flips to Allow (we do not assert on the systemctl outcome:
+    //    a non-root process cannot restart a real unit — the governance chain is
+    //    the claim here).
+    let _ = srv.tool_call(2, "svc.restart", json!({"unit": unit})).await;
+
+    // 4. The audit trail proves every link of the chain.
+    let records = srv.audit_records();
+    let svc: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["tool"] == "svc.restart")
+        .collect();
+
+    assert!(
+        svc.iter()
+            .any(|r| r["decision"] == "require_approval" && r["outcome"] == "pending_approval"),
+        "first call must be audited require_approval/pending_approval: {svc:?}"
+    );
+
+    let started = svc
+        .iter()
+        .find(|r| {
+            r["decision"] == "allow"
+                && r["outcome"]
+                    .as_str()
+                    .is_some_and(|o| o.starts_with("started_approved"))
+        })
+        .expect("the approved re-issue must audit an allow/started_approved record");
+    assert!(
+        started["outcome"].as_str().unwrap().contains("by_uid=0"),
+        "the approver uid (0) must be recorded in the audit outcome: {started:?}"
+    );
+
+    for r in &svc {
+        assert_eq!(r["target"], unit, "the unit is the audit target");
+        assert_eq!(r["caller_uid"], TEST_UID, "the agent uid is stamped");
+    }
+
+    // One-shot: the grant was consumed, nothing lingers in the store.
+    assert!(
+        vibed::approval::list_pending(&srv.approval_dir).is_empty(),
+        "no pending request should remain once approved and consumed"
+    );
+
+    srv.cleanup();
+}
+
+#[tokio::test]
+async fn per_uid_rate_limit_refuses_a_flood_and_audits_it() {
+    // Capacity 2, no refill: the third tool call in the burst is over-limit.
+    let mut srv =
+        Server::start_with_limiter("ratelimit", vibed::ratelimit::RateLimiter::new(2.0, 0.0));
+
+    // The handshake methods are not tools/call, so they cost no tokens.
+    let _ = srv.request(1, "initialize", json!({})).await;
+
+    // Two T0 calls fit in the burst.
+    let (e1, _) = srv.tool_call(2, "os.status", json!({})).await;
+    let (e2, _) = srv.tool_call(3, "os.status", json!({})).await;
+    assert!(!e1 && !e2, "the first two calls are within the burst");
+
+    // The third is refused BY THE LIMITER — before policy/execution.
+    let (e3, text3) = srv.tool_call(4, "os.status", json!({})).await;
+    assert!(e3, "the third call must be rate-limited");
+    assert!(
+        text3.contains("rate limit exceeded"),
+        "the refusal must name the rate limit: {text3}"
+    );
+
+    // The rejection is a security signal: it lands in the tamper-evident audit.
+    let records = srv.audit_records();
+    let limited: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["outcome"] == "rate_limited")
+        .collect();
+    assert_eq!(limited.len(), 1, "exactly one rate-limited record");
+    assert_eq!(limited[0]["tool"], "os.status");
+    assert_eq!(limited[0]["decision"], "deny");
+    assert_eq!(limited[0]["caller_uid"], TEST_UID);
+    // The two allowed calls produced started+ok; the limited one did NOT execute
+    // (no 'ok' for the third), so os.status has 2*2 + 1 = 5 records total.
+    let os_status = records.iter().filter(|r| r["tool"] == "os.status").count();
+    assert_eq!(os_status, 5, "2 allowed (started+ok) + 1 rate-limited");
+
+    srv.cleanup();
+}
+
+#[tokio::test]
+async fn policy_check_is_rate_limited_like_any_tool() {
+    // Explicit confirmation (not assumption): the T0 dry-run policy.check goes
+    // through the SAME per-uid rate limiter as every other tool — the limiter is
+    // applied before dispatch, tool-agnostically. Capacity 1: the 2nd call is
+    // refused.
+    let mut srv =
+        Server::start_with_limiter("rl-policy", vibed::ratelimit::RateLimiter::new(1.0, 0.0));
+    let _ = srv.request(1, "initialize", json!({})).await;
+
+    let (e1, t1) = srv
+        .tool_call(2, "policy.check", json!({"tool": "os.status"}))
+        .await;
+    assert!(!e1, "first policy.check within the burst: {t1}");
+
+    let (e2, t2) = srv
+        .tool_call(3, "policy.check", json!({"tool": "os.status"}))
+        .await;
+    assert!(e2, "second policy.check must be rate-limited");
+    assert!(t2.contains("rate limit exceeded"), "unexpected: {t2}");
+
+    let limited = srv
+        .audit_records()
+        .into_iter()
+        .filter(|r| r["outcome"] == "rate_limited" && r["tool"] == "policy.check")
+        .count();
+    assert_eq!(limited, 1, "the rate-limited policy.check is audited");
 
     srv.cleanup();
 }

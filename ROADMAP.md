@@ -19,10 +19,11 @@
 | Phase | Version | Nom | Statut | Durée indicative |
 |---|---|---|---|---|
 | 0 | — | Fondation | ✅ Fait (2026-07-03) | 2–3 semaines (effectué) |
-| 1 | v0.1 | Première ISO | 🔜 Prochaine | 6–10 semaines |
-| 2 | v0.2 | vibed + MCP | 🔄 En cours (vibed + HUD + thème + config MCP client livrés) | 3–4 mois |
-| 3 | v0.3 | Genesis & mémoire | Planifiée | 2–3 mois |
-| 4 | v0.4 | Durcissement | Planifiée | 4–6 mois |
+| 1 | v0.1 | Première ISO | 🔄 En cours (reste : validation VM + NVIDIA) | 6–10 semaines |
+| 2 | v0.2 | vibed + MCP | 🔄 Bien avancée (vibed + HUD + thème + MCP client + memory.append complet + svc.status/fs.list/sectools.list + audit chaîné + **fs.read/list confinés** + **memory.query extraits** + **plomberie d'approbation T2/T3** + **rate-limiting par uid**) | 3–4 mois |
+| 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | 🔄 Largement implémenté (superviseur `vibectl agent run/stop/thinking`, **kill-switch mesuré 2,6 s**, **capture du raisonnement**, `policy.check`, **unité `vibeos-agent@` durcie + jeton scellé TPM2 + allowlist egress par hôte**) ; reste l'enforcement live (machine bootée). Périmètre figé T0/T1, plancher T2/T3 non levé | 3–5 semaines |
+| 3 | v0.3 | Genesis & mémoire | 🔄 Démarrée (generator amnésique + hardware.json schema 2 + ébauche vibectl livrés) | 2–3 mois |
+| 4 | v0.4 | Durcissement | 🔄 Amorcée (audit chaîné SHA-256 + rotation ; reste : ancrage TPM/Rekor, User=vibed, SELinux) | 4–6 mois |
 | 5 | v0.5 | Installateur & identité | Planifiée | 2–3 mois |
 | 6 | v1.0 | Release publique | Planifiée | 3–4 mois |
 | 7+ | v1.x → v2+ | Souveraineté progressive | Continue | Plusieurs années |
@@ -152,6 +153,73 @@ gantt
 | Effet tunnel Rust : daemon jamais « fini » | Périmètre v0.2 strictement limité à T0/T1 ; tout le reste va dans les phases suivantes |
 
 **Durée indicative** : 3–4 mois.
+
+---
+
+## 4 bis. Phase 2.5 — v0.2.5 « Autonomie encadrée & accès IA externes »
+
+**Objectif** : permettre des sessions d'agents longues, non supervisées en continu, **dans le contrat T0/T1 existant** — sans toucher au moteur de politiques ni anticiper le flux d'approbation T2/T3 de la Phase 4. En parallèle, sécuriser la façon dont ces agents s'authentifient auprès de leurs fournisseurs de modèles (abonnement plutôt que clé API quand c'est pertinent) et gouverner leurs appels réseau sortants.
+
+> **Statut : largement implémenté (2026-07-13)**. Périmètre **figé à T0/T1** : aucun livrable n'ouvre une capacité T2/T3 ni n'anticipe l'approbation humaine (Phase 4). **Livré** : le **superviseur d'agent** (`vibectl agent run/stop/thinking` — budgets wall-clock + nombre d'appels, kill-switch opérateur **mesuré 2,6 s**), la **capture du raisonnement** (store `memory/reasoning/`, outil T0 `agent.thinking`, tap `stream-json`, HUD `ReasoningPanel.qml`), le type de journal réservé `autonomous_session` — voir ADR-012/013 ; **l'unité template `vibeos-agent@.service`** (always-on, `User=%i` jamais root, durcie), le **scellement TPM2 du jeton** (`LoadCredentialEncrypted=` + `vibeos-agent-seal-token.sh`), et **l'allowlist d'egress par nom d'hôte** (`vibeos-agent-egress@.service` + `/etc/vibeos/agent-egress.conf`, `getent`→`IPAddressAllow`). **Reste (boot/matériel)** : l'enforcement live (TPM2 réel, egress BPF) et l'auth abonnement E2E exigent une machine bootée. Le scellement TPM2 des jetons est un morceau du travail Phase 3 (LUKS/TPM2) **avancé** ici parce que nécessaire à l'auth externe.
+
+### Livrables
+
+- **Superviseur d'agent** (`vibectl agent run`, ou unité template `vibeos-agent@.service`) : lance un CLI déjà embarqué (claude, codex, gemini, opencode) en mode non-interactif, avec **budget de temps** (wall-clock), **budget de nombre d'appels d'outils**, et **kill-switch humain uniquement** (`vibectl agent stop` — jamais un outil MCP exposé à l'agent lui-même).
+- **Authentification par abonnement en mode par défaut** pour les CLI qui le supportent : `claude setup-token` (Claude Code, scope inference-only) et l'équivalent Codex (`codex login --with-access-token`) plutôt qu'une clé API facturée au token — mécanisme **déjà natif** de ces CLI, pas un contournement.
+- **Scellement TPM2 du jeton** via `systemd-creds` (`LoadCredentialEncrypted=` dans l'unité agent-runner) — même ancrage de confiance que le LUKS mémoire prévu Phase 3, posé plus tôt car nécessaire ici. **Jamais de jeton en clair** sur disque en dehors de l'espace credential privé de l'unité.
+- **Allowlist d'egress réseau par unité** (`IPAddressAllow=`/`IPAddressDeny=` systemd — même famille de directives que le durcissement déjà en place sur `vibed.service`) : chaque CLI ne joint que les hôtes de son propre fournisseur (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`…). Résolution **par nom d'hôte**, pas par IP figée.
+- **Nouveau type de journal réservé au système** : `autonomous_session` (5ᵉ entrée de `JOURNAL_RESERVED_TYPES`, aux côtés de `genesis`/`boot`/`tool_call`/`purge`) — émis par le superviseur lui-même au début et à la fin d'une session, **jamais forgeable par l'agent** (invariant §4).
+- **Identité d'authentification en mémoire** : `identity.toml` ou le journal note **quel compte** a authentifié les agents de la machine (label déclaratif, jamais le jeton) — cohérent avec « la mémoire appartient à la machine et à son humain ».
+
+**Mode autonome permanent (« always-on ») — autonomie maximale, gate préservé.**
+
+- **Mode autonome par défaut, sur toute la surface T0/T1.** Le superviseur peut tourner en permanence (`vibectl agent run --always`, ou l'unité `vibeos-agent@.service` activée) : l'agent enchaîne **seul** toute action T0 (observation) et T1 (modification-utilisateur), sans validation humaine geste-par-geste. C'est l'autonomie maximale que le contrat de capacités existant autorise déjà — on ne change **pas** ce qui est permis, on retire seulement l'humain de la boucle synchrone du T0/T1.
+- **T2/T3 : approbation asynchrone, jamais un bypass.** En mode always-on, une action T2/T3 ne **bloque** plus l'agent : la demande est **mise en file** (le store d'approbation déjà livré + son bornage) et l'agent **poursuit son travail T0/T1** pendant que l'humain approuve/refuse **en différé et en lot** (`vibectl approvals list` → `approve`/`deny`). Le **plancher d'approbation T2/T3 n'est jamais levé** (invariant §7 ; THREAT-MODEL S1 — un OS « autonome pour tout, destructif compris, sans accord » serait un vecteur de ransomware sur simple injection de prompt). « Autonome pour tout » = **autonome sur tout le T0/T1 sans babysitting**, pas « exécute du destructif sans accord ». Décision et frontière : **ADR-013**.
+
+**Capture du raisonnement des agents** *(par tap sur le flux, jamais depuis le transcript CLI — ADR-012)*.
+
+- **Capture du raisonnement, par tap sur le flux, jamais depuis le transcript CLI** : le superviseur invoque le CLI en mode structuré (`claude -p --output-format stream-json` pour Claude Code ; équivalent côté codex/gemini si disponible — à vérifier à l'implémentation) et copie chaque bloc `thinking` vu passer vers un store dédié, indépendamment de ce que le CLI écrit lui-même sur disque. Capture **passive** uniquement : on ne reconstruit jamais la conversation renvoyée à l'API, on ne fait que la lire au passage (cf. risques).
+- **Store dédié** : `/var/lib/vibeos/memory/reasoning/<session-id>.jsonl` — un fichier par session, sibling de `journal/` et `knowledge/`, mêmes permissions (root:root 0700, denylist d'écriture déjà couverte par `/var/lib/vibeos/memory/**`). Volume nettement plus lourd qu'un journal classique (un budget de raisonnement peut peser plusieurs Ko par tour) : **politique de rétention propre** à trancher pendant la phase, plus courte que les 365 jours du journal.
+- **Lecture gouvernée** : nouvel outil T0 `agent.thinking` (session_id, tail, since) plutôt qu'un scope de plus sur `memory.query` — le raisonnement d'un agent n'est pas un fait appris sur l'humain, c'est de l'observabilité ; garder les deux modèles séparés.
+- **Vue live** : extension d'`AgentStatus.qml`/`ReasoningPanel.qml` (HUD) avec un panneau streaming du raisonnement en cours pendant une session autonome (composant **livré en scaffolding**, ship avec `[]` — règle d'honnêteté).
+- **Vue historique** : `vibectl agent thinking --session <id>` en CLI d'abord (lecture du store, cheap) ; navigateur HUD par session en fast-follow si le temps le permet.
+- **Toggle par session** : capture/affichage désactivable (équivalent `display: omitted` côté API) pour les runs de production pure — le raisonnement est facturé comme de l'output, un budget de pensée non coupé peut vider une fenêtre d'usage d'abonnement en une session.
+
+### Critères de sortie (mesurables)
+
+- [ ] `vibectl agent run --budget 8h` tourne en autonomie et s'arrête au budget écoulé même sans intervention ; journal exploitable (début/fin, actions T0/T1, erreurs).
+- [ ] Jeton `setup-token` scellé via `systemd-creds` survit à un reboot ; `fs.read` du fichier credential échoue **même pour root** sans le TPM de la machine (testé).
+- [ ] Un agent lancé par le superviseur ne peut atteindre, en sortant, **que** les hôtes de son fournisseur déclaré — test négatif : connexion à un hôte hors-liste échoue et est journalisée.
+- [ ] `ANTHROPIC_API_KEY` positionnée globalement dans l'environnement système **ne prend pas** le pas silencieusement sur l'auth abonnement du superviseur (piège documenté des CLI elles-mêmes — vérifié explicitement).
+- [x] Kill-switch : `vibectl agent stop` interrompt une session en **< 5 s**, dernier append mémoire cohérent (pas de ligne JSONL tronquée). **Mesuré 2026-07-13 : 2,636 s** (stop → arrêt), `reason: operator_stop`, dernière ligne raisonnement = JSON complet. Sous WSL le chiffre est dominé par le drain borné (2 s) car le group-kill externe ne stoppe pas le petit-fils ; sur Linux natif, plus court.
+- [ ] Toute tentative T2/T3 pendant une session autonome reste refusée **exactement comme aujourd'hui** — zéro régression du contrat existant.
+
+**Mode always-on.**
+
+- [ ] En mode always-on, une session enchaîne ≥ N actions T0/T1 **sans aucune interaction humaine** ; une action T2/T3 rencontrée **ne bloque pas** la session — elle apparaît dans `vibectl approvals list` et l'agent a continué son travail T0/T1 pendant ce temps.
+- [ ] Une demande T2/T3 mise en file puis **approuvée en différé** s'exécute au ré-appel exactement via le grant one-shot existant ; **refusée en différé**, elle ne s'exécute jamais. Test de non-régression : le plancher T2/T3 reste strictement identique au mode supervisé.
+
+**Capture du raisonnement.**
+
+- [ ] Une session `vibectl agent run` avec capture activée produit un fichier `reasoning/<session-id>.jsonl` non vide, lisible via `agent.thinking`, y compris pour un run de plusieurs heures.
+- [ ] Le transcript propre de Claude Code (`~/.claude/projects/...`) reste **inchangé** — la capture ne modifie jamais ce que le CLI envoie/reçoit de l'API (non-régression : une session capturée reste `--resume`-able normalement).
+- [ ] `agent.thinking` **refuse tout accès hors du home de l'appelant** tant que le confinement de lecture mémoire (dette notée dans l'audit de capacités) n'est pas corrigé — pas de nouvelle fuite cross-utilisateur créée par cette fonctionnalité.
+- [ ] Toggle testé : capture désactivée → **zéro octet** de raisonnement écrit, latence de premier token inchangée.
+
+### Risques principaux
+
+| Risque | Mitigation |
+|---|---|
+| Confondre « plus autonome » et « moins gouverné » | Périmètre figé à T0/T1 dès le lancement ; toute tentative d'anticiper l'approbation T2/T3 (Phase 4) refusée en revue |
+| **Mode always-on interprété comme « exécute tout sans accord »** | Le plancher T2/T3 reste **non abaissable** (invariant §7) : le mode ne fait que rendre l'approbation **asynchrone** (file d'attente), jamais optionnelle ; ADR-013 fige la frontière, revue adversariale à chaque évolution |
+| File d'approbation qui gonfle si l'humain n'approuve jamais (agent always-on qui accumule des T2/T3) | Store d'approbation **déjà borné** (purge des périmés, dedup, plafond) ; l'agent est prévenu (`pending`) et continue en T0/T1 sans être bloqué |
+| Politique d'usage des abonnements IA en mouvement côté fournisseurs | Documenter la règle « un humain, un abonnement, une machine » dans `docs/` ; revoir à chaque changement de policy constaté |
+| Allowlist d'egress cassée par un changement d'IP/CDN fournisseur | Allowlist **par nom d'hôte** (résolution DNS), testée en CI régulièrement |
+| Kill-switch exposé par erreur à l'agent | `vibectl agent stop` est une commande **opérateur** (comme `approve`/`deny`, root) ; jamais un outil MCP — vérifié en revue |
+| S'appuyer sur le format JSONL interne de Claude Code (non contractuel, fragile — bugs ouverts sur des transcripts corrompus par des blocs thinking) | **Ne jamais lire/parser ce fichier** ; tap uniquement le flux `stream-json` du process qu'on supervise soi-même (ADR-012) |
+| Confusion : croire voir le raisonnement brut du modèle | Documenter dans le HUD/README : résumé fourni par l'API pour les modèles cloud, raisonnement réellement complet seulement en local via ollama (note de transparence dans `ReasoningPanel.qml`) |
+
+**Durée indicative** : 3–5 semaines (délibérément resserré : pas de sandbox seccomp/Landlock complet, ça reste Phase 4).
 
 ---
 
@@ -318,6 +386,55 @@ gantt
 | Divergence d'avec Fedora rendant les rebases coûteuses | Limiter les patchs porteurs ; tout ce qui peut vivre upstream vit upstream |
 
 **Durée** : continue — c'est le régime de croisière du projet, sur plusieurs années.
+
+---
+
+## 9 bis. Initiative parallèle — « VibeOS pour Zed »
+
+**Objectif** : porter la gouvernance VibeOS (moteur de politiques `vibed`, tiers
+T0–T3, audit, approbation) à l'**éditeur [Zed](https://zed.dev)**, dont le panneau
+agent parle **ACP**. On **cible l'adaptateur** `@zed-industries/claude-code-acp`
+(qui fait tourner Claude Code comme agent ACP), **jamais le cœur de Zed**. Décision
+et invariants : [docs/DECISIONS.md](docs/DECISIONS.md) **ADR-014**.
+
+> **Statut : cœur implémenté & vérifié sans Zed (2026-07-13)** — couches 0/1/2
+> livrées (config Zed-only + fork `vibeos-claude-acp`, `tsc` + 17 tests + boot
+> headless), reste le E2E en session Zed réelle (voir `BLOCKERS.md`) et le câblage
+> image (ADR-015). Périmètre gouverné par
+> les mêmes invariants que le reste du projet : **plancher T2/T3 jamais levé**, aucun
+> chemin ne touche `approval.rs`, pas d'auto-approbation, toute surface d'écriture
+> ⇒ `THREAT-MODEL.md` dans le même commit.
+
+| Couche | Livrable | Fork ? | Statut |
+|---|---|---|---|
+| **0** | `settings.json` VibeOS pour Zed (`/etc/skel/.config/zed/`) : `agent_servers` (adaptateur ACP) + `context_servers` → `vibed` (MCP `vibeos:*`) | Non (config) | 🔶 Scaffolding livré (à valider sur Zed réel) |
+| **1** | Read/Write/Edit natifs **désactivés par CONFIG** (`permissions.deny` dans un `CLAUDE_CONFIG_DIR` **Zed-only**) et l'agent routé vers `vibeos:fs.*`/`memory.query` — décision Zed-only (le terminal garde ses outils) | Non (config) | 🔶 Config livrée (`/etc/skel/.config/vibeos/zed-claude/`), à valider Zed |
+| **2** | **Mode auto gouverné** (le fork) : `zed/vibeos-claude-acp` patche `canUseTool` → `vibeos:policy.check` ; `Allow` (T0/T1) sans prompt, `RequireApproval` (T2/T3) **jamais** auto-accepté. Ne touche jamais `approval.rs`. Groundwork vibed : outil T0 **`policy.check`** livré | Oui (extension) | ✅ Cœur livré & vérifié (`tsc` + **17 tests** + boot ACP headless) ; E2E Zed live à valider |
+| **3** | Intégrations éditeur : raisonnement (ADR-012) visible dans Zed, indicateurs de tier, journal de session | Oui | Proposé |
+
+**Contrainte de méthode** : **investigation avant fork** — cartographier le code réel
+de l'adaptateur (exposition des outils, hook d'élicitation/permission, config MCP,
+mode de permission) et la consigner dans ADR-014 § « Structure de l'adaptateur »
+**avant** le premier patch de la couche 1. Le fork reste **minimal, chirurgical et
+rebasable** (l'amont évolue vite).
+
+**Durée indicative** : couche 0 en jours ; couches 1–2 en semaines ; couche 3 au fil de l'eau.
+
+---
+
+## 9 ter. Dette technique explicite (suivie, non abandonnée)
+
+> Cette section existe pour qu'aucune dette identifiée ne disparaisse
+> silencieusement d'une réécriture de doc à l'autre. Chaque entrée porte une
+> estimation d'effort et une raison de report. Une dette n'est **pas** un
+> critère de sortie de phase, mais elle doit rester visible jusqu'à sa
+> résorption.
+
+| # | Dette | Origine | Effort estimé | Report justifié par |
+|---|---|---|---|---|
+| **F6** | **Découper `vibed/src/mcp.rs`** en modules `tools/{fs,memory,svc,sectools}.rs`. **3/4 faits (2026-07-14)** : `tools/svc.rs` ✅, `tools/sectools.rs` ✅, `tools/memory.rs` ✅ (impl **et** tests déplacés ; mcp.rs **4257 → 2777 lignes**, −35 %). **Reste : `fs`** | Revue adversariale Fable 5 (finding F6, 7/7 traités sauf celui-ci) | **~0,5 j** restant (fs). fs est le cas **structurellement entrelacé** (investigation 2026-07-14) : ses tests appellent **7 fonctions internes** (`fs_read`/`fs_list`/`fs_write` + `is_within` + `home_dir_for_uid`×2 + `confine_read`), testent le **`builtin_denied` partagé** (qui reste dans `mcp.rs` — utilisé aussi par `handle_tools_call` et `policy.check`), et s'appuient sur des **helpers de test partagés** (`empty_policy`, `policy_from_toml` sont aussi utilisés par des tests **non-fs** : `builtin_denied` en haut, `policy.check` en bas). Pire, un **test non-fs** (le lecteur de ligne borné, « Fix 4 ») est **intercalé au milieu des tests fs**, et `home_scratch` dépend de `home_dir_for_uid`. Extraire fs proprement exige donc (a) un module `crate::test_support` partagé (`#[cfg(test)] pub(crate)`) ET (b) la séparation chirurgicale du test non-fs intercalé — un refactor d'**infrastructure de test**, pas un déplacement mécanique | Refactor **mécanique sans gain fonctionnel**. svc/sectools/memory (tests autonomes) faits ce soir, chacun vérifié (148 tests, clippy/fmt) ; fs **délibérément différé** — le forcer créerait soit un split bancal (impl dans `fs.rs`, tests restés dans `mcp.rs`), soit un risque de changement de comportement sur une surface sécurité (denylist, confinement home). Idéalement juste après le merge de PR #11 |
+
+**F6 — critère de « fait »** : `mcp.rs` réduit à un module de câblage, chaque famille d'outils dans son propre fichier `tools/*.rs`, **zéro changement de comportement** (les 149 tests passent sans modification de leurs assertions), `clippy -D warnings` et `fmt --check` verts. **État 2026-07-14** : svc + sectools + memory ✅ (mcp.rs −35 %) ; **fs** reste (entrelacé, session dédiée).
 
 ---
 

@@ -43,8 +43,8 @@ Trois principes non négociables :
 flowchart TD
     A[UEFI Secure Boot] --> B["Racine vérifiée — composefs/fs-verity<br/>(UKI mesurée : Phase 4)"]
     B --> C[systemd]
-    C --> D{"Mode amnésique ?<br/>(generator : Phase 3)"}
-    D -- "oui (vibeos.amnesic=1) — Phase 3" --> E[tmpfs monté sur /var/lib/vibeos/memory]
+    C --> D{"Mode amnésique ?<br/>(generator systemd, livré)"}
+    D -- "oui (vibeos.amnesic=1)" --> E[tmpfs monté sur /var/lib/vibeos/memory]
     D -- non --> F["v0.1 : répertoire en clair sous /var<br/>Phase 3 : déverrouillage LUKS TPM2 ou passphrase,<br/>montage du volume"]
     E --> G{.initialized présent ?}
     F --> G
@@ -53,7 +53,7 @@ flowchart TD
     H --> I
 ```
 
-En mode amnésique (**Phase 3**, §5) le tmpfs est toujours vide au boot, donc
+En mode amnésique (§5, generator livré) le tmpfs est toujours vide au boot, donc
 `.initialized` est toujours absent : **Genesis s'exécute à chaque démarrage** —
 c'est le mécanisme, pas un cas particulier.
 
@@ -87,15 +87,18 @@ c'est le mécanisme, pas un cas particulier.
 |---|---|---|---|---|
 | `identity.toml` | TOML | Genesis uniquement | `memory.query` (T0) | **interdite** |
 | `hardware.json` | JSON | Genesis uniquement | `memory.query` (T0) | **interdite** |
-| `user/` | TOML/MD | `vibed` | `memory.query` (T0) | `memory.append` (T1)* — scope à venir |
-| `projects/index.json` | JSON | `vibed` | `memory.query` (T0) | `memory.append` (T1)* — scope à venir |
+| `user/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `user`) |
+| `projects/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `projects`) |
 | `journal/*.jsonl` | JSONL | Genesis puis `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
 | `knowledge/facts.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
 | `.initialized` | texte | Genesis uniquement | — | — |
 
-\* `memory.append` est **livré** pour les scopes append-only `journal` et
-`knowledge` (voir §9) ; les scopes `user` et `projects` (fusion structurée
-TOML/JSON, pas un simple append) restent une **cible Phase 2/3**. La mémoire
+\* `memory.append` est **livré** pour les quatre scopes agents `journal`,
+`knowledge`, `user` et `projects` (voir §9). Invariant §4 oblige :
+**tous append-only** — `user` et `projects` ne « fusionnent » pas par
+réécriture mais accumulent des mises à jour dans `updates.jsonl` ; la vue
+courante (profil, index) est le *fold* de ces lignes (dernière écriture gagne
+par clé/`path`), jamais un fichier réécrit sur place. La mémoire
 n'est inscriptible par aucun autre outil MCP : `fs.write` est confiné à
 `/home/**`/`/var/home/**` et la mémoire figure dans la denylist intégrée au
 code de `vibed` — `memory.append`, qui ne prend aucun argument de chemin, est
@@ -122,25 +125,37 @@ mode = "persistent"                                # "persistent" | "amnesic"
 | `birth` | **date de naissance** de la mémoire (ISO 8601 avec fuseau) |
 | `mode` | `persistent` ou `amnesic` — lu par Genesis dans la variable d'environnement `VIBEOS_MEMORY_MODE` (support de montage : LUKS/tmpfs en Phase 3) |
 
-### 3.2 `hardware.json`
+### 3.2 `hardware.json` (schema 2)
 
-Profil matériel collecté à la naissance. En v0.1, ce sont des instantanés **bruts**
-(sortie texte des outils, échappée en chaînes JSON) — suffisant pour que les agents
-répondent à « sur quoi je tourne ? » sans exécuter de commande. Chaque outil absent
-ou en échec est remplacé par un marqueur explicite (`"(lscpu not available)"`),
-jamais par un crash de Genesis.
+Profil matériel collecté à la naissance. **schema 2** expose des **champs
+structurés** (nombre de cœurs, RAM en octets, GPU + VRAM en octets) exploitables
+directement par les agents, et conserve les **instantanés bruts** des outils
+sous `raw` pour la forensique. Chaque sonde dégrade gracieusement (`cores: 0`,
+`total_bytes: null`, `gpu: []`, `"(lscpu not available)"`) — jamais un crash de
+Genesis. La VRAM n'est renseignée que si un outil vendeur la fournit
+(`nvidia-smi` pour NVIDIA) ; sinon `vram_bytes: null`.
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "collected_at": "2026-07-03T09:14:22+02:00",
   "kernel": "Linux 6.15.4-200.fc42.x86_64 x86_64 GNU/Linux",
-  "cpu": "…sortie de lscpu…",
-  "memory": "…sortie de free -h…",
-  "block_devices": "…sortie de lsblk…",
-  "filesystems": "…sortie de df -h…"
+  "cpu": { "model": "AMD Ryzen 7 3700X 8-Core Processor", "cores": 16 },
+  "memory": { "total_bytes": 16777216000 },
+  "gpu": [
+    { "vendor": "NVIDIA", "model": "NVIDIA GeForce RTX 3070 Ti", "vram_bytes": 8589934592 }
+  ],
+  "raw": {
+    "cpu": "…sortie de lscpu…",
+    "memory": "…sortie de free -h…",
+    "block_devices": "…sortie de lsblk…",
+    "filesystems": "…sortie de df -h…"
+  }
 }
 ```
+
+> **Note schema** : `hardware.json` porte son propre numéro (2), distinct du
+> schema de la mémoire/identité (`identity.toml`, événement `genesis` = 1).
 
 Évolution prévue (`schema = 2`) : champs structurés (cœurs, RAM en octets,
 GPU/VRAM pour dimensionner les modèles ollama locaux) et re-collecte journalisée
@@ -149,19 +164,23 @@ quand le matériel change.
 ### 3.3 `user/`
 
 Ce que la machine sait de **son humain**. Rempli progressivement par `vibed` via
-`memory.append` (le scope `user` — fusion TOML structurée — reste une cible
-Phase 2/3 ; jamais par Genesis, qui ne pose qu'un `README.md`) :
-`profile.toml` (nom d'usage, langue — le français est détecté dès la locale),
-`preferences.toml` (éditeur, shell, thème, outils préférés), `codestyle.md`
-(conventions observées dans les sessions de vibecoding : indentation, nommage,
-frameworks favoris).
+`memory.append` scope `user` (jamais par Genesis, qui ne pose qu'un
+`README.md`). Invariant §4 : c'est **append-only**, pas une réécriture. Chaque
+appel ajoute une ligne à `user/updates.jsonl` : `{ ts, key, value, source }`,
+où `key` est une clé pointée `[A-Za-z0-9._-]` (ex. `profile.lang`,
+`preferences.editor`, `codestyle.indent`). La **vue courante** (profil,
+préférences) est le *fold* de ces lignes — **dernière écriture gagne par
+`key`** — matérialisée par `memory.query` ou un futur `vibectl`, jamais par un
+fichier réécrit sur place.
 
 ### 3.4 `projects/`
 
-`index.json` : tableau d'objets `{ "path", "name", "languages", "vcs",
-"first_seen", "last_opened", "summary" }`. Alimenté quand un agent ouvre un
-projet ; consulté en début de session pour retrouver le contexte (« reprends le
-projet d'hier »).
+Index des projets connus, **append-only** : `projects/updates.jsonl`, une ligne
+par mise à jour `{ ts, path, source, name?, languages?, vcs?, summary?,
+last_opened? }` (champs hors liste ignorés). `path` (absolu) est la clé de
+*fold* : la vue courante est l'agrégat **dernière écriture gagne par `path`**.
+Alimenté quand un agent ouvre un projet ; consulté en début de session pour
+retrouver le contexte (« reprends le projet d'hier »).
 
 ### 3.5 `journal/`
 
@@ -184,6 +203,16 @@ Schéma d'un événement :
 
 Le tout premier événement de la vie d'une machine est toujours `type: "genesis"`,
 écrit par `genesis.sh` lui-même.
+
+**Événement `tool_call` (écrit par `vibed`)** — à chaque **action agent T1+
+réellement exécutée** (aujourd'hui `fs.write` ; demain les outils T2/T3
+approuvés), `vibed` ajoute une ligne `type: "tool_call"`, `source: "vibed"`,
+`data: {tool, target, tier, caller_uid}` — sans secret (le `target` non secret
+reprend celui de l'audit). C'est la mémoire *de haut niveau* de ce que la
+machine a fait (« qu'ai-je fait hier ? »), distincte du journal d'audit
+forensique. Les lectures T0 et les outils `memory.*` en sont **exclus** (bruit
+méta). `tool_call` est un type **réservé au système** : un agent ne peut pas le
+forger via `memory.append` (refusé).
 
 ### 3.6 `knowledge/`
 
@@ -227,12 +256,13 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
 2. `umask 077` — tout ce qui naît ici est privé.
 3. Création du squelette : `user/`, `projects/`, `journal/`, `knowledge/`,
    racine en `0700`.
-4. Collecte matérielle → `hardware.json` : `uname`, `lscpu`, `free`, `lsblk`,
+4. Collecte matérielle → `hardware.json` (schema 2, champs structurés
+   cœurs/RAM/GPU + blobs bruts) : `uname`, `lscpu`, `free`, `lsblk`,
    `df` — chaque outil avec repli gracieux s'il est absent ou en échec.
 5. Écriture d'`identity.toml` : hostname, machine-id (si lisible),
    `birth = date -Is`, `mode` (persistent par défaut, amnesic si la variable
    d'environnement `VIBEOS_MEMORY_MODE=amnesic` est injectée — par le generator
-   amnésique en Phase 3, cf. §5).
+   amnésique livré, cf. §5).
 6. Pose des `README.md` placeholders dans les quatre sous-répertoires.
 7. Premier événement du journal : `type: "genesis"` dans le fichier du jour.
 8. **En dernier** : écriture de `.initialized` (contenu : horodatage de naissance).
@@ -273,27 +303,33 @@ de la machine.
 
 ---
 
-## 5. Mode amnésique (cible Phase 3 — non livré en v0.1)
+## 5. Mode amnésique (generator livré ; validation VM = Phase 3)
 
 **Principe** (inspiré de Tails) : `/var/lib/vibeos/memory` est un **tmpfs**.
 La mémoire est reconstruite par Genesis **à chaque boot** et disparaît à
 l'extinction — elle n'a jamais existé sur le disque.
 
-**Activation (Phase 3)** : paramètre kernel `vibeos.amnesic=1` (entrée de boot
-dédiée), lu par un **generator systemd** — *non livré en v0.1, aucun generator
-n'existe encore dans l'image* — qui :
+**Activation** : paramètre kernel `vibeos.amnesic=1` (entrée de boot dédiée), lu
+par le **generator systemd** `os/rootfs/usr/lib/systemd/system-generators/vibeos-amnesic-generator`
+(**livré** dans l'image, shellcheck + tests fonctionnels verts). Il :
 
-1. montera un tmpfs sur `/var/lib/vibeos/memory` à la place du volume LUKS
-   (qui ne sera ni déverrouillé ni monté) ;
-2. injectera `VIBEOS_MEMORY_MODE=amnesic` dans l'environnement de
-   `vibeos-genesis.service` (drop-in), d'où `mode = "amnesic"` dans
-   `identity.toml`.
+1. génère un **mount unit tmpfs** `var-lib-vibeos-memory.mount`
+   (`mode=0700,nosuid,nodev,noexec,size=512M`) et le câble dans
+   `local-fs.target` — la mémoire est un tmpfs, le volume LUKS (Phase 3) n'est
+   ni déverrouillé ni monté ;
+2. injecte `VIBEOS_MEMORY_MODE=amnesic` (drop-in) dans `vibeos-genesis.service`
+   **et** `vibed.service`, et les ordonne après le montage
+   (`RequiresMountsFor`), d'où `mode = "amnesic"` dans `identity.toml` ;
+3. publie un marqueur non secret `/run/vibeos/memory-mode` (`amnesic` |
+   `persistent`) pour Genesis/vibed/HUD. `vibeos.amnesic=0` force persistent ;
+   toute cmdline non reconnue reste persistent (défaut sûr).
 
-Le tmpfs étant vide, `.initialized` sera absent et Genesis se rejouera : **aucun
+Le tmpfs étant vide, `.initialized` est absent et Genesis se rejoue : **aucun
 code spécifique** n'est nécessaire dans `genesis.sh`, le mécanisme d'idempotence
-suffit. Dès la v0.1, `genesis.sh` sait d'ailleurs déjà écrire `mode = "amnesic"`
-si on lui fournit `VIBEOS_MEMORY_MODE=amnesic` — c'est le seul morceau du mode
-amnésique livré aujourd'hui, et il est testable à la main.
+suffit ; `genesis.sh` lit `VIBEOS_MEMORY_MODE` et écrit `mode = "amnesic"`.
+**Reste Phase 3** : la validation en VM du cycle boot amnésique → reboot →
+vérification qu'aucune trace ne persiste (nécessite un vrai boot), et le swap
+volatil ci-dessous.
 
 **Cas d'usage** : machine partagée ou de démonstration ; poste de réponse à
 incident / forensics (aucune trace de la session) ; travail sur données sensibles ;
@@ -381,15 +417,16 @@ La mémoire est portable — elle appartient à l'humain, pas au matériel.
 Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
 `vibed`, désormais **embarqué dans l'image et démarré au boot**).
 `memory.query` (arguments `query`, `scope`, `limit`) et `memory.append`
-(scopes `journal` et `knowledge`) sont **implémentés, testés et exposés** par le
-démon `vibed`. Restent une **cible Phase 2/3** : les scopes `user` et
-`projects` de `memory.append` (fusion structurée TOML/JSON, pas un simple
-append) et la recherche sémantique par embeddings.
+(scopes `journal`, `knowledge`, `user`, `projects` — tous append-only) sont
+**implémentés, testés et exposés** par le démon `vibed`. La **vue courante**
+(fold last-write-wins des scopes `user`/`projects`) est matérialisée par
+`vibectl memory profile` et `vibectl memory projects` (**livré**). Reste une
+**cible ultérieure** : la recherche sémantique par embeddings.
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
-| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`) | ✅ **livré** (scope/limit depuis v0.2) |
-| `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`/`knowledge` ; scopes `user`/`projects` = **cible Phase 2/3** |
+| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** | ✅ **livré** (scope/limit + extraits depuis v0.2) |
+| `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`, `knowledge`, `user`, `projects` (tous append-only) |
 
 Points durs :
 
@@ -407,6 +444,17 @@ Points durs :
   `ts` (et l'`id` des faits) sont posés par `vibed`, jamais par l'agent ;
   l'identité authentique de l'appelant vit dans le journal d'audit
   (`SO_PEERCRED`), le champ `source` n'est qu'une étiquette déclarative.
+- ⚠️ **`source` (et tout `data`/`fact`/`value`) est NON FIABLE.** C'est du
+  contenu **auto-déclaré par l'agent**, lui-même un *insider non fiable*
+  (THREAT-MODEL §1) : un agent peut inscrire `source: "genesis.sh"` ou un
+  `fact` mensonger. `source` est une **étiquette de commodité**, jamais une
+  preuve de provenance ni d'autorité. Toute lecture — et en particulier une
+  future **consolidation/synthèse `knowledge`** (dédup, agrégation, calcul de
+  confiance) — doit traiter ces champs comme des assertions non vérifiées :
+  ne jamais élever la confiance d'un fait sur la seule foi de son `source`, ne
+  jamais accorder un privilège d'après lui. La seule identité fiable est l'uid
+  `SO_PEERCRED` du journal d'audit. Corollaire : la mémoire n'est pas un
+  coffre-fort — **aucun secret** ne doit y être écrit.
 - Chaque appel — accepté ou refusé — est audité et produira, à terme, un événement
   `tool_call` dans le journal.
 
@@ -430,9 +478,12 @@ Trois arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
 sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` | `user` |
 `projects` | `journal` | `knowledge` (restreint la marche à une entrée du
 layout §3 ; un scope inconnu est une erreur explicite) et `limit` (entier ≥ 1,
-plafond de résultats — la réponse porte un drapeau `truncated`). Réponse :
-contenu MCP standard (`result.content`) portant les entrées trouvées en JSON.
-La marche reste bornée en dur (200 fichiers, 64 KiB scannés par fichier).
+plafond de résultats — la réponse porte un drapeau `truncated`). Chaque match
+est rendu `{ "file": <chemin relatif>, "snippet": <extrait de contenu borné,
+≤ 1024 caractères>, "snippet_truncated": <bool> }` : l'agent **lit la mémoire
+en un seul appel**, sans enchaîner un `fs.read` sur le chemin absolu — la lecture
+est le rôle de `memory.query`, conformément à cette spec. La marche reste bornée
+en dur (200 fichiers, 64 KiB scannés par fichier, extrait ≤ 1024 caractères).
 
 **Cible ultérieure** : la recherche sémantique via `knowledge/embeddings/`.
 
@@ -468,8 +519,13 @@ plafond 16 KiB) et audite :
 - **`knowledge`** → `knowledge/facts.jsonl`. `entry` : `subject` (≤ 256 o),
   `fact` (≤ 4 096 o), `source`, `confidence` optionnel ∈ [0, 1] ; `vibed`
   génère l'`id`.
-- **`user`** / **`projects`** → erreur explicite : fusion structurée TOML/JSON,
-  **cible Phase 2/3** — pas un simple append.
+- **`user`** → `user/updates.jsonl`. `entry` : `key` (clé pointée
+  `[A-Za-z0-9._-]`, ≤ 256 o), `value` (JSON libre), `source`. Append-only ;
+  vue courante = fold last-write-wins par `key` (§3.3).
+- **`projects`** → `projects/updates.jsonl`. `entry` : `path` (absolu, ≤ 4096 o,
+  clé de fold), `source`, et champs structurés optionnels
+  `name`/`languages`/`vcs`/`summary`/`last_opened` (le reste est ignoré).
+  Append-only ; vue courante = fold last-write-wins par `path` (§3.4).
 
 Si la mémoire n'existe pas encore (Genesis n'a pas tourné), l'appel échoue
 explicitement — `memory.append` ne crée jamais la racine du store.

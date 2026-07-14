@@ -28,6 +28,12 @@
 # See docs/BUILD.md (French) for the full build / ISO / publish workflow.
 # =============================================================================
 
+# Global build arg: ship the VibeOS-for-Zed governance extension (ADR-015)?
+# OFF by default — the extension is NOT shipped until the live E2E is validated
+# (ADR-015 §6, BLOCKERS.md). Declared before the first FROM so it can select the
+# conditional-copy stage below. Enable with `--build-arg WITH_ZED_AGENT=1`.
+ARG WITH_ZED_AGENT=0
+
 # -----------------------------------------------------------------------------
 # PHASE 2: build vibed from source (multi-stage). The vibed.service unit shipped
 # in os/rootfs is guarded by ConditionPathExists=/usr/bin/vibed; installing the
@@ -40,8 +46,9 @@ FROM registry.fedoraproject.org/fedora:42 AS vibed-builder
 RUN dnf -y install cargo && dnf clean all
 COPY vibed/ /src/vibed/
 WORKDIR /src/vibed
+# Builds both binaries of the crate: vibed (daemon) and vibectl (operator CLI).
 RUN cargo build --release --locked \
- && strip target/release/vibed
+ && strip target/release/vibed target/release/vibectl
 
 # -----------------------------------------------------------------------------
 # PHASE 2: build Quickshell from source (multi-stage). Fedora 42 has no
@@ -91,6 +98,55 @@ RUN set -eu; \
         -DX11=OFF; \
     cmake --build /build; \
     DESTDIR=/out cmake --install /build
+
+# -----------------------------------------------------------------------------
+# PHASE 2ter: build the VibeOS-for-Zed governance extension (ADR-014/015).
+# The extension patches the Claude Code ACP adapter's `canUseTool` to route the
+# hosted agent's permissions through vibed's policy engine. It is bundled to a
+# SINGLE self-contained ESM file so ONLY that file ships — never node_modules,
+# the ~148 transitive npm packages, the TS sources, or the dev tooling.
+#
+# Supply chain (ADR-015, same discipline as the CLI installs above):
+#   * committed lockfile (package-lock.json): exact transitive versions +
+#     SHA-512 integrity per package, pinned to the upstream 0.58.x adapter;
+#   * `npm ci --ignore-scripts`: reproducible from the lock (fails if it drifts
+#     from package.json), NO lifecycle scripts (postinstall &c — a classic
+#     exfiltration vector); esbuild's platform binary comes from an optional
+#     dependency package, so no rebuild exception is needed;
+#   * esbuild bundles src/ -> dist/vibeos-claude-acp.mjs; the build then boots
+#     that bundle headless and asserts it answers ACP `initialize` (the same
+#     "prove it runs" gate the shipped CLIs get) before it can be copied.
+# `npm audit --omit=dev` on the shipped chain = 0 vulnerabilities (2026-07-13);
+# the dev-only advisories (esbuild dev-server, vitest) never enter the image.
+#
+# This stage (and its ~148-package npm install) is built ONLY when
+# WITH_ZED_AGENT=1 — the selector below keeps it out of the default graph.
+# -----------------------------------------------------------------------------
+FROM registry.fedoraproject.org/fedora:42 AS zed-agent-builder
+RUN dnf -y install nodejs npm && dnf clean all
+WORKDIR /src/ext
+# Copy only the build inputs — never a pre-existing node_modules/ or dist/ from
+# the context (npm ci rebuilds from the lockfile; the bundle is regenerated).
+COPY zed/vibeos-claude-acp/package.json zed/vibeos-claude-acp/package-lock.json zed/vibeos-claude-acp/tsconfig.json ./
+COPY zed/vibeos-claude-acp/src/ ./src/
+COPY zed/vibeos-claude-acp/scripts/ ./scripts/
+RUN npm ci --ignore-scripts \
+ && npm run bundle \
+ && node scripts/smoke-acp.mjs dist/vibeos-claude-acp.mjs \
+ && mkdir -p /out/zed-agent \
+ && cp dist/vibeos-claude-acp.mjs /out/zed-agent/
+
+# Conditional-copy selector. buildah/podman only builds the stages reachable
+# from the final image, so with WITH_ZED_AGENT=0 the builder above is skipped
+# entirely (no Node, no npm install). The disabled variant ships a self-
+# documenting marker instead of the bundle.
+FROM registry.fedoraproject.org/fedora:42 AS zed-agent-0
+RUN mkdir -p /out/zed-agent \
+ && printf 'The VibeOS-for-Zed extension is NOT shipped in this image.\nRebuild with --build-arg WITH_ZED_AGENT=1 once the live E2E is validated\n(ADR-015 §6, BLOCKERS.md).\n' > /out/zed-agent/NOT-INSTALLED.txt
+
+FROM zed-agent-builder AS zed-agent-1
+
+FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 
 # Digest pin of quay.io/fedora/fedora-kinoite:42 (manifest list, amd64+arm64).
 # Tag kept as a comment for humans; bump the digest deliberately, never float.
@@ -537,6 +593,8 @@ COPY desktop/quickshell /usr/share/vibeos/quickshell
 # (fail-closed on invalid policy) and writes the audit log under StateDirectory
 # /var/lib/vibeos. See vibed/README.md and docs/ARCHITECTURE.md.
 COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed
+# vibectl — read-only operator CLI (memory status, audit-chain verification).
+COPY --from=vibed-builder /src/vibed/target/release/vibectl /usr/bin/vibectl
 
 # --- PHASE 2: install quickshell from the builder stage -----------------------
 # bin/qs + bin/quickshell, the Quickshell QML modules (lib64/qt6/qml) and the
@@ -546,6 +604,13 @@ COPY --from=vibed-builder /src/vibed/target/release/vibed /usr/bin/vibed
 # machines. Runtime deps (kvantum aside): jemalloc + qt6-qtsvg, layer 1g.
 COPY --from=quickshell-builder /out/usr/ /usr/
 RUN QT_QPA_PLATFORM=offscreen /usr/bin/quickshell --version
+
+# --- PHASE 2ter: install the VibeOS-for-Zed extension bundle (gated) ----------
+# From the selector stage: the single bundled ESM when WITH_ZED_AGENT=1, or a
+# NOT-INSTALLED marker otherwise. Lands under /usr (immutable image content);
+# never node_modules or TS sources. Wiring it into Zed's settings.json (couche
+# 0/1) follows once the live E2E validates the bundle (ADR-015 §6).
+COPY --from=zed-agent-selected /out/zed-agent/ /usr/lib/vibeos/zed-agent/
 
 # =============================================================================
 # 8. Finalize: NEVRA manifest, scrub machine-local state, validate the image

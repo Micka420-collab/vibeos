@@ -1,0 +1,89 @@
+#!/bin/sh
+# vibeos-amnesic-generator — systemd generator (runs very early at boot).
+#
+# Amnesic mode (Tails-style): when the kernel command line contains
+# `vibeos.amnesic=1`, the VibeOS memory store is provisioned as a tmpfs so
+# NOTHING persists across reboots — Genesis re-runs into an empty tmpfs every
+# boot (its .initialized guard never survives). Without the flag, this is a
+# no-op and memory persists on the normal /var (the v0.1 default).
+#
+# What it does, in amnesic mode:
+#   1. generate a tmpfs mount unit for /var/lib/vibeos/memory;
+#   2. wire it into local-fs.target so it mounts before any service;
+#   3. drop-in `VIBEOS_MEMORY_MODE=amnesic` into vibeos-genesis.service and
+#      vibed.service (genesis.sh reads this env — see memory/genesis.sh) and
+#      order them after the mount (RequiresMountsFor);
+#   4. publish a non-secret mode marker at /run/vibeos/memory-mode.
+#
+# Invariants: the generator NEVER touches disk memory, keys or personal data;
+# it only composes systemd units. It is idempotent and safe to re-run.
+#
+# systemd invokes generators with three output dirs; the "normal" one is $1.
+# Test seams (default to the real paths): VIBEOS_CMDLINE_FILE, VIBEOS_RUN_DIR.
+set -eu
+
+NORMAL_DIR="${1:-/tmp}"
+CMDLINE_FILE="${VIBEOS_CMDLINE_FILE:-/proc/cmdline}"
+RUN_DIR="${VIBEOS_RUN_DIR:-/run/vibeos}"
+MEMORY_DIR="/var/lib/vibeos/memory"
+MOUNT_UNIT="var-lib-vibeos-memory.mount"
+
+# Decide the mode from the kernel command line. Last occurrence wins; explicit
+# =0 forces persistent. Anything unparsable defaults to persistent (safe).
+# The cmdline is a single space-separated line: word-splitting is intentional,
+# and `set -f` disables globbing so a token like `foo*` cannot expand.
+mode="persistent"
+if [ -r "${CMDLINE_FILE}" ]; then
+    cmdline=$(cat "${CMDLINE_FILE}" 2>/dev/null || true)
+    set -f
+    # shellcheck disable=SC2086  # deliberate word-split on the kernel cmdline
+    for tok in ${cmdline}; do
+        case "${tok}" in
+            vibeos.amnesic=1) mode="amnesic" ;;
+            vibeos.amnesic=0) mode="persistent" ;;
+        esac
+    done
+    set +f
+fi
+
+# Publish the mode marker (non-secret) for genesis/vibed/HUD to read cheaply.
+mkdir -p "${RUN_DIR}"
+printf '%s\n' "${mode}" > "${RUN_DIR}/memory-mode" 2>/dev/null || true
+
+[ "${mode}" = "amnesic" ] || exit 0
+
+# 1. tmpfs mount unit. mode=0700 matches the memory store's private perms;
+#    nosuid/nodev/noexec harden it; a size cap bounds runaway growth.
+cat > "${NORMAL_DIR}/${MOUNT_UNIT}" <<EOF
+[Unit]
+Description=VibeOS memory (amnesic tmpfs — nothing persists across reboots)
+Documentation=https://github.com/Micka420-collab/vibeos
+DefaultDependencies=no
+Conflicts=umount.target
+Before=umount.target local-fs.target
+
+[Mount]
+What=tmpfs
+Where=${MEMORY_DIR}
+Type=tmpfs
+Options=mode=0700,nosuid,nodev,noexec,size=512M
+EOF
+
+# 2. Ensure it mounts as part of local-fs.target (before services start).
+mkdir -p "${NORMAL_DIR}/local-fs.target.wants"
+ln -sf "../${MOUNT_UNIT}" "${NORMAL_DIR}/local-fs.target.wants/${MOUNT_UNIT}"
+
+# 3. Tell Genesis (and vibed) the mode, and order them after the tmpfs mount.
+for unit in vibeos-genesis.service vibed.service; do
+    dropin_dir="${NORMAL_DIR}/${unit}.d"
+    mkdir -p "${dropin_dir}"
+    cat > "${dropin_dir}/10-amnesic.conf" <<EOF
+[Unit]
+RequiresMountsFor=${MEMORY_DIR}
+
+[Service]
+Environment=VIBEOS_MEMORY_MODE=amnesic
+EOF
+done
+
+exit 0

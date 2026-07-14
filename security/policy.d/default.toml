@@ -16,7 +16,9 @@
 #     it logs the error and exits non-zero (refuses to serve).
 #
 # BUILT-IN HARD DENYLIST: independently of this file, the engine denies in
-# code, for reads AND writes: /var/lib/vibeos/audit/**, /etc/shadow*,
+# code, for reads AND writes: /var/lib/vibeos/audit/**,
+# /var/lib/vibeos/approvals/** (agents must not read or forge approval grants),
+# /etc/shadow*,
 # /etc/gshadow*, **/.ssh/**, **/.gnupg/**, /etc/ssh/* (+ /etc/ssh/ssh_host_*),
 # **/.aws/**, **/.config/gcloud/**,
 # /etc/NetworkManager/system-connections/**, **/.docker/config.json,
@@ -152,6 +154,27 @@ action = "allow"
 reason = "Read-only query against the VibeOS memory store."
 
 [[rule]]
+id = "agent-thinking"
+tools = ["agent.thinking"]
+tier = "T0"
+action = "allow"
+reason = "Read-only, bounded tail of an autonomous session's captured reasoning (memory/reasoning/, written by the supervisor). session_id is charset-validated; no path argument."
+
+[[rule]]
+id = "agent-observability"
+tools = ["agent.sessions", "agents.list"]
+tier = "T0"
+action = "allow"
+reason = "Read-only HUD observability. agent.sessions lists reasoning-session ids (discovery for agent.thinking). agents.list is a per-uid roster derived from the audit trail, CONFINED to the caller's own uid (never another user's activity). Bounded output, rate-limited like any tool."
+
+[[rule]]
+id = "policy-check"
+tools = ["policy.check"]
+tier = "T0"
+action = "allow"
+reason = "Read-only classification of a hypothetical (tool, target) call — returns the policy decision + tier without executing, approving, or touching the approval store. A hint for the governed editor auto-mode (ADR-014); real enforcement stays at execution."
+
+[[rule]]
 id = "memory-append"
 tools = ["memory.append"]
 tier = "T1"
@@ -174,13 +197,37 @@ tools = ["svc.restart"]
 tier = "T2"
 action = "allow"
 approval = "human"
-reason = "Service restarts require human approval; security-critical units can never be restarted by agents."
+reason = "Service restarts require human approval; access-, audit- and approval-critical units can never be restarted by agents (denied BEFORE the approval floor: an agent cannot even queue an approval request for them)."
 
+# Non-negotiable deny-list: a matching unit is DENIED outright (policy.rs
+# apply_rule checks service.denied BEFORE the T2 approval floor), so an agent
+# cannot even put these into the approval queue. Two axes: (1) units whose
+# restart would cut the operator's ACCESS to the machine or to the approval
+# path, and (2) the warden/audit pipeline itself. Glob patterns allowed.
 [rule.services]
 denied = [
-  "vibed.service",             # agents must not restart their own warden
-  "systemd-journald.service",  # log pipeline stays out of reach
-  "auditd.service",            # audit pipeline stays out of reach
+  # Warden + approval mechanism — an agent must never touch what governs it.
+  "vibed.service",              # the policy warden + approval store owner
+  "vibeos-agent@*.service",     # the agent supervisor itself
+  "polkit.service",             # authorization backbone
+  # Audit / log pipeline — tamper resistance.
+  "systemd-journald.service",   # log pipeline stays out of reach
+  "auditd.service",             # audit pipeline stays out of reach
+  # Operator ACCESS — restarting any of these can lock the human out, removing
+  # the very ability to approve or intervene.
+  "sshd.service",               # remote SSH access
+  "NetworkManager.service",     # network (remote access) — common impl
+  "systemd-networkd.service",   # network — alternative impl
+  "display-manager.service",    # the graphical session where approval happens
+  "sddm.service",               # the shipped display manager (concrete alias)
+  "systemd-logind.service",     # login/session management
+  "user@*.service",             # the per-user systemd manager — restarting it
+                                # tears down the operator's session, i.e. the very
+                                # place `vibectl approve` / the HUD run
+  # System bus — the machine (and vibed's own D-Bus calls) depend on it.
+  "dbus-broker.service",        # Fedora 42 system bus
+  "dbus.service",               # alternative bus implementation
+  "dbus.socket",                # the bus is socket-activated: deny the socket too
 ]
 
 # --- Catch-all: everything not explicitly allowed above is denied -----------

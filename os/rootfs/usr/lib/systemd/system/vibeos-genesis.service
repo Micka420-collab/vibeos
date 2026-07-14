@@ -63,6 +63,13 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
 SystemCallArchitectures=native
+# Seccomp-based (NOT mount-namespace): genesis never creates namespaces. Safe
+# alongside the mount-visibility constraint above.
+RestrictNamespaces=yes
+# Deny-list of capabilities genesis must never need, even as root (it creates
+# directories/files and inspects hardware, none of which need these). Same
+# floor as vibed.service.
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_TIME CAP_AUDIT_CONTROL
 
 [Install]
 WantedBy=multi-user.target

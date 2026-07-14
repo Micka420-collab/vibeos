@@ -24,6 +24,7 @@ use tracing::{error, info, warn};
 use vibed::audit::{self, Caller};
 use vibed::mcp;
 use vibed::policy;
+use vibed::ratelimit;
 
 /// MCP unix socket. Parent directory is normally provided by systemd
 /// (`RuntimeDirectory=vibed`); we create it as a fallback for dev runs.
@@ -36,16 +37,51 @@ const SOCKET_GROUP: &str = "vibeos-agents";
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Offline maintenance subcommand, handled before any daemon setup:
+    //   vibed --verify-audit [dir]
+    // Verifies the tamper-evident hash chain of the audit log (across all daily
+    // files in the directory) and prints a JSON report, exiting 0 if intact and
+    // 1 if broken. Usable by an operator (or `vibectl audit verify`) without
+    // stopping the daemon.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--verify-audit") {
+        let dir = args
+            .iter()
+            .position(|a| a == "--verify-audit")
+            .and_then(|i| args.get(i + 1))
+            .map(String::as_str)
+            .unwrap_or(audit::DEFAULT_AUDIT_DIR);
+        let report = audit::verify_chain(Path::new(dir))?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "dir": dir,
+                "records": report.records,
+                "ok": report.ok,
+                "broken_at": report.broken_at,
+                "reason": report.reason,
+            })
+        );
+        std::process::exit(if report.ok { 0 } else { 1 });
+    }
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
     info!("vibed {} starting", env!("CARGO_PKG_VERSION"));
 
+    // Socket and policy paths are fixed in production (the systemd unit and the
+    // image own them). VIBED_SOCKET / VIBED_POLICY_DIR override them for DEV and
+    // the Zed E2E harness only, so a maintainer can run vibed rootless on a
+    // scratch socket + the in-repo policy (see zed/.../scripts/e2e-zed.sh).
+    let policy_dir = std::env::var("VIBED_POLICY_DIR").unwrap_or_else(|_| POLICY_DIR.to_string());
+    let socket_path = std::env::var("VIBED_SOCKET").unwrap_or_else(|_| SOCKET_PATH.to_string());
+
     // Policy loading is FAIL-CLOSED: any unreadable or invalid *.toml in
     // policy.d aborts startup with a non-zero exit. A broken policy must
     // never degrade into a more permissive daemon.
-    let policy = match policy::PolicyEngine::load_dir(Path::new(POLICY_DIR)) {
+    let policy = match policy::PolicyEngine::load_dir(Path::new(&policy_dir)) {
         Ok(engine) => Arc::new(engine),
         Err(e) => {
             error!("{e}");
@@ -53,16 +89,25 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     };
-    let audit = Arc::new(audit::AuditLog::open_default());
+    // VIBED_AUDIT_DIR override: dev/E2E only (same rationale as VIBED_SOCKET),
+    // so a rootless run can write its fail-closed audit trail to a scratch dir
+    // instead of /var/lib/vibeos/audit.
+    let audit = Arc::new(match std::env::var("VIBED_AUDIT_DIR") {
+        Ok(dir) => audit::AuditLog::new(std::path::PathBuf::from(dir)),
+        Err(_) => audit::AuditLog::open_default(),
+    });
+    // Process-wide per-uid rate limiter, shared across all connections so an
+    // agent cannot multiply its budget by opening many sockets.
+    let limiter = Arc::new(ratelimit::RateLimiter::default());
 
     // Socket setup: create runtime dir if needed, remove a stale socket left
     // by a previous unclean shutdown, then bind and restrict permissions.
-    let sock = Path::new(SOCKET_PATH);
+    let sock = Path::new(&socket_path);
     if let Some(parent) = sock.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if sock.exists() {
-        warn!("removing stale socket {}", SOCKET_PATH);
+        warn!("removing stale socket {}", socket_path);
         std::fs::remove_file(sock)?;
     }
     let listener = UnixListener::bind(sock)?;
@@ -86,7 +131,7 @@ async fn main() -> std::io::Result<()> {
     if let Err(e) = std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o660)) {
         warn!("cannot set socket permissions: {e}");
     }
-    info!("MCP server listening on {}", SOCKET_PATH);
+    info!("MCP server listening on {}", socket_path);
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -119,7 +164,15 @@ async fn main() -> std::io::Result<()> {
                         };
                         let policy = Arc::clone(&policy);
                         let audit = Arc::clone(&audit);
-                        tokio::spawn(mcp::handle_connection(stream, policy, audit, caller));
+                        let limiter = Arc::clone(&limiter);
+                        tokio::spawn(mcp::handle_connection(
+                            stream,
+                            policy,
+                            audit,
+                            limiter,
+                            caller,
+                            std::path::PathBuf::from(vibed::approval::APPROVAL_DIR),
+                        ));
                     }
                     Err(e) => {
                         warn!("accept error: {e}");

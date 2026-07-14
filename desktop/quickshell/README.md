@@ -99,20 +99,24 @@ Prérequis d'accès : le socket est `root:vibeos-agents` en `0660` ; l'utilisate
 session doit appartenir au groupe **`vibeos-agents`** pour que le HUD puisse s'y
 connecter. Sinon → état « hors ligne » (voir §5), jamais une erreur.
 
-## 4. Ce qui est mocké en v0.1 vs live en Phase 2
+## 4. Ce qui est live vs encore mocké
 
-| Donnée | v0.1 (livré) | Phase 2 (cible) |
+| Donnée | Statut | Source |
 |---|---|---|
-| État du démon | **mock : toujours « hors ligne »** (honnête : `vibed` tourne bien au boot, mais ce QML n'ouvre encore **aucun** socket) | connexion réelle au socket, reconnexion périodique |
-| Statut système | mock plausible (`mockOsStatus()`) | `tools/call os.status` via le socket |
-| État mémoire | mock plausible (`mockMemoryQuery()`) | `tools/call memory.query` via le socket |
-| Roster des agents + tiers | **mock assumé** : `vibed` v0.1 n'expose aucun outil `agents.list` — cette donnée n'est *pas encore dérivable* du démon | outil `agents.list` (ou flux dérivé des peer credentials de l'audit) à spécifier en Phase 2 |
-| Cadenas « approbation en attente » | mock (déclenché dans le modèle de démo) | flux d'approbation T2/T3 (dialogue Plasma, Phase 2) |
-| Jauge ollama / VRAM | mock (`mockOllama()`) | `ollama ps` (API locale `127.0.0.1:11434`) + `nvidia-smi --query-gpu=...` via `Quickshell.Io.Process` |
+| État du démon | ✅ **live** | connexion réelle au socket (`Quickshell.Io.Socket`), sonde de reconnexion périodique |
+| Statut système | ✅ **live** | `tools/call os.status` (T0) via le socket, poll 5 s |
+| État mémoire | ✅ **live** | `tools/call memory.query` (T0) via le socket |
+| Raisonnement des agents | ✅ **live** | `agent.sessions` (découverte de session) → `agent.thinking` (T0) via le socket ; `[]` tant qu'aucune session autonome n'a capté de raisonnement |
+| Roster des agents + tiers | ✅ **live** | `agents.list` (T0, **confiné à l'uid appelant**, dérivé de l'audit, groupé par pid, soi-même exclu) via le socket ; `name` best-effort `/proc/<pid>/comm` |
+| Cadenas « approbation en attente » | ✅ **live** | `awaiting_approval` d'`agents.list` (une demande T2/T3 en attente pour l'uid) |
+| Jauge ollama / VRAM | ✅ **live** (probe local) | `GET 127.0.0.1:11434/api/ps` (modèle) + `nvidia-smi` via `Quickshell.Io.Process` (VRAM) — indépendant de vibed, `available:false` en cas d'échec |
 
-Le branchement Phase 2 utilisera `Quickshell.Io` (`Socket` sur le chemin Unix +
-`SplitParser` pour le découpage en lignes) ; les emplacements exacts sont marqués
-`TODO(Phase 2)` dans `shell.qml` et `vibed_client.js`.
+Le branchement live utilise `Quickshell.Io` (`Socket` sur le chemin Unix +
+`SplitParser` pour le découpage en lignes) dans `shell.qml` ; les formes de
+requête/réponse et le mappage du raisonnement vivent dans `vibed_client.js`.
+**Non vérifié au runtime ici** : Quickshell n'est pas lançable headless — le
+câblage est construit d'après le pattern documenté et la forme réelle des
+payloads `vibed` ; la validation visuelle attend une session graphique.
 
 ## 5. Dégradation gracieuse — contrat ferme
 
@@ -134,6 +138,7 @@ est absent (c'est le cas nominal de la Phase 1) :
 | `shell.qml` | racine Quickshell : `PanelWindow` frosté (barre haute verre, ombre d'élévation, marque + état global + triptyque) qui compose les widgets, détient l'état et le point de branchement Phase 2 |
 | `AgentStatus.qml` | chips d'agents élevés : anneau-avatar signature (Mauve→Blue), nom, pastille de tier, élévation au survol, tooltip verre (activité/projet/durée) |
 | `PolicyTierIndicator.qml` | pastille de tier en dégradé + anneau conique T0–T3, glyphe cadenas dessiné et pulsation douce quand T2+ attend une approbation |
+| `ReasoningPanel.qml` | 3ᵉ pilier « pourquoi » : chip + popup verre du **raisonnement des agents** (live streaming + historique par session), toggle de capture, note de transparence (résumé fournisseur vs brut local). **Scaffolding Phase 2.5** : ship avec `[]` (règle d'honnêteté) — alimenté par le superviseur d'agent (tap sur flux, jamais le transcript CLI — `docs/DECISIONS.md` ADR-012) et l'outil T0 `agent.thinking` |
 | `OllamaGauge.qml` | anneau VRAM circulaire à dégradé (arc Canvas, cap arrondi) + modèle chargé + Gio, seuils Sky→Peach→Red, « — » honnête hors ligne |
 | `vibed_client.js` | formats JSON-RPC du socket MCP (alignés sur `vibed/src/mcp.rs`) + données mock v0.1 (`available:false` par défaut) |
 

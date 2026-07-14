@@ -1,8 +1,10 @@
 # Registre des décisions d'architecture (ADR)
 
 > Format : **Contexte / Décision / Alternatives considérées / Conséquences**.
-> Statut de toutes les ADR ci-dessous : **acceptée** (2026-07-03).
-> Une ADR n'est jamais modifiée après acceptation : elle est remplacée par une nouvelle ADR qui la référence. Architecture détaillée : [ARCHITECTURE.md](ARCHITECTURE.md).
+> **ADR-001 à 009** : décisions fondatrices **acceptées** (2026-07-03). **ADR-010+**
+> (ouvertes le 2026-07-13) portent chacune leur propre statut en tête — *proposé* /
+> *implémenté (mécanisme)* / *plan* — mis à jour au fil des livraisons.
+> Une ADR n'est jamais modifiée sur le fond après acceptation : elle est remplacée par une nouvelle ADR qui la référence (le statut, lui, est tenu à jour). Architecture détaillée : [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -166,7 +168,7 @@ Moteur de politiques dans `vibed`, configuration déclarative `/etc/vibeos/polic
 
 Décisions possibles : `allow` / `deny` / `ask`. Sémantique d'évaluation : fichiers de `policy.d` chargés en ordre lexicographique, règles évaluées dans l'ordre, **la première règle qui matche gagne** ; aucune correspondance ou outil inconnu → **refus** (default-deny absolu) ; le tier est un **plancher** (une règle `allow` T2/T3 exige `approval = "human"`, sinon erreur de chargement) ; politique invalide → `vibed` refuse de démarrer (fail-closed).
 
-**Chaque appel d'outil** (accordé ou refusé) est écrit dans le journal d'audit append-only `/var/lib/vibeos/audit/vibed.jsonl` (v0.1 : JSONL simple avec identité de l'appelant uid/gid/pid et digest FNV-1a des arguments ; chaînage par hachage et scellement TPM prévus en **Phase 4**, voir [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) §8). L'exécution approuvée sera sandboxée en **Phase 3** (unité systemd transitoire, seccomp, landlock, profil dérivé du tier) ; en v0.1 elle est in-process dans `vibed`.
+**Chaque appel d'outil** (accordé ou refusé) est écrit dans le journal d'audit append-only `/var/lib/vibeos/audit/` (fichier par jour UTC ; identité de l'appelant uid/gid/pid, digest FNV-1a des arguments, **chaîne de hachés SHA-256 continue** vérifiable par `vibed --verify-audit` ; ancrage externe TPM/Rekor et réplication journald prévus en **Phase 4**, voir [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) §8). L'exécution approuvée sera sandboxée en **Phase 3** (unité systemd transitoire, seccomp, landlock, profil dérivé du tier) ; en v0.1 elle est in-process dans `vibed`.
 
 ### Alternatives considérées
 - **Permissions binaires (tout ou rien)** : trop grossier — soit inutilisable, soit dangereux.
@@ -230,3 +232,488 @@ VibeOS vise du matériel de développement réel. La machine de référence n°1
 - (−) Sous Secure Boot, le module NVIDIA non signé ne se charge pas : jusqu'à la signature MOK (Phase 4), le GPU NVIDIA exige Secure Boot désactivé ou l'enrôlement manuel d'une clé — limite documentée dans [HARDWARE.md](HARDWARE.md).
 
 > **Évolution 2026-07-03 — runners natifs** : la CI ne passe plus par l'émulation qemu-user-static ; chaque architecture est construite sur son **runner natif** (`ubuntu-latest` pour amd64, `ubuntu-24.04-arm` pour arm64), jobs ISO compris. La conséquence « CI sensiblement plus lente » est levée ; le build local arm64 depuis un hôte amd64 reste possible via qemu ([BUILD.md](BUILD.md) §2.6).
+
+---
+
+## ADR-010 — Identité de l'appelant par exécutable (`[rule.callers]`) — *proposé, cible Phase 3/4*
+
+**Statut** : proposé (non implémenté). Ouvert le 2026-07-13 à la suite d'une revue.
+
+**Contexte.** Aujourd'hui, l'accès au socket MCP est une **confiance binaire** :
+tout membre du groupe `vibeos-agents` obtient indifféremment la surface T0/T1
+autorisée par la politique. Le moteur ne peut pas exprimer « l'agent local
+`ollama` a moins de droits que Claude Code » : la politique matche sur le **nom
+d'outil**, pas sur **qui appelle**. Or `vibed` capture déjà `SO_PEERCRED`
+(uid/**pid**/gid) à l'accept — le pid permet de résoudre l'exécutable appelant
+via `/proc/<pid>/exe`.
+
+**Décision (cible).** Étendre le schéma de politique d'un sous-tableau optionnel
+`[rule.callers]` : une allow/deny-list d'exécutables (chemins canoniques, ex.
+`/usr/bin/claude`, `/usr/bin/opencode`) et/ou d'uids. À l'accept, `vibed`
+résoudra `/proc/<pid>/exe` (chemin réel, canonicalisé) et l'exposera dans le
+`CallContext` ; une règle sans `callers` reste inconditionnelle (rétrocompatible).
+
+**Conséquences.**
+- (+) Politique par **provenance d'agent** : restreindre les modèles locaux non
+  fiables (jailbreak, poids empoisonnés — cf. [THREAT-MODEL.md](THREAT-MODEL.md)
+  S4) à un sous-ensemble strict, tout en laissant plus de latitude à un client
+  audité.
+- (−) `/proc/<pid>/exe` est **indicatif, pas une preuve d'intégrité** : un
+  binaire renommé/remplacé peut usurper un chemin. C'est un contrôle de *défense
+  en profondeur*, pas une frontière de confiance — à combiner avec la signature
+  d'exécutable (IMA/EVM) en Phase 4+ pour une garantie forte.
+- (−) Fenêtre TOCTOU pid→exe (le pid peut être recyclé) : résolution **à
+  l'accept**, sur la connexion, pas par appel.
+- Ce mécanisme ne remplace **pas** le tiering ni l'approbation humaine T2/T3 ; il
+  affine *qui* peut demander *quoi* en amont.
+
+## ADR-011 — Lecture du journal système par un agent (`log.read`, T0) — *proposé, cible Phase 2*
+
+**Statut** : proposé (non implémenté). Ouvert le 2026-07-13. Concrétise le
+livrable Phase 2 « lecture du journal » resté ouvert précisément *parce qu'il
+demande une conception anti-exfiltration* — ce document est ce garde-fou.
+
+**Contexte.** Un agent qui débogue a besoin de lire les logs (« pourquoi mon
+service a-t-il échoué ? »). Mais les journaux système sont un **canal
+d'exfiltration de premier ordre** ([THREAT-MODEL.md](THREAT-MODEL.md) S2) : les
+services y déversent régulièrement des secrets (clés API échoées par une conf
+maladroite, jetons dans des URL, chaînes de connexion, `environ` sur crash), et
+`journald` agrège **tous les utilisateurs et services**. Exposer bêtement
+`journalctl` à un agent (insider non fiable) reproduirait, en pire, le trou
+cross-user que F1 vient de fermer côté `fs.read`. C'est pourquoi aucun outil de
+lecture de log n'est livré tant que sa forme sûre n'est pas arrêtée.
+
+**Décision (cible, T0 mais sensible à l'exfiltration).** Un outil `log.read`
+**délibérément étroit**, jamais un `journalctl` générique :
+
+1. **Allowlist d'unités uniquement.** Lecture bornée à une liste explicite
+   d'unités (les unités d'agent de l'utilisateur, `vibed` lui-même), déclarée en
+   politique (`[rule.units].allowed`). Défaut : refus. Jamais le journal système
+   complet, jamais l'unité d'un autre utilisateur.
+2. **Sortie bornée.** Dernières *N* lignes (plafond dur, ex. ≤ 200) et plafond
+   d'octets — même discipline anti-DoS que `fs.read`/`fs.list`.
+3. **Passe de rédaction** *best-effort* : masquage des motifs à forte entropie et
+   des marqueurs connus (`*_KEY=`, `Bearer `, `PRIVATE KEY`, `AWS_…`, `password=`)
+   avant retour. **Défense en profondeur, pas une garantie** (cf. conséquences).
+4. **Aucun filtre libre.** Pas d'argument `grep`/regex fourni par l'agent : on
+   n'offre pas « montre-moi les lignes contenant `password` » — l'outil ne doit
+   pas devenir un chercheur de secrets.
+5. **Audité** comme tout appel (unité, nombre de lignes) : une volumétrie ou une
+   cadence anormale est détectable (mitigation S2), et le **rate-limiting par
+   uid** déjà en place borne l'aspiration en boucle.
+
+**Conséquences.**
+- (+) L'agent se débogue seul (ses propres logs de service) sans shell ni lecture
+  de fichiers bruts — utile et gouverné.
+- (−) La **rédaction est heuristique, jamais complète** : le vrai contrôle est
+  l'allowlist d'unités + la sortie bornée + l'audit, *pas* le masquage. Une unité
+  autorisée qui logge un secret le divulguera : l'allowlist doit **exclure** les
+  unités connues pour journaliser du sensible.
+- (−) `journald` mêle les flux ; la sélection par unité (`_SYSTEMD_UNIT=`) doit
+  être stricte (pas de préfixe qui ratisse large).
+- Reste **T0 en tiering** mais **étiqueté sensible à l'exfiltration** dans le
+  catalogue — candidat à un budget de rate-limit dédié plus serré.
+
+**Alternatives écartées.** (a) exposer `journalctl` complet — rejeté
+(exfiltration + cross-user) ; (b) laisser l'agent lire `/var/log` via `fs.read`
+— rejeté (journald est binaire, et la denylist bloque déjà beaucoup ; ne règle
+pas le cross-user) ; (c) pas d'outil de log — statu quo, mais prive l'agent d'un
+auto-diagnostic légitime. La forme (1)–(5) est le compromis retenu ; son
+implémentation attend la revue de l'allowlist et du rédacteur.
+
+## ADR-012 — Capture du raisonnement par tap sur le flux, jamais via le transcript du CLI — *implémenté (mécanisme), cible Phase 2.5*
+
+**Statut** : **mécanisme implémenté** (2026-07-13). Livré : le module `reasoning`
+(store `memory/reasoning/<session>.jsonl`, `append_thinking`/`read_thinking`,
+`safe_session_id` anti-traversal), l'outil MCP **T0 `agent.thinking`**, le
+superviseur `vibectl agent run` qui tape le flux `stream-json` et extrait les
+blocs `thinking` (`supervisor::extract_thinking`), et le composant HUD
+`ReasoningPanel.qml` **branché en live** (`shell.qml` via `Quickshell.Io.Socket`).
+**Reste** : le schéma `stream-json` exact par fournisseur n'est pas contractuel —
+l'extraction est défensive et doit être vérifiée contre la version packagée du CLI
+à l'intégration ; rétention/purge du store à trancher.
+
+**Outil `agent.sessions` (T0, ajouté 2026-07-14).** Découverte de session : liste
+les ids ayant un fichier de raisonnement (`reasoning/*.jsonl`) pour qu'un
+observateur (le HUD) trouve une session à passer à `agent.thinking`. **Retour** :
+`{ sessions: [id...], count, latest }` (ordre lexical, `latest` = dernier id).
+**Sans argument**, lecture seule (aucune écriture, aucune exécution). **Mêmes
+disciplines anti-DoS que tout outil** : atteint via `handle_tools_call`, donc le
+**rate-limiter par uid s'applique en amont** (avant dispatch, agnostique à
+l'outil) et l'appel est audité ; **sortie bornée** (un id court par session
+captée, aucun contenu de raisonnement — c'est `agent.thinking` qui rend le
+contenu, lui-même borné par `tail`/`READ_TAIL_CAP`). Ne crée jamais le store
+(fail-closed si Genesis n'a pas tourné).
+
+**Contexte.** Le raisonnement affiché par les CLI IA (Claude Code compris) n'est,
+pour les modèles actuels, pas persisté sur disque par le CLI lui-même — seule une
+signature cryptographique survit à la session. Le récupérer après coup depuis les
+fichiers du CLI est donc impossible pour l'historique récent, et le format de ces
+fichiers n'est de toute façon **pas contractuel** (plusieurs bugs ouverts sur des
+transcripts corrompus par des blocs `thinking`).
+
+**Décision.** Le superviseur d'agent (Phase 2.5) capte le raisonnement en tapant
+le **flux structuré** (`stream-json`) au moment où il streame, en lecture seule, et
+l'écrit dans un store VibeOS dédié (`/var/lib/vibeos/memory/reasoning/<session>.jsonl`)
+— indépendant du transcript propre du CLI. Lecture gouvernée par un outil T0
+`agent.thinking` (pas un scope de `memory.query` : le raisonnement est de
+l'observabilité, pas un fait appris sur l'humain).
+
+**Alternatives considérées.**
+- Parser les transcripts JSONL du CLI après coup : rejeté — le champ pertinent est
+  vide pour les modèles actuels, et le format n'est pas garanti stable entre versions.
+- Demander au CLI de désactiver son propre effacement du champ `thinking` : hors de
+  portée, ce n'est pas un comportement configurable côté VibeOS.
+
+**Conséquences.**
+- (+) Fonctionne quel que soit le fournisseur, indépendamment de ce qu'il choisit de
+  persister lui-même.
+- (+) Zéro risque de casser la reprise de session du CLI (capture **passive**).
+- (−) Ne capte que ce qui est effectivement streamé — si un fournisseur streame moins
+  que ce qu'il facture (modèles cloud résumés), VibeOS ne peut pas voir plus loin ; la
+  note de transparence du HUD (`ReasoningPanel.qml`) le dit explicitement.
+
+## ADR-013 — Mode autonome permanent (« always-on ») : autonomie totale T0/T1, T2/T3 en file asynchrone, plancher jamais levé — *implémenté (mécanisme), cible Phase 2.5*
+
+**Statut** : **mécanisme implémenté** (2026-07-13). Livré : le superviseur
+`vibectl agent run` (budgets wall-clock + nombre d'appels, kill-switch opérateur
+`agent stop` — jamais un outil MCP), qui tourne l'agent en continu ; les T2/T3
+restent gérés **par `vibed`** (`pending_approval` non bloquant + grant one-shot)
+— le superviseur **ne touche jamais `approval.rs`** et ne lève jamais le plancher.
+**Reste** : l'unité systemd template `vibeos-agent@.service` (mode always-on par
+défaut au démarrage) et l'orchestration fine du basculement T0/T1 quand un T2/T3
+est en attente (aujourd'hui : l'agent reçoit `pending_approval` et poursuit).
+
+Contexte (conservé) — ouvert le 2026-07-13 à la demande explicite
+d'un « mode autonome always pour tout ».
+
+**Contexte.** L'utilisateur veut que l'IA travaille en **autonomie permanente, pour
+tout**. Pris au pied de la lettre — « exécute n'importe quoi, y compris destructif
+et système, sans accord humain » — cela **abaisserait le plancher d'approbation
+T2/T3**, ce que les invariants du projet interdisent explicitement (§7 : purge/
+destruction = T3 humain ; plancher T2/T3 **non abaissable** ; « INTERDIT d'affaiblir
+un invariant »). Un OS où un agent prompt-injecté peut tout faire sans accord est un
+**vecteur de ransomware** — précisément le scénario S1 du [THREAT-MODEL](THREAT-MODEL.md)
+que toute l'architecture combat.
+
+**Décision.** « Always-on » est implémenté comme **autonomie maximale à l'intérieur
+du contrat de capacités existant**, sans jamais toucher au plancher :
+1. Le superviseur tourne **par défaut/en permanence** ; l'agent enchaîne **seul**
+   toute action T0 (observation) et T1 (modification-utilisateur) — l'humain n'est
+   plus dans la boucle **synchrone** du T0/T1.
+2. Une action **T2/T3 ne bloque plus** l'agent : elle est **mise en file** (le store
+   d'approbation déjà livré, borné) et l'agent poursuit son travail T0/T1 ; l'humain
+   approuve/refuse **en différé et en lot** (`vibectl approvals list` → `approve`/
+   `deny`), et l'exécution passe alors par le **grant one-shot existant**, inchangé.
+3. Le **plancher T2/T3 n'est jamais levé** : « autonome pour tout » = « autonome sur
+   tout le T0/T1 sans babysitting », pas « exécute du destructif sans accord ».
+
+**Alternatives considérées.**
+- **Bypass total de l'approbation** (un vrai « exécute tout ») : **rejeté** — viole
+  l'invariant §7 et le plancher non abaissable, transforme l'OS en surface de
+  ransomware sur injection de prompt (S1). Si un opérateur le voulait malgré tout, ce
+  serait un **risque assumé documenté**, jamais un défaut livré en dur.
+- **Auto-approbation par l'agent** : rejeté par construction — un agent ne peut jamais
+  approuver sa propre requête (store root-only + denylist ; F3).
+- **Statu quo** (approbation synchrone bloquante) : conserve la sécurité mais casse
+  l'autonomie longue voulue — d'où la file asynchrone.
+
+**Conséquences.**
+- (+) Autonomie réellement continue : une session de plusieurs heures ne s'arrête pas
+  sur la première action système ; l'humain traite les T2/T3 quand il revient.
+- (+) Aucune régression de sécurité : le chemin T2/T3 est **exactement** celui du mode
+  supervisé (grant one-shot, audit `ok_approved(by_uid=N)`, rate-limiting).
+- (−) Une file d'approbation peut s'accumuler si l'humain est absent longtemps —
+  bornée par le plafond du store d'approbation (purge/dedup/cap déjà livrés).
+- (−) L'agent peut rester « bloqué » sur une tâche qui *exige* un T2/T3 non encore
+  approuvé ; il doit alors basculer sur d'autres travaux T0/T1 (comportement à cadrer
+  côté superviseur).
+
+## ADR-014 — VibeOS pour Zed : gouverner l'agent hébergé via l'adaptateur ACP, jamais le cœur de Zed — *cœur implémenté & vérifié (hors Zed), initiative parallèle*
+
+**Statut** : **cœur implémenté et vérifié sans Zed** (2026-07-13). Investigation du
+code réel menée avant tout patch (§ « Structure de l'adaptateur »), forme de fork
+verrouillée (patch de prototype `canUseTool`). Livré : outil T0 `vibeos:policy.check`
+(vibed), config couches 0/1 (Zed-only), et le paquet `zed/vibeos-claude-acp`
+(couche 2) — `tsc` compile contre l'amont, 17 tests vitest (dont la preuve de
+déterminisme et le client MCP socket), boot ACP headless vérifié (`npm run smoke`).
+**Câblage image (ADR-015)** : étage `zed-agent-builder` livré et gardé off par
+défaut (`ARG WITH_ZED_AGENT=0`) — bundle esbuild vérifié dans le build. **Reste** :
+le **test d'intégration E2E en conditions réelles** (voir `BLOCKERS.md` — binaire
+Claude natif + `vibed` démarré + client ACP/Zed), avant d'activer l'expédition.
+
+**Contexte.** [Zed](https://zed.dev) est un éditeur rapide dont le panneau agent
+parle **ACP** (Agent Client Protocol, `zed-industries/agent-client-protocol`).
+L'adaptateur **`@zed-industries/claude-code-acp`** (`zed-industries/claude-code-acp`,
+TypeScript/Node) fait tourner **Claude Code comme agent ACP** dans Zed : il expose
+les outils de Claude Code (Read/Write/Edit/Bash…) côté éditeur et gère les
+demandes de permission via le flux ACP. Sur VibeOS, on ne veut **pas** d'un agent
+éditeur à l'accès fichier natif illimité : on veut que **toute action système de
+l'agent passe par le moteur de politiques de `vibed`** (tiers T0–T3, audit,
+approbation), comme pour Claude Code en terminal. Et on veut un **mode auto** qui
+supprime le *prompt de permission de l'éditeur* — mais **uniquement** pour ce que
+la politique classe déjà `Allow` (T0/T1), jamais pour T2/T3.
+
+**Décision.** Cibler **l'adaptateur** (`claude-code-acp`), pas le cœur de Zed
+(qu'on ne fork jamais). Livraison en **couches** (ROADMAP § Initiative) :
+
+| Couche | Livrable | Fork ? |
+|---|---|---|
+| **0** | `settings.json` VibeOS pour Zed dans `/etc/skel/.config/zed/` : `context_servers` déclarant `vibed` (serveur MCP `vibeos:*`) + `tool_permissions` par tier. L'agent hébergé voit et appelle `vibeos:*` sans config manuelle | Non (config) |
+| **1** | Fork ciblé : **désactiver** les Read/Write/Edit natifs de l'adaptateur et les **router vers** `vibeos:fs.read`/`fs.write`/`memory.query` de `vibed` — toute action fichier passe par la politique + l'audit | Oui (adaptateur) |
+| **2** | **Mode auto gouverné** : remplacer le prompt de permission ACP par la décision de `vibed`. Un appel classé `Allow` (T0/T1) s'exécute **sans prompt** ; un appel `RequireApproval` (T2/T3) **n'est jamais auto-accepté** — il suit le flux d'approbation existant (`vibed` renvoie `pending`, l'humain approuve hors bande). Le mode auto **consulte** la politique, il ne la remplace jamais | Oui (adaptateur) |
+| **3** | Intégrations éditeur : capture du raisonnement (ADR-012) visible dans Zed, indicateurs de tier, journal de session | Oui (adaptateur) |
+
+**INVARIANTS (repris de la demande, non négociables).**
+1. Le **plancher T2/T3 n'est jamais levé**. Le mode auto ne saute le prompt ACP
+   **que** pour ce que `policy.evaluate()` a déjà classé `Allow` (T0/T1). **Aucun
+   chemin de code du mode auto ne touche `approval.rs`** — l'approbation reste
+   entièrement du ressort de `vibed`.
+2. **Aucune auto-approbation** : un agent ne peut jamais s'auto-approuver, côté
+   éditeur comme côté terminal (store root-only + denylist, cf. F3).
+3. Toute **nouvelle surface d'écriture** ⇒ mise à jour de `THREAT-MODEL.md` dans le
+   même commit.
+4. Rien décrit au présent tant que non implémenté **et testé**.
+
+**Conséquences.**
+- (+) Un seul point de gouvernance (`vibed`) pour l'agent, qu'il tourne en terminal
+  ou dans l'éditeur — même politique, même audit, même approbation.
+- (+) Le mode auto améliore l'ergonomie **sans** affaiblir la sécurité : il ne fait
+  que déléguer la décision de prompt à un moteur qui refuse déjà le T2/T3 sans humain.
+- (−) On maintient un **fork** d'un adaptateur amont qui évolue vite : le fork doit
+  rester **minimal et chirurgical** (points d'interception précis), rebasable, et son
+  périmètre documenté ici pour survivre aux montées de version.
+- (−) Le schéma des outils/permissions de l'adaptateur n'est **pas contractuel** ;
+  d'où l'investigation préalable (§ Structure de l'adaptateur).
+
+### Structure de l'adaptateur (investigation — 2026-07-13)
+
+Cartographie du code réel de `@zed-industries/claude-code-acp` (v0.58.1, TypeScript/
+ESM, Node ≥ 22, tests Vitest), menée **avant tout patch**.
+
+**Fait architectural central.** L'adaptateur **n'implémente ni n'exécute aucun outil**.
+C'est un pont : il lance le **binaire natif du Claude Agent SDK** en sous-process
+(via `query()`, `pathToClaudeCodeExecutable`, `acp-agent.ts:4401`) et traduit entre
+ACP (Zed ⇄ agent) et le SDK. Les outils natifs **`Read`/`Write`/`Edit`/`Bash`/`Grep`/
+`Glob`** tournent **dans ce sous-process**, activés en **preset** (`{ type: "preset",
+preset: "claude_code" }`, `acp-agent.ts:4339`), jamais énumérés. `src/tools.ts` ne fait
+que du **rendu ACP** (pas d'exécution). **Conséquence** : on ne « remplace » pas
+l'implémentation de `Read` ici — elle n'y est pas. On intercepte aux **deux seams que
+l'adaptateur possède**.
+
+**Seam 1 — le hook de permission `canUseTool`** (`acp-agent.ts:3546`, branché
+`acp-agent.ts:4381`). Chaque appel d'outil non déjà tranché y passe (en mode
+`default`/« Manual », tout passe). Il renvoie `{ behavior: "allow", updatedInput }` ou
+`{ behavior: "deny", message }`, et **peut réécrire l'input**. Précédent de
+court-circuit déjà présent : `if (currentModeId === "bypassPermissions") return
+{ behavior: "allow" }` (`acp-agent.ts:3681`) — exactement le patron du « la politique
+dit Allow → pas de prompt ». Sinon → `requestPermissionFromClient()`
+(`acp-agent.ts:3471`) → prompt ACP `session/request_permission`.
+
+**Seam 2 — l'assemblage des options dans `createSession()`** (`acp-agent.ts:4232`) :
+`mcpServers` (`:4376`), `disallowedTools` (`:4406`), `tools`/preset (`:4339`),
+`systemPrompt` (`:4287`), `permissionMode` (`:4380`).
+
+**Points d'attention.** Le mode `auto` natif est un **classifieur par modèle**, PAS un
+moteur de politique — inutilisable tel quel. La config vient des **settings de Claude
+Code** (`~/.claude/settings.json`, `.claude/settings.json`, `.mcp.json` ; `settingSources:
+["user","project","local"]`, `acp-agent.ts:4352`) : clés `permissions.defaultMode`,
+`permissions.allow`/`deny`. Les serveurs **MCP** sont acceptés depuis trois sources
+fusionnées dans `mcpServers` et surfacés via la machinerie MCP de Claude Code
+(`mcp__<serveur>__<outil>`), déjà gouvernés par le même `canUseTool`.
+
+**Plan de fork VibeOS (chirurgical, deux fonctions).**
+- **Couche 0 (aucun code)** : enregistrer le serveur MCP `vibeos:*` là où le
+  sous-process Claude Code le lit (`.mcp.json` / `~/.claude.json` déjà livré) — l'agent
+  hébergé voit `vibeos:*` sans patch. Config Zed dans `/etc/skel/.config/zed/`.
+- **Couche 1** — dans `createSession()` : ajouter `"Read"`, `"Write"`, `"Edit"` (etc.)
+  à `disallowedTools` (`:4406`) et garantir `vibeos:*` dans `mcpServers` (`:4376`), +
+  un `systemPrompt.append` (`:4287`) qui oriente le modèle vers `vibeos:fs.read`/
+  `fs.write`/`memory.query`. Toute action fichier passe alors par `vibed`.
+- **Couche 2** — forker **une seule fonction**, `canUseTool` (`:3546`) : en tête,
+  interroger `vibed` (classer T0–T3) ; `Allow` (T0/T1) → `{ behavior: "allow" }` **sans
+  prompt** ; `RequireApproval` (T2/T3) → laisser tomber dans le
+  `requestPermissionFromClient` existant (prompt/approbation **toujours** montré).
+  `permissionMode` maintenu à `default` pour que tout passe par `canUseTool`.
+  **INVARIANT** : ce chemin **ne touche pas `approval.rs`** et ne décide jamais lui-même
+  d'un T2/T3 — il ne fait que *lire* la classification de `vibed`.
+  - **Primitif requis côté `vibed`** : un outil MCP **T0 `policy.check(tool, target)`**
+    qui renvoie la `Decision` (`allow`/`deny`/`require_approval`) + le tier **sans
+    exécuter, sans consommer de grant, sans toucher `approval.rs`** — c'est ce que
+    `canUseTool` interroge pour décider « prompt ou pas ». **C'est un indice** : la
+    vraie application reste à l'exécution dans `vibed` (denylist, confinement,
+    plancher T2/T3), donc un `policy.check` imparfait ne peut jamais laisser passer
+    un T2/T3 sans approbation — au pire l'éditeur montre/omet un prompt à tort, mais
+    `vibed` gate toujours l'appel réel. Groundwork couche 2, implémentable côté vibed
+    indépendamment du fork.
+
+**Build/run** : `tsc` → `dist/index.js` (`start`), `vitest` pour les tests ; entrée
+`src/index.ts` → `runAcp()` ; `src/lib.ts` réexporte `ClaudeAcpAgent`/`runAcp` (le fork
+peut consommer la classe en bibliothèque plutôt que patcher en place). Amont Apache-2.0.
+
+**Forme de fork retenue (vérifiée sur le source) : un paquet d'EXTENSION qui
+patche le prototype de `canUseTool`, pas un patch de source ni un sous-classement.**
+Vérifié dans le clone :
+- `export class ClaudeAcpAgent` (ligne 937) ; `constructor(client, logger?)`, champs
+  `sessions`/`client`/`clientCapabilities` **publics** ; `canUseTool(sessionId):
+  CanUseTool` **méthode publique** (ligne 3546).
+- MAIS `createSession` est **`private`** (ligne 4232) — non surchargeable ; et
+  `runAcp()` (ligne 6349) **construit la classe de base en interne** (`new
+  ClaudeAcpAgent(new ClientConnection(...))`) avec des internes **non exportés**
+  (`ClientConnection`, `methods`, `acpAgent`, `ndJsonStream`, `runPromptWithCancellation`).
+  Donc un sous-classement ne peut pas s'injecter dans `runAcp` sans recopier ce câblage.
+
+Approche verrouillée, minimale, n'utilisant **que** les symboles exportés
+(`ClaudeAcpAgent`, `runAcp`) : **patcher `ClaudeAcpAgent.prototype.canUseTool`** avant
+d'appeler `runAcp()` — on wrappe l'original (`const base =
+orig.call(this, sid); return async (t, input, ctx) => { … policy.check … return
+base(t, input, ctx) }`). Aucun code amont recopié, **rebasable** par bump de
+dépendance. La désactivation des outils natifs (couche 1) passe par la **config**
+(`permissions.deny` + `CLAUDE_CONFIG_DIR` propre à la session Zed — décision
+**Zed-only**, le terminal garde ses outils), pas par un override de `createSession`
+(privé). Le paquet vit dans `zed/` (hors TCB `vibed`).
+La classification vient de l'outil T0 `vibeos:policy.check` (livré). L'implémentation
+complète (dont les fonctionnalités éditeur innovantes) + le test d'intégration en
+session Zed réelle restent à faire.
+
+**La couche 1 (désactiver les outils natifs) peut être largement CONFIG, pas un
+fork.** L'adaptateur lit les règles `permissions.deny` de Claude Code (`settings.ts`
+§12-22 : `"Read"`, `"Write"`, `"Edit"`, `"Bash(...)"`…), consommées côté SDK. Ajouter
+`permissions.deny: ["Read","Write","Edit"]` dans les settings Claude Code désactive
+donc les outils fichiers natifs **sans fork**, l'agent étant orienté vers `vibeos:fs.*`
+par le `mcpServers` (déjà livré) + un `systemPrompt.append`. Le **fork ne reste donc
+requis que pour la couche 2** (le pont policy dans `canUseTool`).
+**Décision de design ouverte (à trancher côté humain)** : ce `permissions.deny`
+s'appliquerait via les settings Claude Code **partagés** — il désactiverait les outils
+natifs aussi pour **Claude Code en terminal**, pas seulement dans Zed. Gouvernance
+globale cohérente (tout passe par `vibed`) **ou** portée limitée à l'éditeur ? Ce choix,
+et la spec des fonctionnalités innovantes, conditionnent l'écriture de la couche 1/2.
+
+## ADR-015 — Chaîne d'approvisionnement npm de l'extension Zed (`vibeos-claude-acp`) — *plan, cible couche 1/2*
+
+**Statut** : **étage de build livré & vérifié, expédition gardée off** (2026-07-13).
+L'étage `zed-agent-builder` du `Containerfile` implémente cette discipline et
+**construit réellement** (`npm ci --ignore-scripts` → bundle esbuild → smoke ACP
+dans le build) ; il reste **désactivé par défaut** (`ARG WITH_ZED_AGENT=0`, §6)
+jusqu'à la validation E2E. Le plan ci-dessous fixe la discipline ; les points
+réalisés sont marqués.
+
+**Contexte.** L'extension `zed/vibeos-claude-acp` dépend de l'amont npm
+`@agentclientprotocol/claude-agent-acp` (≈ 148 dépendances transitives). npm est
+une surface supply-chain (typosquatting, scripts `postinstall` malveillants,
+dépendance compromise en amont). Le **TCB de VibeOS (`vibed`) reste Rust à
+dépendances minimales** ; l'extension vit **hors du TCB** (`zed/`), mais finira
+par être livrée dans l'image — elle doit donc suivre la même hygiène que les
+autres installs npm du `Containerfile`.
+
+**Décision (même discipline que le `Containerfile`).**
+1. **Lockfile commité** (`package-lock.json`, épinglé) : versions exactes de
+   **toute** la chaîne transitive + **hash d'intégrité SHA-512** par paquet
+   (amont épinglé `0.58.1`). Déjà fait (retiré du `.gitignore`).
+2. **`npm ci --ignore-scripts`** au build : install **reproductible depuis le
+   lockfile** (échoue si le lockfile diverge de `package.json`) et **sans
+   scripts de cycle de vie** — exactement le `--ignore-scripts` déjà utilisé par
+   le `Containerfile` pour les CLIs IA.
+3. **Vérification d'intégrité** : `npm ci` compare le champ `integrity` (SHA-512)
+   du lockfile aux tarballs du registre — toute altération fait échouer l'install.
+4. **Build isolé + bundle (✅ livré, gardé)** : étage multi-stage dédié
+   `zed-agent-builder` (comme `quickshell-builder`/`vibed-builder`) — `npm ci
+   --ignore-scripts` (chaîne complète, reproductible du lockfile), puis **esbuild
+   bundle** `src/` vers **un unique `dist/vibeos-claude-acp.mjs` autonome**.
+   **Décision affinée vs le plan initial** : on **ne ship pas de `node_modules`**
+   du tout — seul le bundle (≈ 1,9 Mo) est copié dans l'image (`/usr/lib/vibeos/
+   zed-agent/`), jamais les ~148 paquets transitifs, les sources TS ni l'outillage
+   dev. Meilleure hygiène que « dist/ + deps prod » : la surface npm reste
+   entièrement **build-time**. `esbuild` vient d'un *optional dependency* binaire
+   (aucune exception `npm rebuild` nécessaire). Le build **boote le bundle
+   headless** et exige une réponse ACP `initialize` avant de le copier (même garde
+   « prouve que ça tourne » que les CLIs shippées).
+5. **Bumps revus** : monter la version amont = un commit revu (rebase du fork, la
+   surface de fork étant volontairement minimale — un patch de prototype, ADR-014) ;
+   `npm audit` sur la chaîne à chaque bump. **Mesuré 2026-07-13** : `npm audit
+   --omit=dev` (chaîne shippée) = **0 vulnérabilité** ; les 5 advisories restantes
+   sont **dev-only** (serveur de dev esbuild, vitest) et n'entrent jamais dans l'image.
+6. **Pas livré tant que non validé (✅ gardé off)** : l'étage existe mais n'est
+   activé que par `--build-arg WITH_ZED_AGENT=1`. Par défaut l'image ne contient
+   **pas** l'extension (un marqueur `NOT-INSTALLED.txt` documente l'état) ; le
+   builder npm est alors **hors du graphe** (podman le saute — coût CI nul). On
+   ne ship pas ~148 paquets non éprouvés dans l'image immuable avant la validation
+   E2E (voir `BLOCKERS.md`). **Décision assumée, pas un oubli — à NE PAS « corriger »
+   par défaut.** Un `WITH_ZED_AGENT=1` par défaut (ou toute PR qui l'active) est une
+   **régression de sécurité** tant que le Tier B Zed n'est pas validé : il ferait
+   entrer une surface npm non éprouvée dans l'image immuable. Le flag ne passe à `1`
+   qu'accompagné d'une preuve de Tier B (session Zed réelle, checklist
+   `scripts/e2e-zed.sh` verte).
+
+**Conséquences.** Chaîne npm **reproductible, vérifiable et build-time seulement**
+(le bundle est le seul artefact shippé), alignée sur la discipline de l'OS ;
+l'extension reste hors TCB sous la même hygiène ; le coût est un lockfile à
+maintenir et un étage de build gardé. **Vérifié** : les deux chemins
+(`WITH_ZED_AGENT=0` → marqueur, `=1` → bundle + smoke ACP dans le build)
+construisent (podman, 2026-07-13).
+
+---
+
+## ADR-016 — `pkg.install` (T2) sur OS immuable : allowlist de cibles AVANT tout backend — *décision : reporté (stub), allowlist non tranchée*
+
+**Statut** : **backend reporté volontairement (2026-07-14)** — `pkg.install` reste
+un **stub** (`requires_approval`, n'installe rien). Cet ADR documente *pourquoi*,
+en appliquant la même exigence qu'à `svc.restart` (ADR/politique) : **pas
+d'exécution réelle sans une allowlist de cibles**, pas seulement une validation de
+syntaxe.
+
+**Contexte — l'installation de paquet n'est pas triviale sur un OS immuable.**
+VibeOS est bootc/OSTree : la racine `/usr` est **en lecture seule** au runtime.
+`dnf install` classique n'existe pas. Trois voies réelles, aux sémantiques très
+différentes :
+1. **`rpm-ostree install <pkg>`** — *package layering* : modifie le **déploiement**
+   (une nouvelle image dérivée), **exige un reboot** pour prendre effet, et
+   persiste à travers les mises à jour. C'est un changement d'**état système
+   durable**, pas une action locale réversible.
+2. **`toolbox`/`distrobox` + `rpm-ostree`-free** : conteneur mutable pour les
+   outils de développement de l'utilisateur — **hors** de l'image immuable, pas un
+   changement système. C'est la voie recommandée pour « installer un paquet »
+   côté utilisateur (docs/ECOSYSTEM.md : mise + distrobox).
+3. **overlay transient** (`rpm-ostree install --apply-live` / transient) — fragile,
+   non persistant, cas limites nombreux.
+
+**La question à trancher (comme le point « allowlist » de `svc.restart`).** *Quels
+paquets, depuis quels dépôts, un agent peut-il installer ?* Sous-questions non
+résolues :
+- **Layering vs conteneur** : un agent doit-il pouvoir *layerer* dans l'image
+  immuable (change le système, reboot) ou seulement installer dans un
+  `distrobox` (n'affecte pas le système gouverné) ? Le second est bien plus sûr
+  et cohérent avec l'immutabilité, mais alors `pkg.install` (T2 système) n'est
+  peut-être **pas le bon outil** — ce serait un `container.pkg.install` (T1 ?).
+- **Allowlist de paquets** : globs sur les noms (`[rule.packages].allowed/denied`,
+  même patron que `[rule.paths]`/`[rule.services]`), ou allowlist de **dépôts**
+  signés seulement, ou les deux ?
+- **Dépôts** : seulement les repos Fedora/RPM Fusion épinglés et signés de l'image,
+  jamais un repo arbitraire fourni par l'agent (sinon = vecteur supply-chain).
+- **Reboot** : `pkg.install` par layering ne « marche » qu'au prochain boot —
+  quelle UX/sémantique d'audit pour une action à effet différé ?
+
+**Décision.** **Ne pas implémenter le backend cette nuit.** La réponse à « quelle
+allowlist » n'est **pas claire** (le choix layering-vs-conteneur change la nature
+même de l'outil et son tier). Implémenter une exécution `rpm-ostree` réelle sans
+cette allowlist violerait l'invariant « aucune nouvelle capacité d'exécution réelle
+sans allowlist de cibles ». Le stub reste ; `pkg.install` (T2) est déjà **refusé
+sans approbation humaine** par la politique, donc rien n'est exposé.
+
+**Chemin quand ce sera repris (Phase 4).**
+1. Trancher **layering (système, T2) vs distrobox (utilisateur, T1)** — probablement
+   les deux outils distincts, pas un seul `pkg.install` ambigu.
+2. Ajouter un champ `package` à `CallContext` (comme `path`/`service`) et une
+   sous-table `[rule.packages]` (allowlist de noms + allow-list de **dépôts signés**
+   uniquement), évaluée **avant** le floor T2 — un paquet/dépôt hors allowlist =
+   `Deny`, pas même une file d'approbation (exactement comme `svc.restart`).
+3. Backend `rpm-ostree` par **chemin absolu, env vidé, nom de paquet validé**
+   (anti-injection, `--`), sémantique de reboot explicite dans le retour et l'audit.
+4. Test sur la politique livrée : un paquet hors allowlist / un dépôt non signé →
+   `Deny` ; un paquet allowlisté → `RequireApproval`.
+
+**Conséquences.** (+) On ne ship pas une capacité d'installation système à demi
+gouvernée. (+) La cohérence avec `svc.restart` (allowlist de cibles avant le floor)
+est préservée pour le jour de l'implémentation. (−) `pkg.install` reste non
+fonctionnel — mais il l'était déjà (stub), et l'alternative utilisateur (distrobox)
+existe hors gouvernance système.

@@ -1,10 +1,11 @@
-// vibed_client.js — HUD-side client stub for the vibed MCP socket.
+// vibed_client.js — HUD-side client for the vibed MCP socket.
 //
-// STATUS: this module documents the exact wire format and serves MOCK data.
-// No socket is opened anywhere yet — /usr/bin/vibed IS shipped in the image
-// and runs at boot (Phase 2), but the HUD live wiring is still to be coded.
-// TODO(Phase 2): wire the request builders below to a
-// Quickshell.Io Socket in shell.qml (see the sketch in shell.qml's header).
+// STATUS: LIVE. shell.qml opens a Quickshell.Io Socket on SOCKET_PATH and drives
+// the request builders + parsers below (os.status, memory.query, agent.sessions
+// -> agent.thinking). The `reasoningToLive` mapper turns agent.thinking into the
+// ReasoningPanel shape. Only `mockOllama()` (an honest `available:false` default)
+// remains from the mock era; the other mock* functions below are kept ONLY as
+// wire-shape reference and are no longer called by the shell.
 //
 // ---------------------------------------------------------------------------
 // WIRE FORMAT — must stay in sync with vibed/src/mcp.rs
@@ -153,6 +154,56 @@ function parseToolResult(msg) {
     } catch (e) {
         return { tool: tool, ok: true, data: text };
     }
+}
+
+// Map an agent.thinking payload ({ session_id, lines:[{ts_unix,block:{kind,text}}] })
+// into the ReasoningPanel `live` shape ([{ sessionId, provider, model, raw,
+// redacted, streaming, text }]). One entry for the tailed session. Defensive:
+// unknown block shapes contribute no text; provider/model are not carried by the
+// reasoning record (the supervisor knows them, the store does not yet) so they
+// stay empty — the panel degrades gracefully. Returns [] when there is nothing.
+function reasoningToLive(data) {
+    if (!data || !data.lines || data.lines.length === 0) return [];
+    var text = "";
+    var redacted = false;
+    var lastKind = "";
+    for (var i = 0; i < data.lines.length; ++i) {
+        var block = data.lines[i] && data.lines[i].block;
+        if (!block) continue;
+        lastKind = block.kind || lastKind;
+        if (block.kind === "redacted_thinking") { redacted = true; continue; }
+        if (typeof block.text === "string") text += block.text;
+    }
+    if (text === "" && !redacted) return [];
+    return [{
+        sessionId: data.session_id || "",
+        provider: "",            // not in the reasoning record yet (honest blank)
+        model: "",
+        raw: false,              // cloud summary; only a local ollama run is raw
+        redacted: redacted,
+        streaming: lastKind === "thinking_delta",
+        text: text
+    }];
+}
+
+// Map an agents.list payload ({ agents:[{ uid,pid,name,tier,activity,
+// awaiting_approval,last_seen_unix,idle_seconds,calls }], ... }) into the
+// AgentStatus chip shape ([{ name, tier, awaitingApproval, activity, project,
+// elapsed }]). The roster is already confined to the caller's uid by vibed, so
+// the HUD (running as the session user) receives only that user's agents.
+function agentsListToRoster(data) {
+    if (!data || !data.agents || data.agents.length === 0) return [];
+    return data.agents.map(function (a) {
+        var idle = (typeof a.idle_seconds === "number") ? a.idle_seconds : null;
+        return {
+            name: a.name || "agent",
+            tier: (typeof a.tier === "number") ? a.tier : 0,
+            awaitingApproval: a.awaiting_approval === true,
+            activity: a.activity || "idle",
+            project: "",                                   // not derivable yet
+            elapsed: idle !== null ? ("actif il y a " + idle + "s") : ""
+        };
+    });
 }
 
 // ---------------------------------------------------------------------------

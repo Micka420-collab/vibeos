@@ -6,12 +6,14 @@
 //!
 //! Call pipeline — no exceptions:
 //!   1. path/service arguments are extracted and lexically normalized;
-//!   2. the BUILT-IN hard denylist is checked in code, regardless of policy;
-//!   3. `policy::evaluate(tool, tier, ctx)` -> Allow | Deny | RequireApproval
+//!   2. per-uid rate limiting (token bucket, SO_PEERCRED): over-limit calls are
+//!      refused fail-closed and audited (`rate_limited`), never executed;
+//!   3. the BUILT-IN hard denylist is checked in code, regardless of policy;
+//!   4. `policy::evaluate(tool, tier, ctx)` -> Allow | Deny | RequireApproval
 //!      (first matching rule wins, absolute default-deny, T2/T3 floor);
-//!   4. `audit::record(...)` with the caller identity (SO_PEERCRED) —
+//!   5. `audit::record(...)` with the caller identity (SO_PEERCRED) —
 //!      fail-closed on the Allow path;
-//!   5. execution (only if allowed), then a second audit record with the
+//!   6. execution (only if allowed), then a second audit record with the
 //!      final outcome.
 //!
 //! v0.1 honesty note: tools run in-process under `spawn_blocking`. Per-tool
@@ -31,12 +33,6 @@ use crate::policy::{CallContext, Decision, PolicyEngine, Tier};
 
 /// Memory store created by vibeos-genesis.service (see memory/genesis.sh).
 pub const MEMORY_DIR: &str = "/var/lib/vibeos/memory";
-/// Security toolkit manifest shipped in the image (os/rootfs). Read-only,
-/// consulted by `sectools.list`; see docs/SECURITY-TOOLKIT.md.
-const SECTOOLS_MANIFEST: &str = "/usr/share/vibeos/security-tools.tsv";
-/// Standard binary directories probed to tell whether a toolkit entry is
-/// actually installed (pure filesystem stat — sectools.list never executes).
-const SECTOOLS_BIN_DIRS: [&str; 4] = ["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
 /// MCP protocol revision advertised in `initialize`.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 /// Hard cap on file content returned by fs.read.
@@ -48,31 +44,46 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// `O_NOFOLLOW` (Linux, `bits/fcntl-linux.h`): open() fails with ELOOP if the
 /// final path component is a symbolic link, instead of silently following it.
 /// Defined here to keep the crate free of a libc dependency.
-const O_NOFOLLOW: i32 = 0x20000;
+pub(crate) const O_NOFOLLOW: i32 = 0x20000;
+/// `O_NONBLOCK` (Linux): open() does not block. Belt-and-suspenders for fs.read
+/// against a FIFO — even if a regular file is swapped for a FIFO in the TOCTOU
+/// window after the file-type check, the open returns instead of hanging the
+/// worker thread forever (a FIFO with no writer would otherwise block).
+const O_NONBLOCK: i32 = 0x800;
 /// Per-file cap when scanning memory content in memory.query.
-const MAX_MEMORY_SCAN_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_MEMORY_SCAN_BYTES: usize = 64 * 1024;
+/// Chars of content returned per match by memory.query (so an agent can read
+/// the memory in ONE call, not query + fs.read). Bounded to keep responses small.
+pub(crate) const MEMORY_SNIPPET_CHARS: usize = 1024;
 /// Hard cap on entries returned by one fs.list call.
 const MAX_LIST_ENTRIES: usize = 500;
 /// Upper bound on files walked by memory.query.
-const MAX_MEMORY_FILES: usize = 200;
+pub(crate) const MAX_MEMORY_FILES: usize = 200;
 /// Hard cap on one serialized memory.append line, newline included (anti-DoS:
 /// an agent cannot balloon the memory store with a single call).
-const MAX_APPEND_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_APPEND_BYTES: usize = 16 * 1024;
 /// Journal event types an AGENT may append via memory.append. The remaining
-/// types of docs/MEMORY.md §3.5 (`genesis`, `boot`, `tool_call`, `purge`) are
-/// reserved for the system itself (genesis.sh, vibed, vibectl) and refused.
-const JOURNAL_AGENT_TYPES: [&str; 5] = [
+/// types of docs/MEMORY.md §3.5 (`genesis`, `boot`, `tool_call`, `purge`,
+/// `autonomous_session`) are reserved for the system itself (genesis.sh, vibed,
+/// the agent supervisor) and refused to agents.
+pub(crate) const JOURNAL_AGENT_TYPES: [&str; 5] = [
     "observation",
     "decision",
     "preference",
     "project_seen",
     "error",
 ];
-const JOURNAL_RESERVED_TYPES: [&str; 4] = ["genesis", "boot", "tool_call", "purge"];
+pub(crate) const JOURNAL_RESERVED_TYPES: [&str; 5] = [
+    "genesis",
+    "boot",
+    "tool_call",
+    "purge",
+    "autonomous_session",
+];
 /// Memory sub-scopes addressable by memory.query's `scope` argument, mapped to
 /// their location in the store (relative path, is_directory). Keep in sync
 /// with the layout in docs/MEMORY.md §3.
-const MEMORY_SCOPES: [(&str, &str, bool); 6] = [
+pub(crate) const MEMORY_SCOPES: [(&str, &str, bool); 6] = [
     ("identity", "identity.toml", false),
     ("hardware", "hardware.json", false),
     ("user", "user", true),
@@ -86,6 +97,24 @@ const MEMORY_SCOPES: [(&str, &str, bool); 6] = [
 /// (rule fs-write-user) and vibed.service (`ReadWritePaths=/var/home`).
 const USER_WRITE_PREFIXES: [&str; 2] = ["/home/", "/var/home/"];
 
+/// System locations fs.read / fs.list may reach OUTSIDE the caller's own home.
+/// vibed runs as root, so without confinement a T0 read would expose every
+/// user's personal files (docs, photos…) to any agent. Reads are therefore
+/// restricted to the caller's own home (resolved from SO_PEERCRED) OR these
+/// non-personal system trees. The built-in denylist still applies on top (it
+/// carves the secrets — /etc/shadow, ~/.ssh, /proc/**/environ… — back out).
+/// Deliberately EXCLUDED: /home and /var/home at large (other users), /root,
+/// /tmp and /var (other users' state), /boot (denylisted). /var/lib/vibeos is
+/// the machine's own state (memory readable here too; audit stays denylisted).
+const SYSTEM_READ_PREFIXES: [&str; 6] = [
+    "/etc/",
+    "/usr/",
+    "/proc/",
+    "/sys/",
+    "/run/",
+    "/var/lib/vibeos/",
+];
+
 /// BUILT-IN hard denylist, enforced in code regardless of what the loaded
 /// policy says (defense in depth: a mistaken or tampered policy drop-in can
 /// never expose these). Applies to reads AND writes.
@@ -97,6 +126,7 @@ const USER_WRITE_PREFIXES: [&str; 2] = ["/home/", "/var/home/"];
 /// `/proc/<pid>/task/<tid>/environ` sibling-thread bypass).
 const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "/var/lib/vibeos/audit/**", // audit trail: agents must never see or probe it
+    "/var/lib/vibeos/approvals/**", // approval store: agents must not read or forge grants
     "/etc/shadow*",             // /etc/shadow and /etc/shadow- (password hashes)
     "/etc/gshadow*",            // group password hashes
     "**/.ssh/**",               // SSH key material, wherever it lives
@@ -170,7 +200,13 @@ pub async fn handle_connection(
     stream: UnixStream,
     policy: Arc<PolicyEngine>,
     audit: Arc<AuditLog>,
+    limiter: Arc<crate::ratelimit::RateLimiter>,
     caller: Caller,
+    // Root of the human-approval store. Production passes
+    // `crate::approval::APPROVAL_DIR`; tests inject a scratch dir so the whole
+    // require_approval -> approve -> grant-consumed -> Allow chain is exercisable
+    // over the real socket without touching `/var/lib/vibeos`.
+    approval_dir: std::path::PathBuf,
 ) {
     info!(
         "MCP client connected (uid={:?} gid={:?} pid={:?})",
@@ -225,7 +261,8 @@ pub async fn handle_connection(
         let response = match serde_json::from_str::<Request>(line) {
             Ok(request) => {
                 let is_notification = request.id.is_none();
-                let response = dispatch(request, &policy, &audit, caller).await;
+                let response =
+                    dispatch(request, &policy, &audit, &limiter, caller, &approval_dir).await;
                 if is_notification {
                     None
                 } else {
@@ -297,7 +334,9 @@ async fn dispatch(
     request: Request,
     policy: &Arc<PolicyEngine>,
     audit: &AuditLog,
+    limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
+    approval_dir: &std::path::Path,
 ) -> Value {
     debug!("dispatch method={}", request.method);
     let id = request.id.unwrap_or(Value::Null);
@@ -318,7 +357,18 @@ async fn dispatch(
         "notifications/initialized" => result_response(id, json!({})),
         "ping" => result_response(id, json!({})),
         "tools/list" => result_response(id, json!({ "tools": list_tools() })),
-        "tools/call" => handle_tools_call(id, request.params, policy, audit, caller).await,
+        "tools/call" => {
+            handle_tools_call(
+                id,
+                request.params,
+                policy,
+                audit,
+                limiter,
+                caller,
+                approval_dir,
+            )
+            .await
+        }
         other => error_response(id, -32601, &format!("method not found: {other}")),
     }
 }
@@ -328,7 +378,9 @@ async fn handle_tools_call(
     params: Value,
     policy: &Arc<PolicyEngine>,
     audit: &AuditLog,
+    limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
+    approval_dir: &std::path::Path,
 ) -> Value {
     let name = params
         .get("name")
@@ -366,12 +418,49 @@ async fn handle_tools_call(
         },
         None => None,
     };
-    let service = args.get("unit").and_then(Value::as_str);
+    let raw_service = args.get("unit").and_then(Value::as_str);
+    // Canonicalize the unit name for svc.* tools BEFORE the policy decision, so
+    // the deny-list (which lists fully-qualified units like "sshd.service")
+    // matches a bare "sshd" too. Without this an agent bypasses the deny-list by
+    // dropping the ".service" suffix: the tool canonicalizes the name only
+    // internally, AFTER the decision, so "vibed"/"sshd" would slip past the deny
+    // rule and reach the T2 approval queue instead of an outright Deny. An
+    // invalid unit falls through to the raw name (execution rejects it anyway).
+    let canonical_unit: Option<String> = if name.starts_with("svc.") {
+        raw_service.and_then(|u| crate::tools::svc::validate_unit_name(u).ok())
+    } else {
+        None
+    };
+    let service = canonical_unit.as_deref().or(raw_service);
 
     // Human-readable, non-secret target recorded in the audit trail so an
     // action's subject (which file / unit / package) is recoverable in
     // forensics — never any file content or secret argument.
     let target = audit_target(&name, normalized_path.as_deref(), service, &args);
+
+    // Per-uid rate limiting: bound a runaway or compromised agent BEFORE any
+    // execution, memory write or approval-store growth. Over-limit calls are
+    // refused fail-closed and audited (the rejection itself is a security
+    // signal), never executed. Keyed by the unforgeable SO_PEERCRED uid.
+    if !limiter.check(caller.uid, now_epoch_secs()) {
+        try_audit(
+            audit,
+            &name,
+            &args,
+            target.as_deref(),
+            Decision::Deny,
+            "rate_limited",
+            caller,
+        );
+        return tool_result(
+            id,
+            format!(
+                "policy: rate limit exceeded for uid {:?}; slow down and retry shortly",
+                caller.uid
+            ),
+            true,
+        );
+    }
 
     // BUILT-IN hard denylist: checked in code, before and regardless of the
     // loaded policy. A policy file can never open these paths back up.
@@ -402,6 +491,65 @@ async fn handle_tools_call(
     };
     let decision = policy.evaluate(&name, tier, ctx);
 
+    // Human-in-the-loop: a T2/T3 RequireApproval becomes Allow ONLY if the
+    // operator has already granted this exact (tool, target, uid) call. The
+    // grant is one-shot and short-lived — consumed here so it can never be
+    // replayed. An agent cannot reach the approval store (root-only + denylist),
+    // so it can never approve its own request. The consumed grant carries the
+    // approver's uid, which we fold into the audit outcome: the grant file is
+    // deleted on consumption, so the tamper-evident log is the ONLY durable
+    // record of who authorized the action.
+    //
+    // ORDERING (deliberate, see below): the grant is CONSUMED here, before the
+    // `started_approved` audit write on the Allow path. That means a rare audit
+    // failure (disk-full / I/O error — itself a fail-closed catastrophe that
+    // refuses execution anyway) burns the operator's single approval, forcing a
+    // re-approval. We accept that over the alternative: consuming only AFTER the
+    // audit would require a peek-then-delete split, which reopens a double-
+    // execution window (two concurrent identical approved calls could both pass
+    // the peek before either deletes). The one-shot guarantee — the atomic unlink
+    // is the execution gate — is worth more than saving one approval in an
+    // already-failing-disk state. Not silent debt: this is the documented choice.
+    //
+    // The blocking std::fs of the approval store runs on a blocking thread
+    // (spawn_blocking), exactly like `execute_tool` below — never on the reactor.
+    let consumed = if matches!(decision, Decision::RequireApproval) {
+        let name_g = name.clone();
+        let target_g = target.clone();
+        let uid_g = caller.uid;
+        let now_g = now_epoch_secs();
+        let dir_g = approval_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            crate::approval::check_and_consume_grant(
+                &dir_g,
+                &name_g,
+                target_g.as_deref(),
+                uid_g,
+                now_g,
+            )
+        })
+        .await
+        .unwrap_or(None) // a panic in the blocking task -> no grant (fail-closed)
+    } else {
+        None
+    };
+    let approved = consumed.is_some();
+    let decision = if approved { Decision::Allow } else { decision };
+    let suffix = consumed
+        .as_ref()
+        .map(|c| approver_suffix(c.approver_uid))
+        .unwrap_or_default();
+    let started_outcome = if approved {
+        format!("started_approved{suffix}")
+    } else {
+        "started".to_string()
+    };
+    let ok_outcome = if approved {
+        format!("ok_approved{suffix}")
+    } else {
+        "ok".to_string()
+    };
+
     match decision {
         Decision::Deny => {
             try_audit(
@@ -416,6 +564,28 @@ async fn handle_tools_call(
             tool_result(id, format!("policy: tool '{name}' is denied"), true)
         }
         Decision::RequireApproval => {
+            // No fresh grant: record a pending request the operator can act on
+            // with `vibectl approve <id>`, and tell the agent to wait. The
+            // store's blocking std::fs runs on a blocking thread, not the reactor.
+            let name_r = name.clone();
+            let target_r = target.clone();
+            let tier_r = tier.map(Tier::as_str).unwrap_or("?").to_string();
+            let uid_r = caller.uid;
+            let now_r = now_epoch_secs();
+            let dir_r = approval_dir.to_path_buf();
+            let request_id = tokio::task::spawn_blocking(move || {
+                crate::approval::request_approval(
+                    &dir_r,
+                    &name_r,
+                    target_r.as_deref(),
+                    &tier_r,
+                    uid_r,
+                    now_r,
+                )
+            })
+            .await
+            .ok()
+            .and_then(Result::ok);
             try_audit(
                 audit,
                 &name,
@@ -426,12 +596,16 @@ async fn handle_tools_call(
                 caller,
             );
             let tier_str = tier.map(Tier::as_str).unwrap_or("?");
+            let how = match &request_id {
+                Some(rid) => format!(
+                    "a human approval was requested (id {rid}); the operator runs \
+                     `vibectl approve {rid}`, then re-issue this call"
+                ),
+                None => "the request was recorded in the audit log".to_string(),
+            };
             tool_result(
                 id,
-                format!(
-                    "policy: tool '{name}' (tier {tier_str}) requires human approval; \
-                     the request was recorded in the audit log (approval workflow: see ROADMAP.md)"
-                ),
+                format!("policy: tool '{name}' (tier {tier_str}) requires human approval; {how}"),
                 true,
             )
         }
@@ -443,7 +617,7 @@ async fn handle_tools_call(
                 &args,
                 target.as_deref(),
                 decision,
-                "started",
+                &started_outcome,
                 caller,
             ) {
                 return tool_result(
@@ -456,9 +630,16 @@ async fn handle_tools_call(
             let tool_args = args.clone();
             let policy_exec = Arc::clone(policy);
             let caller_exec = caller;
+            let audit_dir_exec = audit.dir().to_path_buf();
             // Tool bodies use blocking std::fs; keep the reactor responsive.
             let executed = tokio::task::spawn_blocking(move || {
-                execute_tool(&tool_name, &tool_args, &policy_exec, caller_exec)
+                execute_tool(
+                    &tool_name,
+                    &tool_args,
+                    &policy_exec,
+                    caller_exec,
+                    &audit_dir_exec,
+                )
             })
             .await;
             match executed {
@@ -469,9 +650,16 @@ async fn handle_tools_call(
                         &args,
                         target.as_deref(),
                         decision,
-                        "ok",
+                        &ok_outcome,
                         caller,
                     );
+                    // Feed the machine's own memory: record executed,
+                    // state-changing actions as a reserved `tool_call` journal
+                    // event (distinct from the forensic audit log). T0 reads and
+                    // the memory.* tools themselves are excluded to keep the
+                    // biography meaningful and avoid meta-noise. Best-effort:
+                    // a failure here never fails the (already-succeeded) call.
+                    try_journal_tool_call(&name, tier, target.as_deref(), caller);
                     tool_result(id, text, false)
                 }
                 Ok(Err(message)) => {
@@ -526,6 +714,53 @@ fn audit_target(
     None
 }
 
+/// Best-effort: record an executed, state-changing tool call in the machine's
+/// memory journal (reserved `tool_call` event). Only T1+ tools qualify (T0 is
+/// read-only, not biography) and the `memory.*` tools are excluded (they are
+/// themselves memory writes/reads — journaling them would be meta-noise and, in
+/// the append case, double every entry). Never fails the caller.
+fn try_journal_tool_call(name: &str, tier: Option<Tier>, target: Option<&str>, caller: Caller) {
+    let is_state_changing = matches!(tier, Some(Tier::T1) | Some(Tier::T2) | Some(Tier::T3));
+    if !is_state_changing || name.starts_with("memory.") {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let tier_str = tier.map(Tier::as_str).unwrap_or("?");
+    if let Err(e) = crate::tools::memory::journal_tool_call_at(
+        std::path::Path::new(MEMORY_DIR),
+        now,
+        name,
+        target,
+        tier_str,
+        caller,
+    ) {
+        warn!("memory journal (tool_call) write failed for '{name}': {e}");
+    }
+}
+
+/// Current unix time in whole seconds (0 on a clock error — the approval store
+/// then treats any grant as effectively immediate/expired, fail-safe).
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Audit-outcome suffix identifying WHO approved a consumed grant, appended to
+/// the `*_approved` outcomes. The grant file is deleted on consumption, so this
+/// is what preserves the operator identity in the tamper-evident log. `?` when
+/// the approver uid was not recorded at approve time.
+fn approver_suffix(approver_uid: Option<u32>) -> String {
+    match approver_uid {
+        Some(uid) => format!("(by_uid={uid})"),
+        None => "(by_uid=?)".to_string(),
+    }
+}
+
 fn try_audit(
     audit: &AuditLog,
     tool: &str,
@@ -560,8 +795,10 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
         (
             "fs.read",
             Tier::T0,
-            "Read a file as UTF-8 (lossy), truncated at 256 KiB; audit trail, \
-             secret stores and key material are denied by the built-in denylist",
+            "Read a file as UTF-8 (lossy), truncated at 256 KiB. Confined to the CALLER's own \
+             home (SO_PEERCRED) plus non-personal system trees (/etc /usr /proc /sys /run \
+             /var/lib/vibeos); cross-user personal files are refused. Secret stores and key \
+             material are denied by the built-in denylist on top",
             json!({"type": "object", "required": ["path"],
                    "properties": {"path": {"type": "string"}}}),
         ),
@@ -570,7 +807,8 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             Tier::T0,
             "List one directory (non-recursive, capped at 500 entries): name, type \
              (file/dir/symlink/other) and size for regular files. Symlinks are reported, \
-             never followed; the same denylist as fs.read applies",
+             never followed. Same confinement as fs.read (caller's own home + system trees) \
+             and the same built-in denylist",
             json!({"type": "object", "required": ["path"],
                    "properties": {"path": {"type": "string"},
                                   "limit": {"type": "integer", "minimum": 1}}}),
@@ -592,7 +830,9 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
         (
             "svc.restart",
             Tier::T2,
-            "Restart a systemd unit (v0.1 stub: always requires approval)",
+            "Restart a systemd unit via systemctl (T2: human approval required — the \
+             operator grants once with `vibectl approve`, then the unit is actually \
+             restarted and read back to confirm; strict unit-name validation)",
             json!({"type": "object", "required": ["unit"],
                    "properties": {"unit": {"type": "string"}}}),
         ),
@@ -620,8 +860,10 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
         (
             "memory.query",
             Tier::T0,
-            "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match \
-             files, optionally restricted to one scope and capped by limit (docs/MEMORY.md §9)",
+            "Query the VibeOS memory store (/var/lib/vibeos/memory): substring-match files by \
+             name and content, returning each match WITH a bounded content snippet (read the \
+             memory in one call, no follow-up fs.read). Optional 'scope' \
+             (identity/hardware/user/projects/journal/knowledge) and 'limit' (docs/MEMORY.md §9)",
             json!({"type": "object",
             "properties": {
                 "query": {"type": "string"},
@@ -635,14 +877,73 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             "memory.append",
             Tier::T1,
             "Append ONE entry to the VibeOS memory store — strictly additive, no delete or \
-             rewrite. Writable scopes in v0.2: 'journal' (entry: type/source/data) and \
-             'knowledge' (entry: subject/fact/source[/confidence]); vibed stamps ts (and the \
-             fact id). 'user' and 'projects' are a Phase 2/3 remainder (docs/MEMORY.md §9)",
+             rewrite, no path argument (the file is scope-derived). Scopes: 'journal' \
+             (entry: type/source/data), 'knowledge' (entry: subject/fact/source[/confidence]), \
+             'user' (entry: key/value/source — append-only update, current profile = fold, \
+             last-write-wins per key), 'projects' (entry: path/source[/name/languages/vcs/\
+             summary/last_opened] — fold per path). vibed stamps ts (and the fact id). \
+             NOTE: 'source' is a self-declared label, NOT trusted provenance — the \
+             authoritative caller identity is the audit log's SO_PEERCRED uid. Never write \
+             secrets here. See docs/MEMORY.md §9",
             json!({"type": "object", "required": ["scope", "entry"],
             "properties": {
                 "scope": {"type": "string",
                           "enum": ["journal", "knowledge", "user", "projects"]},
                 "entry": {"type": "object"}
+            }}),
+        ),
+        (
+            "agent.thinking",
+            Tier::T0,
+            "Read a bounded tail of an autonomous session's captured reasoning \
+             (/var/lib/vibeos/memory/reasoning/<session-id>.jsonl), written by the agent \
+             supervisor by tapping the CLI stream (ADR-012) — NOT the CLI's own transcript. \
+             Required 'session_id' (charset [A-Za-z0-9._-], no path); optional 'tail' \
+             (default 100, max 500 lines) and 'since' (unix seconds). Observability, not a \
+             learned fact — distinct from memory.query. Absent session -> empty result.",
+            json!({"type": "object", "required": ["session_id"],
+            "properties": {
+                "session_id": {"type": "string"},
+                "tail": {"type": "integer", "minimum": 1},
+                "since": {"type": "integer", "minimum": 0}
+            }}),
+        ),
+        (
+            "agent.sessions",
+            Tier::T0,
+            "List the autonomous-session ids that have captured reasoning \
+             (/var/lib/vibeos/memory/reasoning/*.jsonl). Returns { sessions: [id...], \
+             count, latest } (lexical order; 'latest' is the last id). Read-only \
+             discovery so an observer (the HUD) can find a session to feed to \
+             agent.thinking. No arguments.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        (
+            "agents.list",
+            Tier::T0,
+            "Roster of YOUR OWN recently active agent processes, from the audit \
+             trail — CONFINED to your uid (never another user's activity), your own \
+             process excluded. Optional 'window_seconds' (default 120, max 3600). \
+             Returns { agents: [{ uid, pid, name, tier, activity, awaiting_approval, \
+             last_seen_unix, idle_seconds, calls }], count, window_seconds }. \
+             Read-only observability for the HUD.",
+            json!({"type": "object", "properties": {
+                "window_seconds": {"type": "integer", "minimum": 1}
+            }}),
+        ),
+        (
+            "policy.check",
+            Tier::T0,
+            "Classify a HYPOTHETICAL tool call WITHOUT executing it: returns the \
+             policy decision (allow/deny/require_approval) and tier for a (tool, \
+             target) pair. Read-only — never executes, never approves, never \
+             touches the approval store. A HINT for a governed editor auto-mode \
+             (ADR-014): real enforcement (denylist, home confinement, T2/T3 floor) \
+             always happens at execution, so a wrong hint can never bypass approval.",
+            json!({"type": "object", "required": ["tool"],
+            "properties": {
+                "tool": {"type": "string"},
+                "target": {"type": "string"}
             }}),
         ),
     ]
@@ -675,10 +976,11 @@ fn execute_tool(
     args: &Value,
     policy: &PolicyEngine,
     caller: Caller,
+    audit_dir: &std::path::Path,
 ) -> Result<String, String> {
     match name {
         "os.status" => os_status(),
-        "fs.read" => fs_read(args, policy),
+        "fs.read" => fs_read(args, policy, caller),
         "fs.write" => fs_write(args, policy, caller),
         "pkg.install" => Ok(json!({
             "status": "requires_approval",
@@ -687,212 +989,337 @@ fn execute_tool(
                        workflow land in a later milestone (see ROADMAP.md)."
         })
         .to_string()),
-        "svc.restart" => Ok(json!({
-            "status": "requires_approval",
-            "detail": "svc.restart is a v0.1 stub: no unit was restarted. \
-                       The systemd D-Bus backend lands with vibectl (see ROADMAP.md)."
-        })
-        .to_string()),
-        "svc.status" => svc_status(args),
-        "sectools.list" => sectools_list(args),
-        "fs.list" => fs_list(args, policy),
-        "memory.query" => memory_query(args),
-        "memory.append" => memory_append(args),
+        "svc.restart" => crate::tools::svc::svc_restart(args),
+        "svc.status" => crate::tools::svc::svc_status(args),
+        "sectools.list" => crate::tools::sectools::sectools_list(args),
+        "fs.list" => fs_list(args, policy, caller),
+        "memory.query" => crate::tools::memory::memory_query(args),
+        "memory.append" => crate::tools::memory::memory_append(args),
+        "agent.thinking" => agent_thinking(args),
+        "agent.sessions" => agent_sessions(),
+        "agents.list" => agents_list(args, caller, audit_dir),
+        "policy.check" => policy_check(args, policy),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
 
-/// sectools.list (T0): read-only discovery of the shipped security toolkit.
-/// Reads the manifest and reports, per tool, its category, the capability tier
-/// that gates AGENT invocation, and whether the binary is installed — checked
-/// by a plain filesystem stat in the standard bin dirs. This tool NEVER
-/// executes any security tool; running one is a future policy-gated path
-/// (T2/T3 = human approval, see docs/SECURITY-TOOLKIT.md).
-fn sectools_list(args: &Value) -> Result<String, String> {
-    let manifest = match std::fs::read_to_string(SECTOOLS_MANIFEST) {
-        Ok(text) => text,
-        Err(_) => {
-            return Ok(json!({
-                "available": false,
-                "note": "security toolkit manifest absent \
-                         (/usr/share/vibeos/security-tools.tsv): not a VibeOS image, \
-                         or the toolkit layer was not built in"
-            })
-            .to_string())
-        }
-    };
-    let category_filter = args.get("category").and_then(Value::as_str);
-    let installed_only = args
-        .get("installed_only")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let present = |binary: &str| -> bool {
-        SECTOOLS_BIN_DIRS
-            .iter()
-            .any(|dir| std::path::Path::new(dir).join(binary).exists())
-    };
-    Ok(sectools_list_from(
-        &manifest,
-        category_filter,
-        installed_only,
-        present,
-    ))
-}
-
-/// Pure body of sectools.list: parse the manifest and apply filters. The
-/// `present` closure resolves installation status, so tests can drive it
-/// against a fixed set without touching the real filesystem.
-fn sectools_list_from(
-    manifest: &str,
-    category_filter: Option<&str>,
-    installed_only: bool,
-    present: impl Fn(&str) -> bool,
-) -> String {
-    let mut tools = Vec::new();
-    let mut categories: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut installed_count = 0usize;
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut fields = line.splitn(4, '\t');
-        let (Some(binary), Some(category), Some(tier)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            continue; // malformed line: skip rather than fail the whole call
-        };
-        let description = fields.next().unwrap_or("").trim();
-        let (binary, category, tier) = (binary.trim(), category.trim(), tier.trim());
-        categories.insert(category.to_string());
-        if category_filter.is_some_and(|c| c != category) {
-            continue;
-        }
-        let is_installed = present(binary);
-        if is_installed {
-            installed_count += 1;
-        }
-        if installed_only && !is_installed {
-            continue;
-        }
-        tools.push(json!({
-            "binary": binary,
-            "category": category,
-            "tier": tier,
-            "installed": is_installed,
-            "description": description,
-        }));
-    }
-    json!({
-        "available": true,
-        "categories": categories.into_iter().collect::<Vec<_>>(),
-        "count": tools.len(),
-        "installed_count": installed_count,
-        "governance": "Agent invocation of these tools is gated by the vibed policy engine: \
-                       T2 (active against a target) and T3 (destructive) require out-of-band \
-                       HUMAN APPROVAL. sectools.list itself only discovers, never executes. \
-                       Authorized use only. See docs/SECURITY-TOOLKIT.md",
-        "tools": tools,
-    })
-    .to_string()
-}
-
-/// svc.status (T0): read-only state of one systemd unit via `systemctl show`.
+/// policy.check (T0): classify a HYPOTHETICAL `(tool, target)` call — return the
+/// policy `Decision` (allow / deny / require_approval) and tier WITHOUT executing
+/// it, consuming a grant, or touching the approval store. This is what an
+/// editor's governed auto-mode (ADR-014, couche 2) queries to decide "prompt or
+/// not". It is a HINT: the real enforcement (built-in denylist, per-caller home
+/// confinement, T2/T3 approval floor) always happens at execution in vibed, so a
+/// wrong hint can never let a T2/T3 call through without approval — at worst the
+/// editor shows or omits a prompt in error, and the real call is still gated.
 ///
-/// Safety posture (vibed runs as root and this SPAWNS a process):
-///   * the unit name is validated by `validate_unit_name` BEFORE anything
-///     runs — conservative allow-list of characters, no `/`, no leading `-`,
-///     bounded length — so neither options nor paths can be injected;
-///   * `--` terminates option parsing as a second fence;
-///   * systemctl is invoked by ABSOLUTE path with a cleared environment;
-///   * `show` is a pure read (no state change), and its D-Bus client applies
-///     its own timeout, so the spawn_blocking worker is not held hostage.
-fn svc_status(args: &Value) -> Result<String, String> {
-    let raw = args
-        .get("unit")
+/// Anti-DoS disciplines (same as every other tool, not weaker for being a
+/// dry-run): it is reached through `handle_tools_call`, so the **per-uid rate
+/// limiter runs first** (that check is tool-agnostic, before dispatch — see the
+/// `limiter.check` gate) and the call is audited; its output is a **small, fixed
+/// JSON** (echoes the bounded `target`, no content amplification) and it does no
+/// unbounded work (a lexical path normalize + the fixed denylist + one policy
+/// evaluation).
+fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+    let tool = args
+        .get("tool")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing 'unit' argument".to_string())?;
-    let unit = validate_unit_name(raw)?;
+        .ok_or_else(|| "policy.check: missing 'tool' argument".to_string())?;
+    let target = args.get("target").and_then(Value::as_str);
 
-    let output = std::process::Command::new("/usr/bin/systemctl")
-        .env_clear()
-        .args([
-            "show",
-            "--no-pager",
-            "--property=Id,Description,LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp",
-            "--",
-            &unit,
-        ])
-        .output()
-        .map_err(|e| format!("svc.status: cannot run systemctl: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let snippet: String = stderr.chars().take(200).collect();
-        return Err(format!(
-            "svc.status {unit}: systemctl exited with {}: {}",
-            output.status,
-            snippet.trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut payload = parse_systemctl_show(&stdout);
-    payload.insert("unit".to_string(), Value::String(unit));
-    Ok(Value::Object(payload).to_string())
-}
+    let note = "hint; real enforcement (denylist, home confinement, T2/T3 floor) \
+                happens at execution in vibed";
 
-/// Conservative systemd unit-name validation. Accepts `name`, `name.service`,
-/// `template@instance.service`, `dbus.socket`, systemd-escaped names (`\x2d`);
-/// appends `.service` when no type suffix is present (systemctl's own
-/// convention). Refuses anything that could be an option or a path.
-fn validate_unit_name(raw: &str) -> Result<String, String> {
-    if raw.is_empty() {
-        return Err("svc.status: 'unit' must not be empty".to_string());
-    }
-    if raw.len() > 255 {
-        return Err("svc.status: unit name exceeds 255 characters".to_string());
-    }
-    if raw.starts_with('-') {
-        return Err(format!(
-            "svc.status: invalid unit name '{raw}' (leading '-')"
-        ));
-    }
-    let valid = raw
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '@' | '\\'));
-    if !valid {
-        return Err(format!(
-            "svc.status: invalid unit name '{raw}' (allowed: alphanumerics and :-_.@\\)"
-        ));
-    }
-    Ok(if raw.contains('.') {
-        raw.to_string()
+    // Path tools: normalize the target and apply the built-in denylist FIRST,
+    // mirroring the real pipeline's ordering (a denied path is denied whatever
+    // the policy says).
+    let normalized = if tool.starts_with("fs.") {
+        target.and_then(normalize_path)
     } else {
-        format!("{raw}.service")
-    })
-}
-
-/// Parse `systemctl show` KEY=VALUE lines into a JSON object with lowercase
-/// snake_case keys. Pure function, unit-tested without spawning anything.
-fn parse_systemctl_show(stdout: &str) -> serde_json::Map<String, Value> {
-    const KEYS: [(&str, &str); 7] = [
-        ("Id", "id"),
-        ("Description", "description"),
-        ("LoadState", "load_state"),
-        ("ActiveState", "active_state"),
-        ("SubState", "sub_state"),
-        ("UnitFileState", "unit_file_state"),
-        ("ActiveEnterTimestamp", "active_enter_timestamp"),
-    ];
-    let mut map = serde_json::Map::new();
-    for line in stdout.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if let Some((_, out_key)) = KEYS.iter().find(|(k, _)| *k == key) {
-            map.insert(out_key.to_string(), Value::String(value.to_string()));
+        None
+    };
+    if let Some(path) = normalized.as_deref() {
+        if let Some(pattern) = builtin_denied(path, tool == "fs.write") {
+            return Ok(json!({
+                "tool": tool, "target": target, "decision": "deny",
+                "by": "builtin_denylist", "pattern": pattern, "note": note
+            })
+            .to_string());
         }
     }
-    map
+
+    let tier = tool_tier(tool);
+    let service = if tool.starts_with("svc.") {
+        target
+    } else {
+        None
+    };
+    let ctx = CallContext {
+        path: normalized.as_deref(),
+        service,
+    };
+    let decision = match policy.evaluate(tool, tier, ctx) {
+        Decision::Allow => "allow",
+        Decision::Deny => "deny",
+        Decision::RequireApproval => "require_approval",
+    };
+    Ok(json!({
+        "tool": tool,
+        "target": target,
+        "tier": tier.map(Tier::as_str),
+        "decision": decision,
+        "note": note,
+    })
+    .to_string())
+}
+
+/// agent.thinking (T0): read a bounded tail of a session's captured reasoning
+/// from the store written by the supervisor (ADR-012). Read-only; the session_id
+/// is charset-validated by `reasoning::read_thinking` so it can never traverse
+/// out of `/var/lib/vibeos/memory/reasoning/`.
+fn agent_thinking(args: &Value) -> Result<String, String> {
+    let session_id = args
+        .get("session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "agent.thinking: missing 'session_id' argument".to_string())?;
+    let tail = args.get("tail").and_then(Value::as_u64).map(|n| n as usize);
+    let since = args.get("since").and_then(Value::as_u64);
+    let out =
+        crate::reasoning::read_thinking(std::path::Path::new(MEMORY_DIR), session_id, tail, since)?;
+    serde_json::to_string(&out).map_err(|e| format!("agent.thinking: serialization failed: {e}"))
+}
+
+/// agent.sessions (T0): list the reasoning-session ids so an observer (the HUD)
+/// can discover a session to pass to `agent.thinking`. Read-only directory
+/// listing; no arguments, bounded output (one short id per captured session).
+fn agent_sessions() -> Result<String, String> {
+    let sessions = crate::reasoning::list_sessions(std::path::Path::new(MEMORY_DIR));
+    let latest = sessions.last().cloned();
+    serde_json::to_string(&json!({
+        "sessions": sessions,
+        "count": sessions.len(),
+        "latest": latest,
+    }))
+    .map_err(|e| format!("agent.sessions: serialization failed: {e}"))
+}
+
+/// Map a capability tier to its numeric level (0..3) for the HUD roster.
+fn tier_number(t: Tier) -> u8 {
+    match t {
+        Tier::T0 => 0,
+        Tier::T1 => 1,
+        Tier::T2 => 2,
+        Tier::T3 => 3,
+    }
+}
+
+/// Best-effort process name for a pid (`/proc/<pid>/comm`). `None` if the pid is
+/// 0/unknown or the process has already exited — the roster then falls back to a
+/// generic label rather than inventing a name.
+fn proc_comm(pid: u64) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = raw.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Read a bounded tail of the audit trail as parsed records with `ts >= cutoff`.
+/// Best-effort (skips unreadable/corrupt lines) and read-only — used ONLY to
+/// derive the `agents.list` roster, never for chain verification. Bounds the
+/// read to the last `MAX_TAIL_BYTES` of the two most recent daily files, so it
+/// stays cheap regardless of how large the audit log has grown.
+fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
+    const MAX_TAIL_BYTES: u64 = 512 * 1024;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<std::path::PathBuf> = read_dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("vibed-") && n.ends_with(".jsonl"))
+        })
+        .collect();
+    files.sort();
+    // Two most recent daily files cover any short window across a midnight roll.
+    let recent: Vec<std::path::PathBuf> = files.iter().rev().take(2).rev().cloned().collect();
+
+    let mut out = Vec::new();
+    for path in recent {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let start = meta.len().saturating_sub(MAX_TAIL_BYTES);
+        let Ok(mut f) = std::fs::File::open(&path) else {
+            continue;
+        };
+        if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if f.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        let buf = String::from_utf8_lossy(&bytes);
+        let mut lines = buf.lines();
+        // A mid-file seek likely lands inside a line; drop that first partial.
+        if start > 0 {
+            lines.next();
+        }
+        for line in lines {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                let ts = v
+                    .get("ts_unix_ms")
+                    .and_then(Value::as_u64)
+                    .map(|ms| ms / 1000)
+                    .unwrap_or(0);
+                if ts >= cutoff_secs {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// agents.list (T0): a live roster of the CALLER'S OWN recently active agent
+/// processes, derived from the audit trail. **Confined to the requesting uid**
+/// (SO_PEERCRED): an agent — or the HUD, which runs as the session user — sees
+/// only processes of its OWN uid, never another user's activity (no cross-user
+/// leak; same confinement discipline as fs.read). The caller's own process is
+/// excluded (the HUD does not list itself). Grouped by pid so distinct agent
+/// processes of the same user appear separately.
+///
+/// Anti-DoS: reached through `handle_tools_call` (per-uid rate limiter runs
+/// first, call audited); output is bounded (a short entry per pid seen in a
+/// bounded time window read from a bounded audit tail); no unbounded work.
+///
+/// v0.2.5 note: `name` is best-effort from `/proc/<pid>/comm` (a Node-based CLI
+/// shows as "node"); a finished process yields "agent". Per-connection identity
+/// and a richer roster are future work — the reliable key is the SO_PEERCRED uid.
+fn agents_list(
+    args: &Value,
+    caller: Caller,
+    audit_dir: &std::path::Path,
+) -> Result<String, String> {
+    const DEFAULT_WINDOW_SECS: u64 = 120;
+    let window = args
+        .get("window_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_WINDOW_SECS)
+        .clamp(1, 3600);
+    let now = now_epoch_secs();
+    let cutoff = now.saturating_sub(window);
+
+    // Fail-closed confinement: an unidentified caller (no SO_PEERCRED uid) sees
+    // nothing — the roster is a per-uid view, never a global one.
+    let Some(uid) = caller.uid else {
+        return Ok(json!({
+            "agents": [],
+            "count": 0,
+            "window_seconds": window,
+            "note": "no caller uid (SO_PEERCRED); the roster is confined per-uid"
+        })
+        .to_string());
+    };
+    // SO_PEERCRED pids are positive; a non-positive pid never matches a real one.
+    let self_pid = caller.pid.filter(|p| *p > 0).map(|p| p as u64);
+
+    struct Agg {
+        tier: u8,
+        last_ts: u64,
+        last_tool: String,
+        last_target: Option<String>,
+        calls: u64,
+    }
+    let mut by_pid: std::collections::BTreeMap<u64, Agg> = std::collections::BTreeMap::new();
+
+    for r in read_recent_audit(audit_dir, cutoff) {
+        // Confine to the caller's own uid; skip the caller's own process.
+        if r.get("caller_uid").and_then(Value::as_u64) != Some(u64::from(uid)) {
+            continue;
+        }
+        let pid = r.get("caller_pid").and_then(Value::as_u64).unwrap_or(0);
+        if Some(pid) == self_pid {
+            continue;
+        }
+        let ts = r
+            .get("ts_unix_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| ms / 1000)
+            .unwrap_or(0);
+        let tool = r
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let target = r.get("target").and_then(Value::as_str).map(str::to_string);
+        let tier = tool_tier(&tool).map(tier_number).unwrap_or(0);
+
+        let e = by_pid.entry(pid).or_insert(Agg {
+            tier: 0,
+            last_ts: 0,
+            last_tool: String::new(),
+            last_target: None,
+            calls: 0,
+        });
+        e.calls += 1;
+        e.tier = e.tier.max(tier);
+        if ts >= e.last_ts {
+            e.last_ts = ts;
+            e.last_tool = tool;
+            e.last_target = target;
+        }
+    }
+
+    // A pending T2/T3 approval is keyed by uid, so it flags all of that uid's
+    // processes (best-effort — the store may distinguish finer later).
+    let awaiting =
+        crate::approval::list_pending(std::path::Path::new(crate::approval::APPROVAL_DIR))
+            .iter()
+            .any(|p| p.get("caller_uid").and_then(Value::as_u64) == Some(u64::from(uid)));
+
+    let agents: Vec<Value> = by_pid
+        .into_iter()
+        .map(|(pid, a)| {
+            let name = proc_comm(pid).unwrap_or_else(|| "agent".to_string());
+            let activity = match &a.last_target {
+                Some(t) if !t.is_empty() => format!("{} {}", a.last_tool, t),
+                _ => a.last_tool.clone(),
+            };
+            json!({
+                "uid": uid,
+                "pid": pid,
+                "name": name,
+                "tier": a.tier,
+                "activity": activity,
+                "awaiting_approval": awaiting,
+                "last_seen_unix": a.last_ts,
+                "idle_seconds": now.saturating_sub(a.last_ts),
+                "calls": a.calls,
+            })
+        })
+        .collect();
+
+    let count = agents.len();
+    Ok(json!({
+        "agents": agents,
+        "count": count,
+        "window_seconds": window,
+    })
+    .to_string())
 }
 
 fn os_status() -> Result<String, String> {
@@ -957,7 +1384,7 @@ fn read_mounts() -> Vec<Value> {
         .collect()
 }
 
-fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+fn fs_read(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String, String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -990,15 +1417,25 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
         }
     }
     recheck_policy_canonical(policy, "fs.read", &canonical_str)?;
+    // Cross-user confinement: a system tree or the caller's OWN home only.
+    let scope = confine_read("fs.read", caller, &canonical_str)?;
 
-    // Reject anything that is not a regular file: character/block devices
-    // (e.g. /dev/urandom) would exhaust memory, and FIFOs would block the
-    // worker thread forever. O_NOFOLLOW: canonicalize already resolved every
-    // symlink, so the final component of `canonical` must not be one anymore —
-    // if it is (post-canonicalization swap), open() fails with ELOOP.
+    // Reject anything that is not a regular file BEFORE opening: a FIFO opened
+    // O_RDONLY with no writer BLOCKS the spawn_blocking worker forever (a DoS —
+    // enough of them exhaust the blocking pool and stall every user's calls),
+    // and a character/block device would exhaust memory. `validated` is the
+    // lstat of the already-canonical path (no symlink left), so its type is
+    // authoritative — check it here, not after the (potentially blocking) open.
+    if !validated.file_type().is_file() {
+        return Err(format!("fs.read: '{canonical_str}' is not a regular file"));
+    }
+    // O_NOFOLLOW: canonicalize already resolved every symlink, so the final
+    // component must not be one anymore — a post-canonicalization swap fails
+    // with ELOOP. O_NONBLOCK: belt-and-suspenders so a swap to a FIFO in the
+    // TOCTOU window returns instead of blocking (regular-file reads ignore it).
     let mut file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(&canonical)
         .map_err(|e| format!("fs.read {path}: {e}"))?;
     let opened = file
@@ -1006,6 +1443,24 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
         .map_err(|e| format!("fs.read {path}: {e}"))?;
     if !opened.is_file() {
         return Err(format!("fs.read: '{canonical_str}' is not a regular file"));
+    }
+    // Hardlink defense (cross-owner): the path-based denylist + home confinement
+    // are blind to hardlinks (canonicalize resolves symlinks, not hardlinks), so
+    // an agent could hardlink another user's / a root-owned inode into its own
+    // home and have root-`vibed` read it. For a read resolved INTO the caller's
+    // home, require the opened inode to be owned by the caller — a system-tree
+    // read is legitimately root-owned and exempt. (A hardlink to the caller's
+    // OWN file stays readable: the agent already owns it via its uid.)
+    if scope == ReadScope::Home {
+        use std::os::unix::fs::MetadataExt;
+        if Some(opened.uid()) != caller.uid {
+            return Err(format!(
+                "fs.read: '{canonical_str}' is owned by uid {} but the caller is uid {:?}; \
+                 refusing (possible cross-owner hardlink)",
+                opened.uid(),
+                caller.uid
+            ));
+        }
     }
     // The file actually opened must be the very inode that passed the
     // denylist/policy checks above (fstat on the open fd is authoritative).
@@ -1043,7 +1498,7 @@ fn fs_read(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
 /// policy re-checked on BOTH the lexical and canonical form. Symlinks inside
 /// the directory are REPORTED (type "symlink") but never followed — neither
 /// their target type nor size is disclosed.
-fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
+fn fs_list(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String, String> {
     let raw = args
         .get("path")
         .and_then(Value::as_str)
@@ -1066,6 +1521,8 @@ fn fs_list(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
         }
     }
     recheck_policy_canonical(policy, "fs.list", &canonical_str)?;
+    // Cross-user confinement: a system tree or the caller's OWN home only.
+    confine_read("fs.list", caller, &canonical_str)?;
 
     // Anti-TOCTOU (same discipline as fs.read; vibed runs as root): capture the
     // directory's identity right before the read and re-check it right after.
@@ -1241,6 +1698,17 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
     // itself a symlink, open() fails with ELOOP instead of following it out of
     // the confinement (canonicalize above deliberately did NOT resolve the
     // final component, precisely so this guard can fire).
+    //
+    // RESIDUAL TOCTOU (Phase 3): O_NOFOLLOW guards only the FINAL component. The
+    // open() below re-walks the whole path, so an agent that swaps an
+    // INTERMEDIATE parent directory for a symlink in the tiny window between
+    // canonicalize(parent) and this open (vibed runs as root) could still route
+    // the create+truncate elsewhere. Unlike fs.read, an O_CREAT|O_TRUNC write
+    // cannot be undone by a post-open dev/ino recheck. Full closure needs a
+    // single atomic resolve+open — `openat2(RESOLVE_NO_SYMLINKS)` — which lands
+    // with per-tool sandboxing in Phase 3. Winning the race is hard (a tight,
+    // repeated swap) and the common cases (symlinked final component, symlinked
+    // parent already in place at check time) are already refused above.
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -1291,6 +1759,13 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
     let canonical_home = std::fs::canonicalize(&home)
         .map_err(|e| format!("fs.write: cannot resolve home '{home}' for uid {uid}: {e}"))?;
     let canonical_home_str = canonical_home.to_string_lossy();
+    // A home of '/' (or a broad ancestor) would make is_within() trivially true
+    // and disable write confinement — refuse fail-closed.
+    if canonical_home_str == "/" {
+        return Err(format!(
+            "fs.write: uid {uid}'s home resolves to '/' — refusing (would disable confinement)"
+        ));
+    }
     if !is_within(canonical_target, &canonical_home_str) {
         return Err(format!(
             "fs.write: cross-user write refused: '{canonical_target}' is not within uid {uid}'s \
@@ -1298,6 +1773,57 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// Which allowed area a read resolved into. The caller applies extra checks per
+/// scope (an in-`Home` read must be owned by the caller — hardlink defense —
+/// whereas a `System` tree read is legitimately root-owned).
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum ReadScope {
+    System,
+    Home,
+}
+
+/// Read confinement for fs.read / fs.list. `canonical` is allowed iff it is a
+/// system-read tree (SYSTEM_READ_PREFIXES) OR inside the calling uid's own home
+/// (resolved from SO_PEERCRED). Fail-closed: an unknown/unresolvable caller may
+/// still read the system trees, but NEVER a home — so a missing peer cred
+/// cannot be leveraged to read personal data. The built-in denylist is applied
+/// separately (before this) and always wins.
+fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<ReadScope, String> {
+    if SYSTEM_READ_PREFIXES
+        .iter()
+        .any(|p| canonical == p.trim_end_matches('/') || canonical.starts_with(p))
+    {
+        return Ok(ReadScope::System);
+    }
+    // Otherwise it must be within the caller's OWN home.
+    let uid = caller.uid.ok_or_else(|| {
+        format!(
+            "{tool}: '{canonical}' is outside the readable system trees and the caller uid is \
+             unavailable (SO_PEERCRED); refusing (fail-closed)"
+        )
+    })?;
+    let home = home_dir_for_uid(uid)
+        .ok_or_else(|| format!("{tool}: no home for uid {uid} in /etc/passwd; refusing"))?;
+    let canonical_home = std::fs::canonicalize(&home)
+        .map_err(|e| format!("{tool}: cannot resolve home '{home}' for uid {uid}: {e}"))?;
+    let canonical_home_str = canonical_home.to_string_lossy();
+    // A home that resolves to "/" (some system accounts) or any broad ancestor
+    // would make is_within() trivially true — home confinement would silently
+    // become a no-op, opening every path. Refuse fail-closed instead.
+    if canonical_home_str == "/" {
+        return Err(format!(
+            "{tool}: uid {uid}'s home resolves to '/' — refusing (would disable confinement)"
+        ));
+    }
+    if is_within(canonical, &canonical_home_str) {
+        return Ok(ReadScope::Home);
+    }
+    Err(format!(
+        "{tool}: '{canonical}' is neither a readable system path nor inside uid {uid}'s own home; \
+         cross-user reads are refused"
+    ))
 }
 
 /// True when `path` is `base` itself or a descendant of it, comparing whole
@@ -1345,371 +1871,6 @@ fn home_dir_for_uid_in(passwd: &str, uid: u32) -> Option<String> {
     None
 }
 
-fn memory_query(args: &Value) -> Result<String, String> {
-    memory_query_at(std::path::Path::new(MEMORY_DIR), args)
-}
-
-/// Body of memory.query with the store root as a parameter, so the tests can
-/// run it against a scratch layout without touching /var/lib/vibeos/memory.
-fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_lowercase();
-
-    // `scope` restricts the walk to one entry of the docs/MEMORY.md §3 layout.
-    let scope = match args.get("scope") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(name)) => match MEMORY_SCOPES.iter().find(|(n, _, _)| n == name) {
-            Some(entry) => Some(*entry),
-            None => {
-                let valid: Vec<&str> = MEMORY_SCOPES.iter().map(|(n, _, _)| *n).collect();
-                return Err(format!(
-                    "memory.query: unknown scope '{name}' (valid: {})",
-                    valid.join(", ")
-                ));
-            }
-        },
-        Some(_) => return Err("memory.query: 'scope' must be a string".to_string()),
-    };
-
-    // `limit` caps the number of matches returned; the walk itself stays
-    // bounded by MAX_MEMORY_FILES regardless.
-    let limit = match args.get("limit") {
-        None | Some(Value::Null) => MAX_MEMORY_FILES,
-        Some(value) => match value.as_u64() {
-            Some(n) if n >= 1 => (n as usize).min(MAX_MEMORY_FILES),
-            _ => return Err("memory.query: 'limit' must be an integer >= 1".to_string()),
-        },
-    };
-
-    if !root.is_dir() {
-        return Ok(json!({
-            "initialized": false,
-            "note": "memory store absent: vibeos-genesis.service has not run yet, \
-                     or amnesic mode (Phase 3 target) discarded it at shutdown"
-        })
-        .to_string());
-    }
-
-    // Bounded iterative walk: no recursion, hard cap on visited files, and
-    // NEVER follows symlinks (entry.file_type() / symlink_metadata do not
-    // traverse) — a link planted inside the store cannot route the walk (or
-    // the content scan) outside /var/lib/vibeos/memory, e.g. into the audit
-    // trail.
-    let mut files = Vec::new();
-    let mut stack: Vec<std::path::PathBuf> = Vec::new();
-    // A walk root is only pushed if it is a REAL directory (symlink_metadata
-    // does not follow): if `journal` (or the store root itself) is a symlink,
-    // the walk must not descend through it out of the store.
-    let push_if_real_dir = |stack: &mut Vec<std::path::PathBuf>, p: std::path::PathBuf| {
-        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
-            stack.push(p);
-        }
-    };
-    match scope {
-        None => push_if_real_dir(&mut stack, root.to_path_buf()),
-        Some((_, relative, is_dir)) => {
-            let start = root.join(relative);
-            if is_dir {
-                push_if_real_dir(&mut stack, start);
-            } else if start
-                .symlink_metadata()
-                .is_ok_and(|m| m.file_type().is_file())
-            {
-                files.push(start);
-            }
-        }
-    }
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if files.len() >= MAX_MEMORY_FILES {
-                break;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file() {
-                files.push(entry.path());
-            }
-            // Symlinks (and any other special type) are deliberately skipped.
-        }
-        if files.len() >= MAX_MEMORY_FILES {
-            break;
-        }
-    }
-
-    let mut matches = Vec::new();
-    let mut truncated = false;
-    for path in &files {
-        if matches.len() >= limit {
-            truncated = true;
-            break;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-        if query.is_empty() {
-            matches.push(json!({ "file": relative }));
-            continue;
-        }
-        let name_hit = relative.to_lowercase().contains(&query);
-        // Bounded scan: never pull more than MAX_MEMORY_SCAN_BYTES of one file
-        // into memory (same take() discipline as fs.read) — a huge file in the
-        // store must not translate into an unbounded allocation. O_NOFOLLOW:
-        // the file was a regular file when the walk collected it; if it was
-        // swapped for a symlink before this open (TOCTOU), open() fails with
-        // ELOOP instead of following it out of the store.
-        let content_hit = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(O_NOFOLLOW)
-            .open(path)
-            .ok()
-            .is_some_and(|file| {
-                use std::io::Read;
-                let mut bytes = Vec::new();
-                let ok = file
-                    .take(MAX_MEMORY_SCAN_BYTES as u64)
-                    .read_to_end(&mut bytes)
-                    .is_ok();
-                ok && String::from_utf8_lossy(&bytes)
-                    .to_lowercase()
-                    .contains(&query)
-            });
-        if name_hit || content_hit {
-            matches.push(json!({ "file": relative }));
-        }
-    }
-
-    Ok(json!({
-        "initialized": true,
-        "query": query,
-        "scope": scope.map(|(name, _, _)| name),
-        "scanned_files": files.len(),
-        "matches": matches,
-        "truncated": truncated
-    })
-    .to_string())
-}
-
-fn memory_append(args: &Value) -> Result<String, String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| format!("memory.append: system clock error: {e}"))?
-        .as_secs();
-    memory_append_at(std::path::Path::new(MEMORY_DIR), args, now)
-}
-
-/// Body of memory.append with the store root and the clock as parameters
-/// (deterministic, filesystem-scratch-friendly tests).
-///
-/// Strictly ADDITIVE by construction: the only operation is an O_APPEND write
-/// of one serialized line to a scope-derived file — there is no delete, no
-/// rewrite, and no caller-controlled path (docs/MEMORY.md §9). The caller's
-/// authoritative identity (uid/gid/pid) is recorded by the audit pipeline;
-/// the `source` field below is self-declared memory metadata.
-fn memory_append_at(
-    root: &std::path::Path,
-    args: &Value,
-    epoch_secs: u64,
-) -> Result<String, String> {
-    use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-
-    let scope = args
-        .get("scope")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "memory.append: missing 'scope' argument".to_string())?;
-    let entry = args
-        .get("entry")
-        .ok_or_else(|| "memory.append: missing 'entry' argument".to_string())?;
-    if !entry.is_object() {
-        return Err("memory.append: 'entry' must be an object".to_string());
-    }
-
-    if !root.is_dir() {
-        return Err(
-            "memory.append: memory store absent: vibeos-genesis.service has not run yet \
-             (nothing to append to; fail-closed)"
-                .to_string(),
-        );
-    }
-
-    let ts = utc_iso8601(epoch_secs);
-    let (relative_file, line_value) = match scope {
-        "journal" => {
-            let event_type = entry.get("type").and_then(Value::as_str).ok_or_else(|| {
-                "memory.append: missing 'type' field in journal entry".to_string()
-            })?;
-            if JOURNAL_RESERVED_TYPES.contains(&event_type) {
-                return Err(format!(
-                    "memory.append: journal type '{event_type}' is reserved for the system \
-                     (genesis.sh, vibed, vibectl) and cannot be appended by an agent"
-                ));
-            }
-            if !JOURNAL_AGENT_TYPES.contains(&event_type) {
-                return Err(format!(
-                    "memory.append: unknown journal type '{event_type}' (valid: {})",
-                    JOURNAL_AGENT_TYPES.join(", ")
-                ));
-            }
-            let source = validated_source(entry)?;
-            let data = entry.get("data").cloned().unwrap_or_else(|| json!({}));
-            if !data.is_object() {
-                return Err("memory.append: 'data' must be an object".to_string());
-            }
-            (
-                format!("journal/{}.jsonl", utc_date_string(epoch_secs)),
-                json!({ "ts": ts, "type": event_type, "source": source, "data": data }),
-            )
-        }
-        "knowledge" => {
-            let subject = required_entry_str(entry, "subject", 256)?;
-            let fact = required_entry_str(entry, "fact", 4096)?;
-            let source = validated_source(entry)?;
-            let confidence = match entry.get("confidence") {
-                None | Some(Value::Null) => None,
-                Some(value) => match value.as_f64() {
-                    Some(c) if (0.0..=1.0).contains(&c) => Some(c),
-                    _ => {
-                        return Err(
-                            "memory.append: 'confidence' must be a number between 0 and 1"
-                                .to_string(),
-                        )
-                    }
-                },
-            };
-            let mut fact_value = json!({
-                "id": next_fact_id(epoch_secs),
-                "ts": ts,
-                "subject": subject,
-                "fact": fact,
-                "source": source
-            });
-            if let Some(c) = confidence {
-                fact_value["confidence"] = json!(c);
-            }
-            ("knowledge/facts.jsonl".to_string(), fact_value)
-        }
-        "user" | "projects" => {
-            return Err(format!(
-                "memory.append: scope '{scope}' is not implemented yet (structured TOML/JSON \
-                 merge — Phase 2/3 remainder, docs/MEMORY.md §3); the append-only scopes \
-                 'journal' and 'knowledge' are the writable surface of v0.2"
-            ));
-        }
-        other => {
-            return Err(format!(
-                "memory.append: unknown scope '{other}' (writable: journal, knowledge)"
-            ));
-        }
-    };
-
-    let mut line = serde_json::to_string(&line_value)
-        .map_err(|e| format!("memory.append: serialization failed: {e}"))?;
-    line.push('\n');
-    if line.len() > MAX_APPEND_BYTES {
-        return Err(format!(
-            "memory.append: entry exceeds the {} KiB line cap",
-            MAX_APPEND_BYTES / 1024
-        ));
-    }
-
-    let target = root.join(&relative_file);
-    let parent = target
-        .parent()
-        .ok_or_else(|| "memory.append: internal error: target has no parent".to_string())?;
-    // Genesis creates the subdirectories; recreate defensively with the same
-    // private permissions if one is missing (never the store root itself).
-    if !parent.is_dir() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .map_err(|e| format!("memory.append: cannot create '{relative_file}' parent: {e}"))?;
-    }
-
-    // Serialize appends within the process; combined with O_APPEND, each entry
-    // lands as one contiguous line even under concurrent connections.
-    // O_NOFOLLOW: if the target name was swapped for a symlink, refuse rather
-    // than follow it out of the store.
-    static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = APPEND_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(O_NOFOLLOW)
-        .open(&target)
-        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
-    file.write_all(line.as_bytes())
-        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
-
-    Ok(json!({
-        "appended": true,
-        "file": relative_file,
-        "bytes": line.len(),
-        "ts": ts
-    })
-    .to_string())
-}
-
-/// `source` field of a memory entry: the self-declared emitter label (e.g.
-/// "claude-code"), constrained to a safe charset. The authoritative caller
-/// identity lives in the audit trail, not here.
-fn validated_source(entry: &Value) -> Result<String, String> {
-    let source = entry
-        .get("source")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "memory.append: missing 'source' field in entry".to_string())?;
-    let valid = !source.is_empty()
-        && source.len() <= 64
-        && source
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if !valid {
-        return Err(
-            "memory.append: 'source' must be 1-64 characters of [A-Za-z0-9._-]".to_string(),
-        );
-    }
-    Ok(source.to_string())
-}
-
-/// Required bounded string field of a memory entry.
-fn required_entry_str(entry: &Value, field: &str, max_len: usize) -> Result<String, String> {
-    let value = entry
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("memory.append: missing '{field}' field in entry"))?;
-    if value.is_empty() || value.len() > max_len {
-        return Err(format!(
-            "memory.append: '{field}' must be 1-{max_len} bytes"
-        ));
-    }
-    Ok(value.to_string())
-}
-
-/// Unique-enough fact id: epoch seconds + pid + per-process sequence number.
-/// No dedup semantics — facts are append-only; curation is a vibectl matter.
-fn next_fact_id(epoch_secs: u64) -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("{epoch_secs}-{}-{n}", std::process::id())
-}
-
 /// Civil UTC date-time from unix epoch seconds — Howard Hinnant's
 /// `civil_from_days` algorithm, std-only (the crate deliberately has no
 /// date/time dependency). Returns (year, month, day, hour, minute, second).
@@ -1738,13 +1899,13 @@ fn utc_civil(epoch_secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 }
 
 /// `AAAA-MM-JJ` (UTC) — the journal's one-file-per-day naming (MEMORY.md §3.5).
-fn utc_date_string(epoch_secs: u64) -> String {
+pub fn utc_date_string(epoch_secs: u64) -> String {
     let (year, month, day, ..) = utc_civil(epoch_secs);
     format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// ISO 8601 UTC timestamp with a `Z` suffix.
-fn utc_iso8601(epoch_secs: u64) -> String {
+pub fn utc_iso8601(epoch_secs: u64) -> String {
     let (year, month, day, hour, minute, second) = utc_civil(epoch_secs);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
@@ -1780,6 +1941,7 @@ mod tests {
     fn builtin_denylist_blocks_reads_of_sensitive_paths() {
         for path in [
             "/var/lib/vibeos/audit/vibed.jsonl",
+            "/var/lib/vibeos/approvals/granted/x.json",
             "/etc/shadow",
             "/etc/shadow-",
             "/home/dev/.ssh/id_ed25519",
@@ -2195,42 +2357,70 @@ mod tests {
 
     #[test]
     fn fs_read_rejects_non_regular_files() {
-        let policy = permissive_policy();
-        // Character device: reading to the end would exhaust memory.
-        if std::path::Path::new("/dev/zero").exists() {
-            let err = fs_read(&json!({"path": "/dev/zero"}), &policy).unwrap_err();
-            assert!(
-                err.contains("not a regular file"),
-                "char device must be refused: {err}"
-            );
+        let uid = current_uid();
+        if uid == 0 {
+            return; // root's home is /root, denylisted
         }
-        // A directory is not a regular file either.
-        let dir = std::env::temp_dir().join(format!("vibed-read-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let err = fs_read(&json!({"path": dir.to_string_lossy()}), &policy).unwrap_err();
+        let policy = permissive_policy();
+        let caller = caller_uid(uid);
+        // A directory is not a regular file — created in the caller's OWN home
+        // so confinement lets the attempt reach the regular-file check.
+        let base = home_scratch(uid, "read-nonreg");
+        let subdir = base.join("adir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let err = fs_read(&json!({"path": subdir.to_string_lossy()}), &policy, caller).unwrap_err();
         assert!(
             err.contains("not a regular file"),
             "directory must be refused: {err}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
+        // A FIFO in the caller's own home: open(O_RDONLY) with no writer would
+        // BLOCK the worker forever without the pre-open type check (the DoS this
+        // guards). It must return a refusal instead of hanging the test.
+        let fifo = base.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if made {
+            let err =
+                fs_read(&json!({"path": fifo.to_string_lossy()}), &policy, caller).unwrap_err();
+            assert!(
+                err.contains("not a regular file"),
+                "a FIFO must be refused BEFORE the blocking open: {err}"
+            );
+        }
+        // A char device outside the readable trees is refused by confinement.
+        if std::path::Path::new("/dev/zero").exists() {
+            let err = fs_read(&json!({"path": "/dev/zero"}), &policy, caller).unwrap_err();
+            assert!(
+                !err.is_empty(),
+                "char device outside the trees must be refused"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn fs_read_reads_regular_file_and_bounds_large_one() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = permissive_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-read-ok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "read-ok");
 
         let small = dir.join("small.txt");
         std::fs::write(&small, "hello vibed").unwrap();
-        let out = fs_read(&json!({"path": small.to_string_lossy()}), &policy).expect("read small");
+        let out = fs_read(&json!({"path": small.to_string_lossy()}), &policy, caller)
+            .expect("read small");
         assert_eq!(out, "hello vibed");
 
         let big = dir.join("big.bin");
         std::fs::write(&big, vec![b'a'; MAX_READ_BYTES + 4096]).unwrap();
-        let out = fs_read(&json!({"path": big.to_string_lossy()}), &policy).expect("read big");
+        let out =
+            fs_read(&json!({"path": big.to_string_lossy()}), &policy, caller).expect("read big");
         assert!(
             out.contains("truncated"),
             "oversized read must be truncated"
@@ -2244,23 +2434,78 @@ mod tests {
     }
 
     #[test]
+    fn fs_read_reads_a_system_tree_regardless_of_caller() {
+        // /etc is a readable system tree — even an unknown caller (no peer cred)
+        // may read it, but NEVER personal data (see confine_read test).
+        let policy = permissive_policy();
+        if std::path::Path::new("/etc/os-release").is_file() {
+            let out = fs_read(
+                &json!({"path": "/etc/os-release"}),
+                &policy,
+                Caller::default(),
+            )
+            .expect("system read of /etc/os-release");
+            assert!(!out.is_empty());
+        }
+    }
+
+    #[test]
     fn fs_read_still_reads_through_symlinks_via_canonicalization() {
         // O_NOFOLLOW + the dev/ino recheck guard against TOCTOU swaps, but a
         // legitimate read THROUGH a symlink keeps working: canonicalize
         // resolves the link before open, so the final component of the opened
         // path is the real file.
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = permissive_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-read-link-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "read-link");
         let real = dir.join("real.txt");
         std::fs::write(&real, "via symlink").unwrap();
         let link = dir.join("link.txt");
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
-        let out = fs_read(&json!({"path": link.to_string_lossy()}), &policy)
+        let out = fs_read(&json!({"path": link.to_string_lossy()}), &policy, caller)
             .expect("reading through a symlink must still work");
         assert_eq!(out, "via symlink");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confine_read_allows_system_and_own_home_refuses_others() {
+        let uid = current_uid();
+        let caller = caller_uid(uid);
+        // System trees are always readable.
+        for p in [
+            "/etc/os-release",
+            "/usr/bin",
+            "/proc/uptime",
+            "/var/lib/vibeos/x",
+            "/etc",
+        ] {
+            assert!(
+                confine_read("fs.read", caller, p).is_ok(),
+                "{p} must be readable"
+            );
+        }
+        // A non-system path outside the caller's home is refused (cross-user).
+        assert!(confine_read("fs.read", caller, "/tmp/elsewhere").is_err());
+        assert!(confine_read("fs.read", caller, "/var/home/someoneelse/secret").is_err());
+        // Unknown caller: system OK, home refused (fail-closed — a missing peer
+        // cred can never be used to read personal data).
+        assert!(confine_read("fs.read", Caller::default(), "/etc/x").is_ok());
+        assert!(confine_read("fs.read", Caller::default(), "/tmp/x").is_err());
+        // The caller's OWN home is readable.
+        if uid != 0 {
+            let home = home_dir_for_uid(uid).expect("caller has a home");
+            let canon = std::fs::canonicalize(&home).expect("home resolves");
+            let inhome = format!("{}/somefile", canon.to_string_lossy());
+            assert!(
+                confine_read("fs.read", caller, &inhome).is_ok(),
+                "own home must be readable"
+            );
+        }
     }
 
     // -- Fix 4: bounded JSON-RPC line reader ---------------------------------
@@ -2340,50 +2585,6 @@ mod tests {
         );
     }
 
-    // -- svc.status (T0) -------------------------------------------------------
-
-    #[test]
-    fn unit_name_validation_accepts_real_units_and_appends_service() {
-        assert_eq!(validate_unit_name("sshd").unwrap(), "sshd.service");
-        assert_eq!(validate_unit_name("sshd.service").unwrap(), "sshd.service");
-        assert_eq!(validate_unit_name("dbus.socket").unwrap(), "dbus.socket");
-        assert_eq!(
-            validate_unit_name("getty@tty1.service").unwrap(),
-            "getty@tty1.service"
-        );
-        assert_eq!(
-            validate_unit_name("systemd-journald").unwrap(),
-            "systemd-journald.service"
-        );
-        // systemd-escaped names stay intact.
-        assert_eq!(
-            validate_unit_name("run-media-usb\\x2ddisk.mount").unwrap(),
-            "run-media-usb\\x2ddisk.mount"
-        );
-    }
-
-    #[test]
-    fn unit_name_validation_refuses_injection_shapes() {
-        for bad in [
-            "",
-            "-p",            // an option, not a unit
-            "--property=Id", // ditto
-            "../etc/passwd", // path traversal (contains '/')
-            "/usr/bin/true", // absolute path
-            "a unit",        // whitespace
-            "unit;reboot",   // shell metacharacter
-            "unit$(reboot)", // ditto
-            "unit\nother",   // newline
-        ] {
-            assert!(
-                validate_unit_name(bad).is_err(),
-                "'{bad}' must be refused by unit-name validation"
-            );
-        }
-        let oversized = "a".repeat(256);
-        assert!(validate_unit_name(&oversized).is_err());
-    }
-
     // -- fs.list (T0) ----------------------------------------------------------
 
     /// A policy allowing fs.list everywhere except an explicit denied subtree,
@@ -2402,15 +2603,19 @@ mod tests {
 
     #[test]
     fn fs_list_lists_names_types_sizes_sorted() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = list_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-list-ok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "list-ok");
         std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
         std::fs::write(dir.join("b.txt"), "12345").unwrap();
         std::fs::write(dir.join("a.txt"), "1").unwrap();
         std::os::unix::fs::symlink("/etc/os-release", dir.join("link")).expect("symlink");
         let payload: Value = serde_json::from_str(
-            &fs_list(&json!({"path": dir.to_string_lossy()}), &policy).unwrap(),
+            &fs_list(&json!({"path": dir.to_string_lossy()}), &policy, caller).unwrap(),
         )
         .unwrap();
         let entries = payload["entries"].as_array().unwrap();
@@ -2434,16 +2639,24 @@ mod tests {
 
     #[test]
     fn fs_list_respects_limit_and_returns_stable_lexicographic_prefix() {
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = list_policy();
-        let dir = std::env::temp_dir().join(format!("vibed-list-lim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let caller = caller_uid(uid);
+        let dir = home_scratch(uid, "list-lim");
         // Create in a shuffled order so a readdir-order bug would surface.
         for name in ["e", "b", "d", "a", "c"] {
             std::fs::write(dir.join(name), "x").unwrap();
         }
         let payload: Value = serde_json::from_str(
-            &fs_list(&json!({"path": dir.to_string_lossy(), "limit": 3}), &policy).unwrap(),
+            &fs_list(
+                &json!({"path": dir.to_string_lossy(), "limit": 3}),
+                &policy,
+                caller,
+            )
+            .unwrap(),
         )
         .unwrap();
         let entries = payload["entries"].as_array().unwrap();
@@ -2459,8 +2672,12 @@ mod tests {
             "truncation must keep the lexicographic prefix"
         );
         assert_eq!(payload["truncated"], true);
-        let err =
-            fs_list(&json!({"path": dir.to_string_lossy(), "limit": 0}), &policy).unwrap_err();
+        let err = fs_list(
+            &json!({"path": dir.to_string_lossy(), "limit": 0}),
+            &policy,
+            caller,
+        )
+        .unwrap_err();
         assert!(err.contains("integer >= 1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2469,15 +2686,18 @@ mod tests {
     fn fs_list_refuses_when_target_is_not_a_directory() {
         // canonicalize follows a symlink to its real target; that target must
         // itself be a real directory. A symlink to a regular file is refused.
+        let uid = current_uid();
+        if uid == 0 {
+            return;
+        }
         let policy = list_policy();
-        let base = std::env::temp_dir().join(format!("vibed-list-sym-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("mkdir");
+        let caller = caller_uid(uid);
+        let base = home_scratch(uid, "list-sym");
         let file = base.join("regular.txt");
         std::fs::write(&file, "x").unwrap();
         let link = base.join("link-to-file");
         std::os::unix::fs::symlink(&file, &link).expect("symlink");
-        let err = fs_list(&json!({"path": link.to_string_lossy()}), &policy).unwrap_err();
+        let err = fs_list(&json!({"path": link.to_string_lossy()}), &policy, caller).unwrap_err();
         assert!(err.contains("not a directory"), "unexpected error: {err}");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2493,432 +2713,9 @@ mod tests {
         }
         // End-to-end through fs_list for a path that exists on every test box.
         if std::path::Path::new("/root").exists() {
-            let err = fs_list(&json!({"path": "/root"}), &policy).unwrap_err();
+            let err = fs_list(&json!({"path": "/root"}), &policy, Caller::default()).unwrap_err();
             assert!(err.contains("denylist"), "unexpected error: {err}");
         }
-    }
-
-    // -- sectools.list (T0) ----------------------------------------------------
-
-    const SAMPLE_MANIFEST: &str = "# header comment\n\
-        \n\
-        nmap\tnetwork\tT2\tPort scanner\n\
-        john\tpasswords\tT1\tOffline cracker\n\
-        dig\trecon\tT0\tDNS lookups\n\
-        # a comment line\n\
-        ettercap\tnetwork\tT3\tMITM framework\n\
-        malformed-line-without-tabs\n";
-
-    #[test]
-    fn sectools_list_parses_manifest_with_tiers_and_categories() {
-        // Everything present.
-        let payload: Value =
-            serde_json::from_str(&sectools_list_from(SAMPLE_MANIFEST, None, false, |_| true))
-                .unwrap();
-        assert_eq!(payload["available"], true);
-        assert_eq!(payload["count"], 4, "the malformed line must be skipped");
-        assert_eq!(payload["installed_count"], 4);
-        // Categories are sorted and unique.
-        let cats: Vec<&str> = payload["categories"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| c.as_str().unwrap())
-            .collect();
-        assert_eq!(cats, ["network", "passwords", "recon"]);
-        // Governance note surfaces the human-approval gate.
-        assert!(payload["governance"]
-            .as_str()
-            .unwrap()
-            .contains("HUMAN APPROVAL"));
-        // Tiers are carried through verbatim.
-        let nmap = payload["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["binary"] == "nmap")
-            .unwrap();
-        assert_eq!(nmap["tier"], "T2");
-        assert_eq!(nmap["category"], "network");
-    }
-
-    #[test]
-    fn sectools_list_filters_by_category_and_installed() {
-        // Category filter.
-        let payload: Value = serde_json::from_str(&sectools_list_from(
-            SAMPLE_MANIFEST,
-            Some("network"),
-            false,
-            |_| true,
-        ))
-        .unwrap();
-        assert_eq!(payload["count"], 2, "only network tools");
-        // installed_only with a presence oracle that only knows `nmap`.
-        let payload: Value =
-            serde_json::from_str(&sectools_list_from(SAMPLE_MANIFEST, None, true, |bin| {
-                bin == "nmap"
-            }))
-            .unwrap();
-        assert_eq!(payload["count"], 1);
-        assert_eq!(payload["tools"][0]["binary"], "nmap");
-        // installed_count counts across the whole manifest, not the filtered view.
-        assert_eq!(payload["installed_count"], 1);
-    }
-
-    #[test]
-    fn sectools_list_reports_absent_manifest() {
-        // The real tool returns available:false when the file is missing; the
-        // pure body is exercised above, so here we only assert the shape used
-        // by sectools_list() for the absent case is valid JSON.
-        let payload: Value =
-            serde_json::from_str(&sectools_list_from("", None, false, |_| false)).unwrap();
-        assert_eq!(payload["count"], 0);
-        assert_eq!(payload["available"], true);
-    }
-
-    #[test]
-    fn systemctl_show_output_parses_to_snake_case_json() {
-        let stdout = "Id=sshd.service\n\
-                      Description=OpenSSH server daemon\n\
-                      LoadState=loaded\n\
-                      ActiveState=active\n\
-                      SubState=running\n\
-                      UnitFileState=enabled\n\
-                      ActiveEnterTimestamp=Mon 2026-07-13 08:00:00 UTC\n\
-                      IgnoredKey=whatever\n\
-                      not-a-kv-line\n";
-        let map = parse_systemctl_show(stdout);
-        assert_eq!(map["id"], "sshd.service");
-        assert_eq!(map["active_state"], "active");
-        assert_eq!(map["sub_state"], "running");
-        assert_eq!(map["unit_file_state"], "enabled");
-        assert_eq!(map["load_state"], "loaded");
-        assert!(!map.contains_key("IgnoredKey"));
-        assert!(!map.contains_key("ignored_key"));
-    }
-
-    // -- memory.query (scope/limit) and memory.append -------------------------
-
-    /// A scratch memory store mimicking the docs/MEMORY.md §3 layout.
-    fn memory_scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static SEQ: AtomicU32 = AtomicU32::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("vibed-mem-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        for sub in ["user", "projects", "journal", "knowledge"] {
-            std::fs::create_dir_all(dir.join(sub)).expect("create memory scratch");
-        }
-        std::fs::write(
-            dir.join("identity.toml"),
-            "schema = 1\nhostname = \"testhost\"\n",
-        )
-        .expect("write identity");
-        std::fs::write(dir.join("user").join("profile.toml"), "lang = \"fr\"\n")
-            .expect("write profile");
-        std::fs::write(
-            dir.join("journal").join("2026-01-01.jsonl"),
-            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"genesis\",\"source\":\"genesis.sh\",\"data\":{}}\n",
-        )
-        .expect("write journal");
-        dir
-    }
-
-    fn parse_result(result: Result<String, String>) -> Value {
-        serde_json::from_str(&result.expect("tool call succeeds")).expect("valid JSON payload")
-    }
-
-    #[test]
-    fn memory_query_scope_restricts_the_walk() {
-        let root = memory_scratch("qscope");
-        // journal scope: only the journal file is visible.
-        let payload = parse_result(memory_query_at(&root, &json!({"scope": "journal"})));
-        assert_eq!(payload["scope"], "journal");
-        assert_eq!(payload["scanned_files"], 1);
-        assert_eq!(payload["matches"][0]["file"], "journal/2026-01-01.jsonl");
-        // identity scope resolves the single file.
-        let payload = parse_result(memory_query_at(&root, &json!({"scope": "identity"})));
-        assert_eq!(payload["matches"][0]["file"], "identity.toml");
-        // a scope never leaks files from another scope.
-        let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
-        assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_query_rejects_invalid_scope_and_limit() {
-        let root = memory_scratch("qbad");
-        let err = memory_query_at(&root, &json!({"scope": "audit"})).unwrap_err();
-        assert!(err.contains("unknown scope"), "unexpected error: {err}");
-        let err = memory_query_at(&root, &json!({"scope": 3})).unwrap_err();
-        assert!(err.contains("must be a string"), "unexpected error: {err}");
-        let err = memory_query_at(&root, &json!({"limit": 0})).unwrap_err();
-        assert!(err.contains("integer >= 1"), "unexpected error: {err}");
-        let err = memory_query_at(&root, &json!({"limit": -4})).unwrap_err();
-        assert!(err.contains("integer >= 1"), "unexpected error: {err}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_query_limit_caps_and_flags_truncation() {
-        let root = memory_scratch("qlimit");
-        let payload = parse_result(memory_query_at(&root, &json!({"limit": 1})));
-        assert_eq!(payload["matches"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["truncated"], true);
-        // without a limit, the scratch store fits well under the cap.
-        let payload = parse_result(memory_query_at(&root, &json!({})));
-        assert!(payload["matches"].as_array().unwrap().len() >= 3);
-        assert_eq!(payload["truncated"], false);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_query_reports_uninitialized_store() {
-        let root = std::env::temp_dir().join(format!("vibed-mem-absent-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let payload = parse_result(memory_query_at(&root, &json!({})));
-        assert_eq!(payload["initialized"], false);
-    }
-
-    #[test]
-    fn memory_query_content_scan_is_bounded_per_file() {
-        let root = memory_scratch("qbound");
-        // The needle sits AFTER the 64 KiB scan cap: a bounded scan must not
-        // see it (and must not have loaded the whole file to find out).
-        let mut big = vec![b'a'; MAX_MEMORY_SCAN_BYTES + 1024];
-        big.extend_from_slice(b"needle-beyond-cap");
-        std::fs::write(root.join("knowledge").join("big.md"), &big).expect("write big");
-        let payload = parse_result(memory_query_at(
-            &root,
-            &json!({"query": "needle-beyond-cap"}),
-        ));
-        assert_eq!(
-            payload["matches"].as_array().unwrap().len(),
-            0,
-            "content beyond MAX_MEMORY_SCAN_BYTES must not be scanned"
-        );
-        // Same needle before the cap: found.
-        std::fs::write(
-            root.join("knowledge").join("small.md"),
-            b"needle-before-cap",
-        )
-        .expect("write small");
-        let payload = parse_result(memory_query_at(
-            &root,
-            &json!({"query": "needle-before-cap"}),
-        ));
-        assert_eq!(payload["matches"].as_array().unwrap().len(), 1);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_query_walk_never_follows_symlinks() {
-        let root = memory_scratch("qsymlink");
-        // An out-of-store area holding a "secret" the walk must never reach.
-        let outside =
-            std::env::temp_dir().join(format!("vibed-mem-outside-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&outside);
-        std::fs::create_dir_all(&outside).expect("mkdir outside");
-        std::fs::write(outside.join("secret.txt"), "outside-secret-content").expect("write secret");
-        // A symlinked DIRECTORY and a symlinked FILE planted inside the store.
-        std::os::unix::fs::symlink(&outside, root.join("knowledge").join("linkdir"))
-            .expect("dir symlink");
-        std::os::unix::fs::symlink(
-            outside.join("secret.txt"),
-            root.join("knowledge").join("linkfile.txt"),
-        )
-        .expect("file symlink");
-        // Neither shows up in a listing...
-        let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
-        assert_eq!(
-            payload["matches"].as_array().unwrap().len(),
-            0,
-            "symlinks inside the store must be invisible to the walk"
-        );
-        // ...nor can their content be matched.
-        let payload = parse_result(memory_query_at(&root, &json!({"query": "outside-secret"})));
-        assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&outside);
-    }
-
-    // 2026-07-08T01:01:01Z (see the utc_helpers test for the constant's proof).
-    const T_2026_07_08: u64 = 1_783_468_800 + 3_661;
-
-    #[test]
-    fn memory_append_journal_writes_one_dated_line() {
-        let root = memory_scratch("ajournal");
-        let args = json!({
-            "scope": "journal",
-            "entry": {
-                "type": "observation",
-                "source": "claude-code",
-                "data": { "note": "le projet vibeos-ui utilise pnpm, pas npm" }
-            }
-        });
-        let payload = parse_result(memory_append_at(&root, &args, T_2026_07_08));
-        assert_eq!(payload["appended"], true);
-        assert_eq!(payload["file"], "journal/2026-07-08.jsonl");
-        let written = std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl"))
-            .expect("journal file written");
-        let event: Value = serde_json::from_str(written.trim()).expect("one valid JSON line");
-        assert_eq!(event["ts"], "2026-07-08T01:01:01Z");
-        assert_eq!(event["type"], "observation");
-        assert_eq!(event["source"], "claude-code");
-        assert_eq!(
-            event["data"]["note"],
-            "le projet vibeos-ui utilise pnpm, pas npm"
-        );
-        // A second append lands on a NEW line of the same file (append-only).
-        let _ = memory_append_at(&root, &args, T_2026_07_08 + 60).expect("second append");
-        let written =
-            std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl")).unwrap();
-        assert_eq!(written.lines().count(), 2, "appends must never overwrite");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_append_rejects_reserved_and_unknown_journal_types() {
-        let root = memory_scratch("atypes");
-        for reserved in JOURNAL_RESERVED_TYPES {
-            let err = memory_append_at(
-                &root,
-                &json!({"scope": "journal",
-                        "entry": {"type": reserved, "source": "claude-code", "data": {}}}),
-                T_2026_07_08,
-            )
-            .unwrap_err();
-            assert!(
-                err.contains("reserved"),
-                "type '{reserved}': unexpected error: {err}"
-            );
-        }
-        let err = memory_append_at(
-            &root,
-            &json!({"scope": "journal",
-                    "entry": {"type": "opinion", "source": "claude-code", "data": {}}}),
-            T_2026_07_08,
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("unknown journal type"),
-            "unexpected error: {err}"
-        );
-        assert!(!root.join("journal").join("2026-07-08.jsonl").exists());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_append_validates_source_data_and_size() {
-        let root = memory_scratch("aguard");
-        // bad source charset
-        let err = memory_append_at(
-            &root,
-            &json!({"scope": "journal",
-                    "entry": {"type": "observation", "source": "a b/c", "data": {}}}),
-            T_2026_07_08,
-        )
-        .unwrap_err();
-        assert!(err.contains("'source'"), "unexpected error: {err}");
-        // data must be an object
-        let err = memory_append_at(
-            &root,
-            &json!({"scope": "journal",
-                    "entry": {"type": "observation", "source": "x", "data": "free text"}}),
-            T_2026_07_08,
-        )
-        .unwrap_err();
-        assert!(err.contains("'data'"), "unexpected error: {err}");
-        // line cap (anti-DoS)
-        let err = memory_append_at(
-            &root,
-            &json!({"scope": "journal",
-                    "entry": {"type": "observation", "source": "x",
-                              "data": {"blob": "A".repeat(MAX_APPEND_BYTES)}}}),
-            T_2026_07_08,
-        )
-        .unwrap_err();
-        assert!(err.contains("line cap"), "unexpected error: {err}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_append_knowledge_stamps_id_and_ts() {
-        let root = memory_scratch("afact");
-        let payload = parse_result(memory_append_at(
-            &root,
-            &json!({"scope": "knowledge",
-                    "entry": {"subject": "vibeos-ui", "fact": "utilise pnpm",
-                              "source": "claude-code", "confidence": 0.9}}),
-            T_2026_07_08,
-        ));
-        assert_eq!(payload["file"], "knowledge/facts.jsonl");
-        let written = std::fs::read_to_string(root.join("knowledge").join("facts.jsonl")).unwrap();
-        let fact: Value = serde_json::from_str(written.trim()).unwrap();
-        assert_eq!(fact["subject"], "vibeos-ui");
-        assert_eq!(fact["fact"], "utilise pnpm");
-        assert_eq!(fact["confidence"], 0.9);
-        assert_eq!(fact["ts"], "2026-07-08T01:01:01Z");
-        assert!(fact["id"]
-            .as_str()
-            .unwrap()
-            .starts_with(&T_2026_07_08.to_string()));
-        // out-of-range confidence is refused
-        let err = memory_append_at(
-            &root,
-            &json!({"scope": "knowledge",
-                    "entry": {"subject": "s", "fact": "f", "source": "x", "confidence": 2.0}}),
-            T_2026_07_08,
-        )
-        .unwrap_err();
-        assert!(err.contains("between 0 and 1"), "unexpected error: {err}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_append_refuses_unimplemented_and_unknown_scopes() {
-        let root = memory_scratch("ascope");
-        for scope in ["user", "projects"] {
-            let err = memory_append_at(
-                &root,
-                &json!({"scope": scope, "entry": {"source": "x"}}),
-                T_2026_07_08,
-            )
-            .unwrap_err();
-            assert!(
-                err.contains("not implemented"),
-                "scope '{scope}': unexpected error: {err}"
-            );
-        }
-        let err = memory_append_at(
-            &root,
-            &json!({"scope": "identity", "entry": {"source": "x"}}),
-            T_2026_07_08,
-        )
-        .unwrap_err();
-        assert!(err.contains("unknown scope"), "unexpected error: {err}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn memory_append_fails_closed_on_uninitialized_store() {
-        let root = std::env::temp_dir().join(format!("vibed-mem-noinit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let err = memory_append_at(
-            &root,
-            &json!({"scope": "journal",
-                    "entry": {"type": "observation", "source": "x", "data": {}}}),
-            T_2026_07_08,
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("memory store absent"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            !root.exists(),
-            "the store root must never be created by memory.append"
-        );
     }
 
     #[test]
@@ -2933,5 +2730,143 @@ mod tests {
         // end-of-year boundary
         assert_eq!(utc_date_string(1_767_225_600 - 1), "2025-12-31");
         assert_eq!(utc_iso8601(1_767_225_600 - 1), "2025-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn approver_suffix_records_operator_identity() {
+        // A known approver lands in the audit outcome; an unknown one is `?`.
+        assert_eq!(approver_suffix(Some(0)), "(by_uid=0)");
+        assert_eq!(approver_suffix(Some(1000)), "(by_uid=1000)");
+        assert_eq!(approver_suffix(None), "(by_uid=?)");
+    }
+
+    #[test]
+    fn agent_thinking_validates_args() {
+        // Missing session_id -> error.
+        assert!(agent_thinking(&json!({})).is_err());
+        // Traversal session_id -> rejected by reasoning::read_thinking before any I/O.
+        let err = agent_thinking(&json!({"session_id": "../etc/passwd"})).unwrap_err();
+        assert!(err.contains("session_id"), "unexpected error: {err}");
+        // agent.thinking is T0 in the catalog.
+        assert_eq!(tool_tier("agent.thinking"), Some(Tier::T0));
+    }
+
+    #[test]
+    fn agent_sessions_returns_a_well_formed_listing() {
+        // No arguments; on a machine without the store it yields an empty, valid
+        // listing (never an error) — the discovery tool degrades gracefully.
+        let out: Value = serde_json::from_str(&agent_sessions().unwrap()).unwrap();
+        assert!(
+            out["sessions"].is_array(),
+            "sessions must be an array: {out}"
+        );
+        assert!(out["count"].is_u64(), "count must be a number: {out}");
+        // 'latest' is null when empty, or the last id otherwise — both are valid.
+        assert!(
+            out.get("latest").is_some(),
+            "latest key must be present: {out}"
+        );
+        assert_eq!(tool_tier("agent.sessions"), Some(Tier::T0));
+    }
+
+    #[test]
+    fn agents_list_confines_to_caller_uid_and_excludes_self() {
+        let dir = std::env::temp_dir().join(format!("vibed-agents-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = AuditLog::new(dir.clone());
+
+        let me = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(111),
+        }; // the HUD / requesting process
+        let peer = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(222),
+        }; // another agent, SAME uid
+        let stranger = Caller {
+            uid: Some(2000),
+            gid: Some(2000),
+            pid: Some(333),
+        }; // a different user's agent
+
+        log.record(
+            "fs.write",
+            &json!({}),
+            Some("/home/a/x"),
+            "allow",
+            "ok",
+            peer,
+        )
+        .unwrap();
+        log.record("os.status", &json!({}), None, "allow", "ok", me)
+            .unwrap();
+        log.record(
+            "fs.read",
+            &json!({}),
+            Some("/home/b/y"),
+            "allow",
+            "ok",
+            stranger,
+        )
+        .unwrap();
+
+        let out: Value = serde_json::from_str(&agents_list(&json!({}), me, &dir).unwrap()).unwrap();
+        let agents = out["agents"].as_array().unwrap();
+
+        // Only the PEER process of MY uid (pid 222); never me (111) or the
+        // stranger (uid 2000) — cross-user confinement + self-exclusion.
+        assert_eq!(agents.len(), 1, "roster must hold exactly the peer: {out}");
+        assert_eq!(agents[0]["uid"], 1000);
+        assert_eq!(agents[0]["pid"], 222);
+        assert_eq!(agents[0]["tier"], 1, "fs.write is T1");
+        assert!(
+            agents[0]["activity"].as_str().unwrap().contains("fs.write"),
+            "activity must carry the last tool: {out}"
+        );
+
+        // A caller with no SO_PEERCRED uid sees an empty roster (fail-closed).
+        let anon = Caller {
+            uid: None,
+            gid: None,
+            pid: Some(9),
+        };
+        let out2: Value =
+            serde_json::from_str(&agents_list(&json!({}), anon, &dir).unwrap()).unwrap();
+        assert_eq!(out2["count"], 0, "an unidentified caller sees nothing");
+
+        assert_eq!(tool_tier("agents.list"), Some(Tier::T0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn policy_check_classifies_without_executing() {
+        let policy = policy_from_toml(
+            "[[rule]]\nid=\"os\"\ntools=[\"os.status\"]\ntier=\"T0\"\naction=\"allow\"\n\
+             [[rule]]\nid=\"pkg\"\ntools=[\"pkg.install\"]\ntier=\"T2\"\naction=\"allow\"\napproval=\"human\"\n\
+             [[rule]]\nid=\"fsread\"\ntools=[\"fs.read\"]\ntier=\"T1\"\naction=\"allow\"\n\
+             [[rule]]\nid=\"deny-all\"\ntools=[\"*\"]\ntier=\"T0\"\naction=\"deny\"\n",
+        );
+        let check = |args: Value| -> Value {
+            serde_json::from_str(&policy_check(&args, &policy).unwrap()).unwrap()
+        };
+        // T0 allowed.
+        assert_eq!(check(json!({"tool": "os.status"}))["decision"], "allow");
+        // T2 floor: an `allow` at T2 is classified as require_approval.
+        assert_eq!(
+            check(json!({"tool": "pkg.install", "target": "htop"}))["decision"],
+            "require_approval"
+        );
+        // Built-in denylist wins over policy, whatever the tier.
+        let shadow = check(json!({"tool": "fs.read", "target": "/etc/shadow"}));
+        assert_eq!(shadow["decision"], "deny");
+        assert_eq!(shadow["by"], "builtin_denylist");
+        // Unknown tool -> catch-all deny.
+        assert_eq!(check(json!({"tool": "disk.wipe"}))["decision"], "deny");
+        // Missing tool -> error; policy.check is T0.
+        assert!(policy_check(&json!({}), &policy).is_err());
+        assert_eq!(tool_tier("policy.check"), Some(Tier::T0));
     }
 }

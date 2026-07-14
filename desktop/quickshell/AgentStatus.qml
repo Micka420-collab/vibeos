@@ -15,12 +15,11 @@
 // ---------------------------------------------------------------------------
 // DATA SOURCE — v0.1 vs Phase 2 (honesty rule)
 // ---------------------------------------------------------------------------
-// v0.1: MOCK data from vibed_client.js (mockAgents()). vibed v0.1 exposes NO
-// tool that lists connected agents — the roster is not derivable from the daemon
-// yet, and we say so (offline placeholder) instead of faking a wire.
-// TODO(Phase 2): feed from vibed over /run/vibed/mcp.sock — an `agents.list` T0
-// tool, or an audit-derived stream keyed by caller pid (SO_PEERCRED). Same path
-// as os.status, through vibed_client.js.
+// Current state: LIVE from vibed's `agents.list` (T0), audit-derived and
+// CONFINED to the caller's uid (the HUD runs as the session user, so it sees
+// that user's own agent processes, grouped by pid). Empty -> offline placeholder.
+// v0.2.5 limit: `name` is best-effort /proc/<pid>/comm (a Node CLI shows "node")
+// and granularity is per-uid+pid; per-connection identity is future work.
 // ---------------------------------------------------------------------------
 
 import QtQuick

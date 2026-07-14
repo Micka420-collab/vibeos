@@ -1,0 +1,31 @@
+{
+  "name": "vibeos-claude-acp",
+  "version": "0.1.0-dev",
+  "description": "VibeOS governance extension for the Claude Code ACP adapter (Zed): routes the agent's tool permissions through vibed's policy engine — a policy Allow (T0/T1) runs without an editor prompt, T2/T3 always require human approval. See docs/DECISIONS.md ADR-014.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "vibeos-claude-acp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/vibeos-claude-acp.mjs",
+    "test": "vitest run",
+    "smoke": "npm run build && node scripts/smoke-acp.mjs",
+    "smoke:bundle": "npm run bundle && node scripts/smoke-acp.mjs dist/vibeos-claude-acp.mjs",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.58.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

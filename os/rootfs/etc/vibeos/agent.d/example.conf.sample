@@ -1,0 +1,21 @@
+# /etc/vibeos/agent.d/<user>.conf — per-instance config for vibeos-agent@<user>.
+#
+# Copy to <user>.conf (drop the .sample suffix) and edit. Sourced as bash by
+# vibeos-agent-run.sh, so it is shell — keep it to the three assignments below.
+#
+# AGENT_COMMAND : ARRAY — the CLI to supervise, exactly as after `vibectl agent
+#                 run --budget … --`. The supervisor adds its own stream-json tap.
+# AGENT_BUDGET  : wall-clock budget (e.g. 8h, 30m); default 8h if unset.
+# TOKEN_ENV     : the env var the CLI reads its subscription token from; the
+#                 TPM2-unsealed token is injected there (never written to disk).
+#                 Leave empty for a purely local agent (ollama, no cloud auth).
+
+# Example: Claude Code, 8h budget, subscription token via CLAUDE_CODE_OAUTH_TOKEN.
+AGENT_COMMAND=(claude -p --permission-mode acceptEdits)
+AGENT_BUDGET=8h
+TOKEN_ENV=CLAUDE_CODE_OAUTH_TOKEN
+
+# Example: fully local opencode via ollama (no cloud, no token) —
+# AGENT_COMMAND=(opencode run)
+# AGENT_BUDGET=4h
+# TOKEN_ENV=

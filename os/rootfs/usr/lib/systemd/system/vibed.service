@@ -4,9 +4,9 @@
 # (JSON-RPC 2.0) listening on the unix socket /run/vibed/mcp.sock. Every tool
 # call is gated by the policy engine (/etc/vibeos/policy.d/*.toml, capability
 # tiers T0..T3, first matching rule wins, absolute default-deny) and appended
-# to the audit trail /var/lib/vibeos/audit/vibed.jsonl (v0.1: plain
-# append-only JSONL with caller identity; hash-chaining and journald
-# replication are Phase 4).
+# to the audit trail /var/lib/vibeos/audit/ (append-only JSONL, one file per
+# UTC day, SHA-256 hash chain continuous across days, with caller identity;
+# external anchoring TPM/Rekor + journald replication are Phase 4).
 #
 # Privileges — honest v0.1 status: vibed runs as ROOT (no User= below).
 # The Phase 4 target is User=vibed (account already created by
@@ -46,7 +46,7 @@ RestartSec=2s
 RuntimeDirectory=vibed
 RuntimeDirectoryMode=0755
 # /var/lib/vibeos   -> memory subsystem mountpoint + audit trail
-#                      (/var/lib/vibeos/audit/vibed.jsonl); automatically
+#                      (/var/lib/vibeos/audit/vibed-<date>.jsonl); automatically
 #                      writable even under ProtectSystem=strict.
 StateDirectory=vibeos
 StateDirectoryMode=0700

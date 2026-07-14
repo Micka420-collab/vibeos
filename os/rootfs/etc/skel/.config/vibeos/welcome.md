@@ -29,7 +29,8 @@ Agents en ligne de commande : `claude`, `opencode`, `gemini`,
   `/run/vibed/mcp.sock`). Les administrateurs (groupe `wheel`) sont enrôlés
   automatiquement dans `vibeos-agents` — l'accès au socket est effectif à la
   connexion suivante. Le journal d'audit est réservé à root, par conception :
-  `sudo tail -f /var/lib/vibeos/audit/vibed.jsonl`.
+  `sudo tail -f /var/lib/vibeos/audit/vibed-$(date -u +%F).jsonl`
+  (un fichier par jour ; `vibed --verify-audit` vérifie la chaîne).
 - **OS immuable** : `npm i -g` installe dans `~/.npm-global`, `mise` gère
   vos toolchains dans `$HOME`, `distrobox` couvre le reste. Rien ne touche
   jamais `/usr`.

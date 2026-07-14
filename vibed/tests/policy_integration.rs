@@ -85,6 +85,17 @@ fn shipped_default_policy_canonical_decisions() {
         "memory.append (T1) must be allowed by the shipped policy"
     );
 
+    // Agent observability tools are T0 read-only and MUST be allowed by the
+    // shipped policy — otherwise the HUD roster / reasoning discovery is dead
+    // behind the catch-all default-deny.
+    for tool in ["agent.thinking", "agent.sessions", "agents.list"] {
+        assert_eq!(
+            engine.evaluate(tool, Some(Tier::T0), NO_CTX),
+            Decision::Allow,
+            "{tool} (T0) must be allowed by the shipped policy"
+        );
+    }
+
     // T2 is a floor: allow + approval=human => RequireApproval, never Allow.
     assert_eq!(
         engine.evaluate("pkg.install", Some(Tier::T2), NO_CTX),
@@ -105,5 +116,52 @@ fn shipped_default_policy_canonical_decisions() {
         engine.evaluate("totally.unknown.tool", Some(Tier::T0), NO_CTX),
         Decision::Deny,
         "a tool matched by no allow rule must be denied"
+    );
+}
+
+/// The SHIPPED policy must put access-, audit- and approval-critical units OUT
+/// OF REACH of svc.restart: not "requires approval" but a hard Deny, decided
+/// BEFORE the approval floor (policy.rs checks service.denied first). An agent
+/// can never even queue an approval request to restart these.
+#[test]
+fn shipped_policy_denies_restart_of_critical_units_before_approval() {
+    let engine = PolicyEngine::load_dir(&repo_policy_dir()).expect("shipped policy must load");
+    let svc = |unit: &'static str| CallContext {
+        path: None,
+        service: Some(unit),
+    };
+
+    // Every unit whose restart would cut the operator's access, the audit trail,
+    // or the approval mechanism itself is DENIED outright by the shipped policy.
+    for unit in [
+        "vibed.service",              // the warden + approval store
+        "vibeos-agent@alice.service", // the agent supervisor (glob match)
+        "polkit.service",             // authorization backbone
+        "systemd-journald.service",   // log pipeline
+        "auditd.service",             // audit pipeline
+        "sshd.service",               // remote access
+        "NetworkManager.service",     // network / remote access
+        "systemd-networkd.service",
+        "display-manager.service", // the graphical approval session
+        "sddm.service",
+        "systemd-logind.service", // sessions
+        "user@1000.service",      // the operator's per-user manager (glob)
+        "dbus-broker.service",    // system bus
+        "dbus.service",
+        "dbus.socket", // the bus is socket-activated
+    ] {
+        assert_eq!(
+            engine.evaluate("svc.restart", Some(Tier::T2), svc(unit)),
+            Decision::Deny,
+            "svc.restart on {unit} must be DENIED (not merely require approval)"
+        );
+    }
+
+    // A non-critical unit still reaches the human-approval floor — the deny-list
+    // is a floor of exclusions, not a blanket ban on the tool.
+    assert_eq!(
+        engine.evaluate("svc.restart", Some(Tier::T2), svc("my-app.service")),
+        Decision::RequireApproval,
+        "a non-critical unit must still require approval, not be silently allowed or denied"
     );
 }

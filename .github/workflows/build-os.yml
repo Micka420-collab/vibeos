@@ -15,6 +15,8 @@
 #   * `manifest` (release only) assembles the per-arch images into one
 #     multi-arch manifest (tags: latest, <sha>, and the version on a tag),
 #     then signs the manifest with cosign keyless.
+#   * `supply_chain` (release only) publishes an SPDX SBOM of the image and
+#     runs an advisory Trivy CVE scan (2026 supply-chain transparency).
 #   * `iso` (release only) builds one installer ISO per arch, each on its native
 #     runner, and uploads it as an artifact.
 #
@@ -218,6 +220,46 @@ jobs:
       - name: Sign manifest (cosign keyless)
         run: |
           cosign sign --yes "${{ needs.setup.outputs.image }}@${{ steps.manifest.outputs.digest }}"
+
+  # Supply-chain transparency (2026 best practice for an immutable distro):
+  # publish an SPDX SBOM of the image and run an advisory CVE scan. The scan is
+  # ADVISORY (exit-code 0) — a security-first OS built on Fedora inherits
+  # upstream CVEs we track but do not block early releases on; the report gives
+  # visibility. Both are release-only artifacts.
+  supply_chain:
+    name: SBOM + CVE scan (advisory)
+    if: needs.setup.outputs.publish == 'true'
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read # pull the arch image from ghcr.io
+    steps:
+      - name: Log in to ghcr.io (docker, for SBOM/scan pulls)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
+
+      # SPDX SBOM of the amd64 image (a concrete single-arch ref; the manifest
+      # list is not directly scannable). Auto-uploaded as a build artifact.
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ needs.setup.outputs.image }}:${{ github.sha }}-amd64
+          format: spdx-json
+          output-file: vibeos-amd64.spdx.json
+          artifact-name: vibeos-sbom-amd64.spdx.json
+
+      # Advisory CVE scan: report CRITICAL/HIGH, never fail the build (exit 0).
+      - name: Trivy vulnerability scan (advisory)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ needs.setup.outputs.image }}:${{ github.sha }}-amd64
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+          ignore-unfixed: true
 
   iso:
     name: Build install ISO (${{ matrix.arch }})
