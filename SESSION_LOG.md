@@ -7,7 +7,7 @@
 > (empilée sur les draft PRs Phase 2, cible `phase2-supply-chain`) est **antérieure
 > et superseded** par #11 ; son sort (fermeture) est laissé à l'humain.
 
-## 🔧 Session 2026-07-14 (nuit, autonome) — log.read + revue adversariale → 2 vrais bugs sécurité corrigés
+## 🔧 Session 2026-07-14/15 (nuit, autonome) — log.read + revue adversariale (8 sous-agents, 2 vagues) → 4 vrais bugs sécurité corrigés
 
 **Travail codable du mandat** :
 - **[PR #37](https://github.com/Micka420-collab/vibeos/pull/37) `log.read` (T0, ADR-011)** : lecture de journal **allowlistée** (`[rule.services].allowed`, défaut refus, évaluée avant le plancher de tier), **bornée** (≤ 200 lignes + 64 Kio), **rédaction best-effort**, aucun filtre libre, audit de l'unité. **Touche `policy.rs`** (ajout `allowed` à `ServiceConstraints`) → flaggé revue humaine. Doc synchronisée (README surface d'outils + THREAT-MODEL mitigation S2).
@@ -17,7 +17,17 @@
 - **[PR #38](https://github.com/Micka420-collab/vibeos/pull/38)** (HIGH) : denylist étendue — `/proc/kcore`+`/proc/kallsyms` (mémoire noyau + défaite KASLR), `/proc/*/mem`+`/proc/*/pagemap`, `/run/user/**`+`/run/secrets/**` (cross-user), secrets `/etc` non-standard (krb5/sssd/ipsec/pki private). Synchronisé code + miroir `default.toml` + commentaire. Test dédié.
 - **[PR #39](https://github.com/Micka420-collab/vibeos/pull/39)** : `confine_read` confine désormais `/proc/<pid>` à l'uid **propriétaire** (fail-closed) — ferme la recon cross-user résiduelle (maps/status/net d'autres users).
 
-Mineurs traités : re-cap octets après rédaction dans `log.read` (borne 64 Kio honnête, #37). Latent noté : check load-time `services.allowed` sur outils sans unité. **Aucun merge/fermeture par l'agent** ; `policy.rs`/`fs.rs` flaggés.
+**Revue adversariale vague 2** (3 sous-agents : `approval.rs`, `supervisor.rs`, scripts shell `os/rootfs`). `approval.rs` (portail T2/T3 one-shot) **CLEAN** (forge/replay/self-approve/scope/expiry/caps tous fail-closed & race-free). Deux vrais bugs corrigés :
+- **[PR #42](https://github.com/Micka420-collab/vibeos/pull/42)** (MEDIUM) : `vibeos-agent-egress.sh` ajoutait toute IP résolue à `IPAddressAllow` sans filtre — un hôte allowlisté résolvant (poisoning/CNAME) vers `169.254.169.254`/RFC1918/loopback perçait le mur egress vers l'interne (SSRF). `is_internal_ip()` les exclut (validé : 12 internes droppées, 9 publiques gardées).
+- **[PR #43](https://github.com/Micka420-collab/vibeos/pull/43)** : le budget wall-clock de `agent run --budget` (garde-fou primaire runaway) était mesuré sur `SystemTime` non-monotone → un pas d'horloge en arrière laissait un agent dépasser son budget. Passé à `Instant` monotone (+ arm `try_wait` Err durci).
+
+**Autres livrables nuit** :
+- **[PR #41](https://github.com/Micka420-collab/vibeos/pull/41)** : test du garde anti-horloge-inversée du rate-limiter (`saturating_sub`, documenté mais non couvert).
+- **[PR #44](https://github.com/Micka420-collab/vibeos/pull/44)** : les scripts sécurité `os/rootfs` (egress/run/seal-token/selfcheck) ajoutés au job shellcheck CI (n'étaient pas couverts).
+- **Rédacteur `log.read`** (#37) amélioré : masque aussi les credentials en URI (`scheme://user:pass@host`) + re-cap octets après rédaction.
+- **Containerfile** revu : supply-chain disciplinée (base par digest, téléchargements sha256-vérifiés, repos GPG, `npm --ignore-scripts`) — aucun bug.
+
+Mineurs latents notés (mémoire) : check load-time `services.allowed` sur outils sans unité ; TOCTOU pid-reuse de #39 ; épinglage empreinte clé GPG VSCodium. **Aucun merge/fermeture de PR par l'agent** (le classifieur bloque aussi `gh pr merge` de mon côté) ; `policy.rs`/`fs.rs`/`supervisor.rs` flaggés pour revue.
 
 ## 🔧 Session 2026-07-14 (soir) — garde-fou anti-dérive + trajectoire + branding boot
 
