@@ -120,7 +120,7 @@ jobs:
       # and tests (the `rust` job uses stable; this locks the floor). Cargo.lock
       # pins indexmap/hashbrown to versions compatible with 1.75 — see Cargo.toml.
       - name: Install Rust 1.75.0
-        uses: dtolnay/rust-toolchain@26d5411064267eef06eb6ac742767c969ac9f679 # 1.75.0
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # 1.75.0
       - name: Build (locked)
         run: cargo build --locked
       - name: Test (locked)
