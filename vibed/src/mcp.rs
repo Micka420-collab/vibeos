@@ -104,6 +104,11 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "**/.aws/**",               // AWS credentials, config, SSO cache — whole dir
     "**/.config/gcloud/**",     // Google Cloud credentials store
     "/etc/NetworkManager/system-connections/**", // Wi-Fi/VPN PSKs and certs
+    "/etc/krb5.keytab",         // Kerberos service keys
+    "/etc/sssd/**",             // SSSD: LDAP/AD bind credentials
+    "/etc/ipsec.secrets",       // IPsec PSK/keys
+    "/etc/ipsec.d/private/**",  // IPsec private keys
+    "/etc/pki/**/private/**",   // TLS/PKI private keys (public certs stay readable)
     "**/.docker/config.json",   // registry auth tokens
     "**/.kube/config",          // kubernetes cluster credentials
     "**/.netrc",                // machine login credentials
@@ -115,12 +120,26 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     // denylist itself alias-consistent with the policy matcher. It is the only
     // alias-sensitive entry here — the others are **/-anchored (spelling-agnostic)
     // or under non-symlinked roots (/etc, /proc, /run, /boot, /var/lib/vibeos).
-    "/var/roothome/**",    // canonical form of /root on OSTree (see above)
-    "/proc/*/environ",     // process environments may leak secrets
-    "/proc/**/environ",    // ...including per-thread /proc/<pid>/task/<tid>/environ
-    "/proc/**/cmdline",    // command lines may carry secrets/tokens
+    "/var/roothome/**", // canonical form of /root on OSTree (see above)
+    "/proc/*/environ",  // process environments may leak secrets
+    "/proc/**/environ", // ...including per-thread /proc/<pid>/task/<tid>/environ
+    "/proc/**/cmdline", // command lines may carry secrets/tokens
+    // Kernel-memory pseudo-files: vibed reads as ROOT, so these expose kernel
+    // memory and symbol addresses (KASLR defeat) to ANY caller — never a
+    // legitimate fs.read target (adversarial review 2026-07-14).
+    "/proc/kcore",     // kernel core image (physical RAM)
+    "/proc/kallsyms",  // kernel symbol addresses (defeats KASLR)
+    "/proc/kmsg",      // kernel ring buffer (also a blocking read)
+    "/proc/*/mem",     // a process's address space
+    "/proc/**/mem",    // ...including per-thread task/<tid>/mem
+    "/proc/*/pagemap", // virtual->physical page mapping (exploit primitive)
+    "/proc/**/pagemap",
     "/run/credentials/**", // decrypted systemd credentials
-    "/boot/**",            // boot chain is none of the agent's business
+    // Per-user runtime dirs are mode 0700; vibed-as-root would otherwise let
+    // caller A read caller B's session state/sockets/tokens (cross-user).
+    "/run/user/**",    // XDG_RUNTIME_DIR of every user
+    "/run/secrets/**", // systemd/container secrets convention
+    "/boot/**",        // boot chain is none of the agent's business
     // Credentials of the AI agents themselves and of the developer tooling
     // shipped in the image. fs.read is NOT confined to the caller's home
     // (vibed runs as root), so without these entries any agent could read
@@ -1451,6 +1470,46 @@ mod tests {
             assert!(
                 builtin_denied(path, false).is_some(),
                 "{path} must be read-denied by the built-in denylist"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_denylist_covers_kernel_memory_and_runtime_dirs() {
+        // Adversarial review 2026-07-14: vibed reads as ROOT, so /proc /run /etc
+        // being "system read prefixes" exposed kernel memory (KASLR defeat) and
+        // other users' 0700 runtime dirs. These must be read-denied.
+        for path in [
+            "/proc/kcore",
+            "/proc/kallsyms",
+            "/proc/kmsg",
+            "/proc/1234/mem",
+            "/proc/1234/task/5678/mem",
+            "/proc/1234/pagemap",
+            "/run/user/1000",
+            "/run/user/1000/bus",
+            "/run/secrets/db-password",
+            "/etc/krb5.keytab",
+            "/etc/sssd/sssd.conf",
+            "/etc/ipsec.secrets",
+            "/etc/ipsec.d/private/host.key",
+            "/etc/pki/tls/private/server.key",
+        ] {
+            assert!(
+                builtin_denied(path, false).is_some(),
+                "{path} must be read-denied by the built-in denylist"
+            );
+        }
+        // ...without over-blocking legitimate system reads (public certs, the
+        // agent's own os-release, a non-mem /proc file it may legitimately read).
+        for path in [
+            "/etc/os-release",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/usr/lib/os-release",
+        ] {
+            assert!(
+                builtin_denied(path, false).is_none(),
+                "{path} must stay readable (not a secret)"
             );
         }
     }
