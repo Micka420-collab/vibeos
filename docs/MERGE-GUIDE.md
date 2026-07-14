@@ -14,6 +14,10 @@
 (`policy.rs` vs `mcp.rs`/`tools/`) → aucun conflit entre elles, aucune dépendance.
 Priorité au fix sécurité.
 
+> ✅ **Vérifié localement** (2026-07-14) : `main` + #19 + #20 mergés ensemble =
+> **0 conflit**, `cargo test` **150 tests verts** (139 unit + 8 mcp + 3 policy),
+> clippy `-D warnings` + fmt propres. Les deux correctifs coexistent sans souci.
+
 ## Pourquoi elles sont hors de `main` (post-mortem, à ne pas reproduire)
 
 Ces correctifs vivaient dans une **pile de PR empilées** :
