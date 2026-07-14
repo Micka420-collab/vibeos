@@ -7,7 +7,7 @@
 
 | PR | Branche | Contenu | Pourquoi sûr | Ce qui casse sans elle |
 |----|---------|---------|--------------|------------------------|
-| 🔒 **(sécurité)** | `security-home-alias-fix` | Fix : sur bootc `/home` est un lien vers `/var/home` ; une règle opérateur `paths.denied` en `/home/…` était contournable via `/var/home/…`. `apply_rule` replie l'alias (`path_glob_match`). | Ne **resserre** que les règles deny (jamais desserre). Test de régression inclus. CI verte. | **La vuln reste vivante sur `main`** : un deny opérateur dans le home est esquivable en changeant d'orthographe. |
+| 🔒 **[#20](https://github.com/Micka420-collab/vibeos/pull/20)** | `security-home-alias-fix` | Fix : sur bootc `/home` est un lien vers `/var/home` ; une règle opérateur `paths.denied` en `/home/…` était contournable via `/var/home/…`. `apply_rule` replie l'alias (`path_glob_match`). | Ne **resserre** que les règles deny (jamais desserre). Test de régression inclus. CI verte. | **La vuln reste vivante sur `main`** : un deny opérateur dans le home est esquivable en changeant d'orthographe. |
 | **[#19](https://github.com/Micka420-collab/vibeos/pull/19)** | `f6-fs-extraction` | Refactor F6 : `fs.*` sorti de `mcp.rs` vers `tools/fs.rs` + `test_support.rs`. Déplacement pur, zéro comportement changé. | Relire en `git diff --color-moved`. 149 tests inchangés, verts. | Rien fonctionnellement ; `mcp.rs` reste un gros fichier. Cosmétique, non urgent. |
 
 **Ordre : quelconque.** Les deux touchent des fichiers **disjoints**
