@@ -74,7 +74,7 @@ Indépendamment de tout fichier de politique, le moteur refuse dans le code :
 - en **lecture et écriture** : `/var/lib/vibeos/audit/**`, `/etc/shadow*`, `**/.ssh/**`, `**/.gnupg/**`, `/proc/*/environ`, `/run/credentials/**`, `/boot/**` ;
 - en **écriture uniquement** : `/etc/vibeos/policy.d/**` et `/var/lib/vibeos/memory/**`.
 
-Les entrées `paths.denied` de `default.toml` reprennent cette liste par défense en profondeur : les retirer du TOML ne rouvre **pas** l'accès. Le volume mémoire n'est pas inscriptible via `fs.write` ; les écritures mémoire passeront par `memory.append` (cible Phase 2).
+Les entrées `paths.denied` de `default.toml` reprennent cette liste par défense en profondeur : les retirer du TOML ne rouvre **pas** l'accès. Le volume mémoire n'est pas inscriptible via `fs.write` ; les écritures mémoire passent par `memory.append` (T1, additif, sans argument de chemin — règle `memory-append`).
 
 ## Écrire une règle
 
@@ -109,6 +109,6 @@ Check-list avant d'ajouter une règle :
 ## Livré en v0.1 vs planifié
 
 - **Livré (v0.1)** : moteur de politiques `first-match-wins` avec refus par défaut absolu, plancher d'approbation T2/T3, fail-closed au chargement, denylist codée en dur, audit JSONL append-only.
-- **Phase 2** : `memory.append` (écritures mémoire médiées).
+- **Phase 2** : ~~`memory.append`~~ ✅ livré (écritures mémoire médiées, scopes `journal`/`knowledge` ; `user`/`projects` restent à venir).
 - **Phase 3** : sandbox par outil (systemd-run, seccomp, landlock).
 - **Phase 4** : chaînage cryptographique de l'audit, `vibed` sans privilèges (`User=vibed`), SELinux dédiée.

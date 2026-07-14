@@ -21,13 +21,13 @@ Principe : les agents ne touchent jamais le système directement. Toute action p
 }
 ```
 
-Le même extrait fonctionne dans un `.mcp.json` à la racine d'un projet (portée projet), ou pour tout autre client MCP stdio (gemini-cli : `~/.gemini/settings.json`, opencode : voir sa doc). Claude Code lance `socat`, qui relaie chaque ligne JSON entre stdio et le socket. Les outils `os.status`, `fs.read`, `fs.write`, `pkg.install`, `svc.restart`, `memory.query` apparaissent alors comme des outils MCP `vibeos` côté agent.
+Le même extrait fonctionne dans un `.mcp.json` à la racine d'un projet (portée projet), ou pour tout autre client MCP stdio (gemini-cli : `~/.gemini/settings.json`, opencode : voir sa doc). Claude Code lance `socat`, qui relaie chaque ligne JSON entre stdio et le socket. Les outils `os.status`, `fs.read`, `fs.write`, `pkg.install`, `svc.restart`, `memory.query`, `memory.append` apparaissent alors comme des outils MCP `vibeos` côté agent.
 
 Points de comportement à connaître :
 
 - **T2+ = approbation humaine, toujours.** `pkg.install` et `svc.restart` répondent `requires_approval` : l'agent reçoit un résultat `isError` explicite, et la demande est tracée dans `/var/lib/vibeos/audit/vibed.jsonl` (avec l'identité de l'appelant : uid/gid/pid). Le workflow d'approbation (`vibectl`) arrive dans une étape ultérieure (voir `ROADMAP.md`).
 - **Accès au socket.** Le socket est en `root:vibeos-agents`, mode `0660` : l'utilisateur qui lance l'agent doit appartenir au groupe **`vibeos-agents`**, créé dans l'image par `os/rootfs/usr/lib/sysusers.d/vibeos.conf` (`vibed` applique le groupe au socket à son démarrage). C'est la première barrière, la politique est la seconde.
-- **Écritures fichiers (T1).** `fs.write` est limité en v0.1 à `/home/**` et `/var/home/**` (sous Fedora, `/home` est un lien vers `/var/home`). La mémoire VibeOS n'est **pas** inscriptible via `fs.write` (deny codé en dur) : les écritures mémoire passeront par `memory.append`, cible Phase 2.
+- **Écritures fichiers (T1).** `fs.write` est limité en v0.1 à `/home/**` et `/var/home/**` (sous Fedora, `/home` est un lien vers `/var/home`). La mémoire VibeOS n'est **pas** inscriptible via `fs.write` (deny codé en dur) : les écritures mémoire passent par **`memory.append`** (T1) — strictement additif, scopes `journal` et `knowledge` (les scopes `user`/`projects` restent Phase 2/3, voir `docs/MEMORY.md` §9).
 - **Mémoire.** `memory.query` lit `/var/lib/vibeos/memory`, créée au premier boot par `vibeos-genesis.service` (en clair en v0.1 ; LUKS = Phase 3). Le **mode amnésique** (cible Phase 3) reconstruira cette mémoire en tmpfs à chaque démarrage : les agents doivent tolérer une mémoire vide.
 
 Test manuel rapide, sans client MCP :

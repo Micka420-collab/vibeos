@@ -47,6 +47,26 @@ const O_NOFOLLOW: i32 = 0x20000;
 const MAX_MEMORY_SCAN_BYTES: usize = 64 * 1024;
 /// Upper bound on files walked by memory.query.
 const MAX_MEMORY_FILES: usize = 200;
+/// Hard cap on one serialized memory.append line, newline included (anti-DoS:
+/// an agent cannot balloon the memory store with a single call).
+const MAX_APPEND_BYTES: usize = 16 * 1024;
+/// Journal event types an AGENT may append via memory.append. The remaining
+/// types of docs/MEMORY.md §3.5 (`genesis`, `boot`, `tool_call`, `purge`) are
+/// reserved for the system itself (genesis.sh, vibed, vibectl) and refused.
+const JOURNAL_AGENT_TYPES: [&str; 5] =
+    ["observation", "decision", "preference", "project_seen", "error"];
+const JOURNAL_RESERVED_TYPES: [&str; 4] = ["genesis", "boot", "tool_call", "purge"];
+/// Memory sub-scopes addressable by memory.query's `scope` argument, mapped to
+/// their location in the store (relative path, is_directory). Keep in sync
+/// with the layout in docs/MEMORY.md §3.
+const MEMORY_SCOPES: [(&str, &str, bool); 6] = [
+    ("identity", "identity.toml", false),
+    ("hardware", "hardware.json", false),
+    ("user", "user", true),
+    ("projects", "projects", true),
+    ("journal", "journal", true),
+    ("knowledge", "knowledge", true),
+];
 /// fs.write (T1 modify-user) is confined to user-scope prefixes.
 /// On Fedora bootc systems /home is a symlink to /var/home, so both spellings
 /// must be accepted. Keep in sync with `security/policy.d/default.toml`
@@ -86,8 +106,10 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
 ];
 
 /// Additional BUILT-IN denylist for WRITES only: agents may query the memory
-/// through memory.query but never write it directly (memory.append is the
-/// Phase 2 write path), and the policy itself is not agent-writable.
+/// through memory.query but never write it via fs.write — memory.append is
+/// the governed write path (scope-based, no path argument, so this path
+/// denylist cannot and need not apply to it) — and the policy itself is not
+/// agent-writable.
 const BUILTIN_DENY_WRITE: &[&str] = &[
     "/etc/vibeos/policy.d/**",
     "/var/lib/vibeos/memory/**",
@@ -466,10 +488,30 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
         (
             "memory.query",
             Tier::T0,
-            "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match files \
-             (scope/limit arguments and memory.append are Phase 2/3 targets, see docs/MEMORY.md)",
+            "Query the VibeOS memory store (/var/lib/vibeos/memory): list or substring-match \
+             files, optionally restricted to one scope and capped by limit (docs/MEMORY.md §9)",
             json!({"type": "object",
-                   "properties": {"query": {"type": "string"}}}),
+                   "properties": {
+                       "query": {"type": "string"},
+                       "scope": {"type": "string",
+                                 "enum": ["identity", "hardware", "user",
+                                          "projects", "journal", "knowledge"]},
+                       "limit": {"type": "integer", "minimum": 1}
+                   }}),
+        ),
+        (
+            "memory.append",
+            Tier::T1,
+            "Append ONE entry to the VibeOS memory store — strictly additive, no delete or \
+             rewrite. Writable scopes in v0.2: 'journal' (entry: type/source/data) and \
+             'knowledge' (entry: subject/fact/source[/confidence]); vibed stamps ts (and the \
+             fact id). 'user' and 'projects' are a Phase 2/3 remainder (docs/MEMORY.md §9)",
+            json!({"type": "object", "required": ["scope", "entry"],
+                   "properties": {
+                       "scope": {"type": "string",
+                                 "enum": ["journal", "knowledge", "user", "projects"]},
+                       "entry": {"type": "object"}
+                   }}),
         ),
     ]
 }
@@ -520,6 +562,7 @@ fn execute_tool(
         })
         .to_string()),
         "memory.query" => memory_query(args),
+        "memory.append" => memory_append(args),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
@@ -805,12 +848,44 @@ fn home_dir_for_uid_in(passwd: &str, uid: u32) -> Option<String> {
 }
 
 fn memory_query(args: &Value) -> Result<String, String> {
+    memory_query_at(std::path::Path::new(MEMORY_DIR), args)
+}
+
+/// Body of memory.query with the store root as a parameter, so the tests can
+/// run it against a scratch layout without touching /var/lib/vibeos/memory.
+fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, String> {
     let query = args
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_lowercase();
-    let root = std::path::Path::new(MEMORY_DIR);
+
+    // `scope` restricts the walk to one entry of the docs/MEMORY.md §3 layout.
+    let scope = match args.get("scope") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) => match MEMORY_SCOPES.iter().find(|(n, _, _)| n == name) {
+            Some(entry) => Some(*entry),
+            None => {
+                let valid: Vec<&str> = MEMORY_SCOPES.iter().map(|(n, _, _)| *n).collect();
+                return Err(format!(
+                    "memory.query: unknown scope '{name}' (valid: {})",
+                    valid.join(", ")
+                ));
+            }
+        },
+        Some(_) => return Err("memory.query: 'scope' must be a string".to_string()),
+    };
+
+    // `limit` caps the number of matches returned; the walk itself stays
+    // bounded by MAX_MEMORY_FILES regardless.
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => MAX_MEMORY_FILES,
+        Some(value) => match value.as_u64() {
+            Some(n) if n >= 1 => (n as usize).min(MAX_MEMORY_FILES),
+            _ => return Err("memory.query: 'limit' must be an integer >= 1".to_string()),
+        },
+    };
+
     if !root.is_dir() {
         return Ok(json!({
             "initialized": false,
@@ -822,7 +897,18 @@ fn memory_query(args: &Value) -> Result<String, String> {
 
     // Bounded iterative walk: no recursion, hard cap on visited files.
     let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    match scope {
+        None => stack.push(root.to_path_buf()),
+        Some((_, relative, is_dir)) => {
+            let start = root.join(relative);
+            if is_dir {
+                stack.push(start);
+            } else if start.is_file() {
+                files.push(start);
+            }
+        }
+    }
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -844,7 +930,12 @@ fn memory_query(args: &Value) -> Result<String, String> {
     }
 
     let mut matches = Vec::new();
+    let mut truncated = false;
     for path in &files {
+        if matches.len() >= limit {
+            truncated = true;
+            break;
+        }
         let relative = path
             .strip_prefix(root)
             .unwrap_or(path)
@@ -867,10 +958,254 @@ fn memory_query(args: &Value) -> Result<String, String> {
     Ok(json!({
         "initialized": true,
         "query": query,
+        "scope": scope.map(|(name, _, _)| name),
         "scanned_files": files.len(),
-        "matches": matches
+        "matches": matches,
+        "truncated": truncated
     })
     .to_string())
+}
+
+fn memory_append(args: &Value) -> Result<String, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("memory.append: system clock error: {e}"))?
+        .as_secs();
+    memory_append_at(std::path::Path::new(MEMORY_DIR), args, now)
+}
+
+/// Body of memory.append with the store root and the clock as parameters
+/// (deterministic, filesystem-scratch-friendly tests).
+///
+/// Strictly ADDITIVE by construction: the only operation is an O_APPEND write
+/// of one serialized line to a scope-derived file — there is no delete, no
+/// rewrite, and no caller-controlled path (docs/MEMORY.md §9). The caller's
+/// authoritative identity (uid/gid/pid) is recorded by the audit pipeline;
+/// the `source` field below is self-declared memory metadata.
+fn memory_append_at(
+    root: &std::path::Path,
+    args: &Value,
+    epoch_secs: u64,
+) -> Result<String, String> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let scope = args
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "memory.append: missing 'scope' argument".to_string())?;
+    let entry = args
+        .get("entry")
+        .ok_or_else(|| "memory.append: missing 'entry' argument".to_string())?;
+    if !entry.is_object() {
+        return Err("memory.append: 'entry' must be an object".to_string());
+    }
+
+    if !root.is_dir() {
+        return Err(
+            "memory.append: memory store absent: vibeos-genesis.service has not run yet \
+             (nothing to append to; fail-closed)"
+                .to_string(),
+        );
+    }
+
+    let ts = utc_iso8601(epoch_secs);
+    let (relative_file, line_value) = match scope {
+        "journal" => {
+            let event_type = entry
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "memory.append: missing 'type' field in journal entry".to_string())?;
+            if JOURNAL_RESERVED_TYPES.contains(&event_type) {
+                return Err(format!(
+                    "memory.append: journal type '{event_type}' is reserved for the system \
+                     (genesis.sh, vibed, vibectl) and cannot be appended by an agent"
+                ));
+            }
+            if !JOURNAL_AGENT_TYPES.contains(&event_type) {
+                return Err(format!(
+                    "memory.append: unknown journal type '{event_type}' (valid: {})",
+                    JOURNAL_AGENT_TYPES.join(", ")
+                ));
+            }
+            let source = validated_source(entry)?;
+            let data = entry.get("data").cloned().unwrap_or_else(|| json!({}));
+            if !data.is_object() {
+                return Err("memory.append: 'data' must be an object".to_string());
+            }
+            (
+                format!("journal/{}.jsonl", utc_date_string(epoch_secs)),
+                json!({ "ts": ts, "type": event_type, "source": source, "data": data }),
+            )
+        }
+        "knowledge" => {
+            let subject = required_entry_str(entry, "subject", 256)?;
+            let fact = required_entry_str(entry, "fact", 4096)?;
+            let source = validated_source(entry)?;
+            let confidence = match entry.get("confidence") {
+                None | Some(Value::Null) => None,
+                Some(value) => match value.as_f64() {
+                    Some(c) if (0.0..=1.0).contains(&c) => Some(c),
+                    _ => {
+                        return Err(
+                            "memory.append: 'confidence' must be a number between 0 and 1"
+                                .to_string(),
+                        )
+                    }
+                },
+            };
+            let mut fact_value = json!({
+                "id": next_fact_id(epoch_secs),
+                "ts": ts,
+                "subject": subject,
+                "fact": fact,
+                "source": source
+            });
+            if let Some(c) = confidence {
+                fact_value["confidence"] = json!(c);
+            }
+            ("knowledge/facts.jsonl".to_string(), fact_value)
+        }
+        "user" | "projects" => {
+            return Err(format!(
+                "memory.append: scope '{scope}' is not implemented yet (structured TOML/JSON \
+                 merge — Phase 2/3 remainder, docs/MEMORY.md §3); the append-only scopes \
+                 'journal' and 'knowledge' are the writable surface of v0.2"
+            ));
+        }
+        other => {
+            return Err(format!(
+                "memory.append: unknown scope '{other}' (writable: journal, knowledge)"
+            ));
+        }
+    };
+
+    let mut line = serde_json::to_string(&line_value)
+        .map_err(|e| format!("memory.append: serialization failed: {e}"))?;
+    line.push('\n');
+    if line.len() > MAX_APPEND_BYTES {
+        return Err(format!(
+            "memory.append: entry exceeds the {} KiB line cap",
+            MAX_APPEND_BYTES / 1024
+        ));
+    }
+
+    let target = root.join(&relative_file);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "memory.append: internal error: target has no parent".to_string())?;
+    // Genesis creates the subdirectories; recreate defensively with the same
+    // private permissions if one is missing (never the store root itself).
+    if !parent.is_dir() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(|e| format!("memory.append: cannot create '{relative_file}' parent: {e}"))?;
+    }
+
+    // Serialize appends within the process; combined with O_APPEND, each entry
+    // lands as one contiguous line even under concurrent connections.
+    // O_NOFOLLOW: if the target name was swapped for a symlink, refuse rather
+    // than follow it out of the store.
+    static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = APPEND_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW)
+        .open(&target)
+        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("memory.append {relative_file}: {e}"))?;
+
+    Ok(json!({
+        "appended": true,
+        "file": relative_file,
+        "bytes": line.len(),
+        "ts": ts
+    })
+    .to_string())
+}
+
+/// `source` field of a memory entry: the self-declared emitter label (e.g.
+/// "claude-code"), constrained to a safe charset. The authoritative caller
+/// identity lives in the audit trail, not here.
+fn validated_source(entry: &Value) -> Result<String, String> {
+    let source = entry
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "memory.append: missing 'source' field in entry".to_string())?;
+    let valid = !source.is_empty()
+        && source.len() <= 64
+        && source
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if !valid {
+        return Err(
+            "memory.append: 'source' must be 1-64 characters of [A-Za-z0-9._-]".to_string(),
+        );
+    }
+    Ok(source.to_string())
+}
+
+/// Required bounded string field of a memory entry.
+fn required_entry_str(entry: &Value, field: &str, max_len: usize) -> Result<String, String> {
+    let value = entry
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("memory.append: missing '{field}' field in entry"))?;
+    if value.is_empty() || value.len() > max_len {
+        return Err(format!(
+            "memory.append: '{field}' must be 1-{max_len} bytes"
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// Unique-enough fact id: epoch seconds + pid + per-process sequence number.
+/// No dedup semantics — facts are append-only; curation is a vibectl matter.
+fn next_fact_id(epoch_secs: u64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{epoch_secs}-{}-{n}", std::process::id())
+}
+
+/// Civil UTC date-time from unix epoch seconds — Howard Hinnant's
+/// `civil_from_days` algorithm, std-only (the crate deliberately has no
+/// date/time dependency). Returns (year, month, day, hour, minute, second).
+fn utc_civil(epoch_secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (epoch_secs / 86_400) as i64;
+    let seconds_of_day = epoch_secs % 86_400;
+    let hour = (seconds_of_day / 3_600) as u32;
+    let minute = ((seconds_of_day % 3_600) / 60) as u32;
+    let second = (seconds_of_day % 60) as u32;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let year_of_era = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    let year = if month <= 2 { year_of_era + 1 } else { year_of_era };
+    (year, month, day, hour, minute, second)
+}
+
+/// `AAAA-MM-JJ` (UTC) — the journal's one-file-per-day naming (MEMORY.md §3.5).
+fn utc_date_string(epoch_secs: u64) -> String {
+    let (year, month, day, ..) = utc_civil(epoch_secs);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// ISO 8601 UTC timestamp with a `Z` suffix.
+fn utc_iso8601(epoch_secs: u64) -> String {
+    let (year, month, day, hour, minute, second) = utc_civil(epoch_secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 // ---------------------------------------------------------------------------
@@ -1331,6 +1666,258 @@ mod tests {
         assert_eq!(tool_tier("pkg.install"), Some(Tier::T2));
         assert_eq!(tool_tier("svc.restart"), Some(Tier::T2));
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
+        assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
         assert_eq!(tool_tier("disk.wipe"), None, "unknown tool has no tier => default-deny");
+    }
+
+    // -- memory.query (scope/limit) and memory.append -------------------------
+
+    /// A scratch memory store mimicking the docs/MEMORY.md §3 layout.
+    fn memory_scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("vibed-mem-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["user", "projects", "journal", "knowledge"] {
+            std::fs::create_dir_all(dir.join(sub)).expect("create memory scratch");
+        }
+        std::fs::write(dir.join("identity.toml"), "schema = 1\nhostname = \"testhost\"\n")
+            .expect("write identity");
+        std::fs::write(dir.join("user").join("profile.toml"), "lang = \"fr\"\n")
+            .expect("write profile");
+        std::fs::write(
+            dir.join("journal").join("2026-01-01.jsonl"),
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"genesis\",\"source\":\"genesis.sh\",\"data\":{}}\n",
+        )
+        .expect("write journal");
+        dir
+    }
+
+    fn parse_result(result: Result<String, String>) -> Value {
+        serde_json::from_str(&result.expect("tool call succeeds")).expect("valid JSON payload")
+    }
+
+    #[test]
+    fn memory_query_scope_restricts_the_walk() {
+        let root = memory_scratch("qscope");
+        // journal scope: only the journal file is visible.
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "journal"})));
+        assert_eq!(payload["scope"], "journal");
+        assert_eq!(payload["scanned_files"], 1);
+        assert_eq!(payload["matches"][0]["file"], "journal/2026-01-01.jsonl");
+        // identity scope resolves the single file.
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "identity"})));
+        assert_eq!(payload["matches"][0]["file"], "identity.toml");
+        // a scope never leaks files from another scope.
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_rejects_invalid_scope_and_limit() {
+        let root = memory_scratch("qbad");
+        let err = memory_query_at(&root, &json!({"scope": "audit"})).unwrap_err();
+        assert!(err.contains("unknown scope"), "unexpected error: {err}");
+        let err = memory_query_at(&root, &json!({"scope": 3})).unwrap_err();
+        assert!(err.contains("must be a string"), "unexpected error: {err}");
+        let err = memory_query_at(&root, &json!({"limit": 0})).unwrap_err();
+        assert!(err.contains("integer >= 1"), "unexpected error: {err}");
+        let err = memory_query_at(&root, &json!({"limit": -4})).unwrap_err();
+        assert!(err.contains("integer >= 1"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_limit_caps_and_flags_truncation() {
+        let root = memory_scratch("qlimit");
+        let payload = parse_result(memory_query_at(&root, &json!({"limit": 1})));
+        assert_eq!(payload["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["truncated"], true);
+        // without a limit, the scratch store fits well under the cap.
+        let payload = parse_result(memory_query_at(&root, &json!({})));
+        assert!(payload["matches"].as_array().unwrap().len() >= 3);
+        assert_eq!(payload["truncated"], false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_reports_uninitialized_store() {
+        let root = std::env::temp_dir().join(format!("vibed-mem-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let payload = parse_result(memory_query_at(&root, &json!({})));
+        assert_eq!(payload["initialized"], false);
+    }
+
+    // 2026-07-08T01:01:01Z (see the utc_helpers test for the constant's proof).
+    const T_2026_07_08: u64 = 1_783_468_800 + 3_661;
+
+    #[test]
+    fn memory_append_journal_writes_one_dated_line() {
+        let root = memory_scratch("ajournal");
+        let args = json!({
+            "scope": "journal",
+            "entry": {
+                "type": "observation",
+                "source": "claude-code",
+                "data": { "note": "le projet vibeos-ui utilise pnpm, pas npm" }
+            }
+        });
+        let payload = parse_result(memory_append_at(&root, &args, T_2026_07_08));
+        assert_eq!(payload["appended"], true);
+        assert_eq!(payload["file"], "journal/2026-07-08.jsonl");
+        let written = std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl"))
+            .expect("journal file written");
+        let event: Value = serde_json::from_str(written.trim()).expect("one valid JSON line");
+        assert_eq!(event["ts"], "2026-07-08T01:01:01Z");
+        assert_eq!(event["type"], "observation");
+        assert_eq!(event["source"], "claude-code");
+        assert_eq!(event["data"]["note"], "le projet vibeos-ui utilise pnpm, pas npm");
+        // A second append lands on a NEW line of the same file (append-only).
+        let _ = memory_append_at(&root, &args, T_2026_07_08 + 60).expect("second append");
+        let written = std::fs::read_to_string(root.join("journal").join("2026-07-08.jsonl")).unwrap();
+        assert_eq!(written.lines().count(), 2, "appends must never overwrite");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_rejects_reserved_and_unknown_journal_types() {
+        let root = memory_scratch("atypes");
+        for reserved in JOURNAL_RESERVED_TYPES {
+            let err = memory_append_at(
+                &root,
+                &json!({"scope": "journal",
+                        "entry": {"type": reserved, "source": "claude-code", "data": {}}}),
+                T_2026_07_08,
+            )
+            .unwrap_err();
+            assert!(err.contains("reserved"), "type '{reserved}': unexpected error: {err}");
+        }
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "opinion", "source": "claude-code", "data": {}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown journal type"), "unexpected error: {err}");
+        assert!(!root.join("journal").join("2026-07-08.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_validates_source_data_and_size() {
+        let root = memory_scratch("aguard");
+        // bad source charset
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "a b/c", "data": {}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("'source'"), "unexpected error: {err}");
+        // data must be an object
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "x", "data": "free text"}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("'data'"), "unexpected error: {err}");
+        // line cap (anti-DoS)
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "x",
+                              "data": {"blob": "A".repeat(MAX_APPEND_BYTES)}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("line cap"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_knowledge_stamps_id_and_ts() {
+        let root = memory_scratch("afact");
+        let payload = parse_result(memory_append_at(
+            &root,
+            &json!({"scope": "knowledge",
+                    "entry": {"subject": "vibeos-ui", "fact": "utilise pnpm",
+                              "source": "claude-code", "confidence": 0.9}}),
+            T_2026_07_08,
+        ));
+        assert_eq!(payload["file"], "knowledge/facts.jsonl");
+        let written = std::fs::read_to_string(root.join("knowledge").join("facts.jsonl")).unwrap();
+        let fact: Value = serde_json::from_str(written.trim()).unwrap();
+        assert_eq!(fact["subject"], "vibeos-ui");
+        assert_eq!(fact["fact"], "utilise pnpm");
+        assert_eq!(fact["confidence"], 0.9);
+        assert_eq!(fact["ts"], "2026-07-08T01:01:01Z");
+        assert!(fact["id"].as_str().unwrap().starts_with(&T_2026_07_08.to_string()));
+        // out-of-range confidence is refused
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "knowledge",
+                    "entry": {"subject": "s", "fact": "f", "source": "x", "confidence": 2.0}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("between 0 and 1"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_refuses_unimplemented_and_unknown_scopes() {
+        let root = memory_scratch("ascope");
+        for scope in ["user", "projects"] {
+            let err = memory_append_at(
+                &root,
+                &json!({"scope": scope, "entry": {"source": "x"}}),
+                T_2026_07_08,
+            )
+            .unwrap_err();
+            assert!(err.contains("not implemented"), "scope '{scope}': unexpected error: {err}");
+        }
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "identity", "entry": {"source": "x"}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown scope"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_append_fails_closed_on_uninitialized_store() {
+        let root = std::env::temp_dir().join(format!("vibed-mem-noinit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let err = memory_append_at(
+            &root,
+            &json!({"scope": "journal",
+                    "entry": {"type": "observation", "source": "x", "data": {}}}),
+            T_2026_07_08,
+        )
+        .unwrap_err();
+        assert!(err.contains("memory store absent"), "unexpected error: {err}");
+        assert!(!root.exists(), "the store root must never be created by memory.append");
+    }
+
+    #[test]
+    fn utc_helpers_match_known_dates() {
+        assert_eq!(utc_iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_date_string(0), "1970-01-01");
+        // 2024-02-29 (leap day): 1_704_067_200 (2024-01-01) + 59 days.
+        assert_eq!(utc_date_string(1_704_067_200 + 59 * 86_400), "2024-02-29");
+        // 2026-07-08: 1_767_225_600 (2026-01-01) + 188 days = 1_783_468_800.
+        assert_eq!(utc_date_string(1_783_468_800), "2026-07-08");
+        assert_eq!(utc_iso8601(1_783_468_800 + 3_661), "2026-07-08T01:01:01Z");
+        // end-of-year boundary
+        assert_eq!(utc_date_string(1_767_225_600 - 1), "2025-12-31");
+        assert_eq!(utc_iso8601(1_767_225_600 - 1), "2025-12-31T23:59:59Z");
     }
 }

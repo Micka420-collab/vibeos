@@ -106,8 +106,8 @@ allowed = [
 # Defense in depth: these paths can never match `allowed` above, and the
 # built-in denylist blocks them in code anyway. Kept explicit so the
 # invariant stays visible where policies are edited. The memory volume is
-# not writable via fs.write; memory writes will go through memory.append
-# (Phase 2 target).
+# not writable via fs.write; memory writes go through memory.append
+# (rule below), which takes no path argument.
 denied = [
   "/var/lib/vibeos/memory/**",
   "/var/lib/vibeos/audit/**",
@@ -120,6 +120,13 @@ tools = ["memory.query"]
 tier = "T0"
 action = "allow"
 reason = "Read-only query against the VibeOS memory store."
+
+[[rule]]
+id = "memory-append"
+tools = ["memory.append"]
+tier = "T1"
+action = "allow"
+reason = "Strictly additive, scope-based write into the memory store (journal/knowledge JSONL). No path argument, no delete, no rewrite; identity/hardware stay Genesis-only and vibed stamps the timestamps."
 
 # --- T2: system-scope mutation (human approval is a hard floor) -------------
 

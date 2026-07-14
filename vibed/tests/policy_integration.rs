@@ -45,6 +45,18 @@ fn shipped_default_policy_canonical_decisions() {
         "os.status (T0) must be allowed by the shipped policy"
     );
 
+    // The memory tools: T0 read and T1 governed append are both allowed.
+    assert_eq!(
+        engine.evaluate("memory.query", Some(Tier::T0), NO_CTX),
+        Decision::Allow,
+        "memory.query (T0) must be allowed by the shipped policy"
+    );
+    assert_eq!(
+        engine.evaluate("memory.append", Some(Tier::T1), NO_CTX),
+        Decision::Allow,
+        "memory.append (T1) must be allowed by the shipped policy"
+    );
+
     // T2 is a floor: allow + approval=human => RequireApproval, never Allow.
     assert_eq!(
         engine.evaluate("pkg.install", Some(Tier::T2), NO_CTX),
