@@ -643,7 +643,7 @@ autres installs npm du `Containerfile`.
    **régression de sécurité** tant que le Tier B Zed n'est pas validé : il ferait
    entrer une surface npm non éprouvée dans l'image immuable. Le flag ne passe à `1`
    qu'accompagné d'une preuve de Tier B (session Zed réelle, checklist
-   `scripts/e2e-zed.sh` verte).
+   `zed/vibeos-claude-acp/scripts/e2e-zed.sh` verte).
 
 **Conséquences.** Chaîne npm **reproductible, vérifiable et build-time seulement**
 (le bundle est le seul artefact shippé), alignée sur la discipline de l'OS ;
