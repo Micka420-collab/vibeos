@@ -1,0 +1,51 @@
+# roadmap-truth.yml — garde-fou anti-dérive documentaire.
+#
+# Lance scripts/verify-roadmap-truth.sh à chaque push vers main et sur toute PR
+# touchant la doc de statut, le script lui-même, ou vibed (le compteur de tests).
+# HARD FAIL sur les incohérences mécaniques (lien mort, fichier cité absent) ;
+# les signalements heuristiques (compteur de tests, PR dans l'historique) sont
+# des WARNING affichés dans le log, non bloquants. Voir l'en-tête du script pour
+# la frontière mécanique / jugement humain.
+name: roadmap-truth
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ROADMAP.md"
+      - "STATUS.md"
+      - "docs/DECISIONS.md"
+      - "scripts/verify-roadmap-truth.sh"
+      - "vibed/**"
+      - ".github/workflows/roadmap-truth.yml"
+  pull_request:
+    paths:
+      - "ROADMAP.md"
+      - "STATUS.md"
+      - "docs/DECISIONS.md"
+      - "scripts/verify-roadmap-truth.sh"
+      - "vibed/**"
+      - ".github/workflows/roadmap-truth.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: roadmap-truth-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  truth:
+    name: doc vs réalité — vérité-terrain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0 — le check des PR citées a besoin de l'historique complet
+      # de main (git log), pas seulement du dernier commit.
+      - name: Checkout (historique complet)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: verify-roadmap-truth
+        run: bash scripts/verify-roadmap-truth.sh
