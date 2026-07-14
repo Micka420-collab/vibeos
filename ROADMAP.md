@@ -260,6 +260,38 @@ gantt
 
 **Objectif** : transformer un prototype fonctionnel en système défendable. C'est la phase la plus technique et la plus longue : chaîne de boot mesurée, politique SELinux dédiée, signatures, sandbox des outils, et activation gouvernée des tiers T2/T3.
 
+> **⚠ Note de trajectoire — 2026-07-14 (décision de Micka, pas de l'agent).**
+>
+> Cette phase est désignée « **chemin critique du projet** » (voir la durée
+> indicative plus bas, 4–6 mois) depuis la clôture de la Phase 0 (2026-07-03).
+> Onze jours plus tard, **son cœur n'a pas démarré** : la politique SELinux
+> dédiée (`vibed_t` enforcing), la chaîne de boot mesurée/signée (UKI +
+> dm-verity + vérification cosign côté client) et la sandbox par outil
+> (seccomp/Landlock) sont **toutes à zéro**. `vibed` tourne d'ailleurs encore
+> **en root** (`User=vibed` est explicitement repoussé ici). Le seul durcissement
+> réalisé est **périphérique** — la chaîne d'audit SHA-256 + rotation — qui
+> relève en fait de la maturité Phase 2 (le tableau de synthèse marque la phase
+> « amorcée » sur cette seule base).
+>
+> **Ce qui a avancé à la place, en parallèle** : le cœur Phase 2 (vibed/MCP,
+> outils `fs`/`svc`/`memory`, plomberie d'approbation T2/T3, rate-limiting) et
+> surtout la Phase 2.5 (intégration Zed ACP, HUD Quickshell, capture de
+> raisonnement, superviseur d'agent + kill-switch, scellement TPM2 du jeton,
+> allowlist d'egress). **Tout est réel, testé et documenté** — mais **rien de
+> tout cela n'est le durcissement du chemin critique annoncé**. Ce sont les
+> différenciateurs IA-native/vibecoding, livrés avant le socle défensif.
+>
+> **Décision à trancher — avec ces faits, par Micka :** ce séquencement est-il
+> **assumé** (livrer d'abord la valeur IA-native, durcir avant la release
+> publique de Phase 6) ou **à corriger** (basculer maintenant sur le cœur
+> Phase 4, en gelant le périmètre des nouvelles fonctionnalités) ? Phase 4 est un
+> engagement de **plusieurs mois** (écriture d'une politique SELinux correcte,
+> boot mesuré validé sur matériel réel, sandboxing par outil) : il ne démarrera
+> pas par accident et **ne doit pas être lancé par défaut faute de mieux**.
+> L'agent **n'a pas** pris cette décision et ne commencera pas Phase 4 sans un
+> go explicite ; cette note existe pour que le choix soit fait en connaissance
+> de cause plutôt que subi.
+
 ### Livrables
 
 - **Politique SELinux dédiée** : domaine `vibed_t` confiné (et types associés pour le socket, la mémoire, les politiques), système entier en **enforcing**.
