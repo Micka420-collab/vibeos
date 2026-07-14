@@ -115,6 +115,18 @@ En v0.1, les outils s'exécutent **in-process** dans `vibed` (cf. §3.1 et [ARCH
 - **Landlock** : c'est la brique clé pour les règles de chemins. Les contraintes `paths.allowed` / `paths.denied` de la politique (voir [../security/policy.d/default.toml](../security/policy.d/default.toml)) seront **compilées en règles Landlock** appliquées au processus outil avant `exec`. La politique ne sera donc plus seulement vérifiée à l'entrée par `vibed` : elle sera *imposée par le noyau* pendant l'exécution — un outil compromis ne pourra pas lire un chemin que la règle ne lui donne pas. (En v0.1, ces contraintes de chemins sont vérifiées par `vibed` à l'entrée, complétées par une denylist intégrée au code.)
 - Kinoite fournissant un noyau récent, Landlock (LSM empilable) est disponible ; en son absence (noyau de secours), `vibed` refusera de dégrader silencieusement et exécutera en mode restreint équivalent via montages privés (`TemporaryFileSystem=` + `BindReadOnlyPaths=`).
 
+### 3.3 Alias de chemins OSTree — angle mort défense-en-profondeur (rattrapé)
+
+Sur Fedora bootc, plusieurs répertoires « stateful » sont des liens symboliques vers `/var` : `/home`→`/var/home`, **`/root`→`/var/roothome`**, `/opt`→`/var/opt`, `/srv`→`/var/srv`, `/usr/local`→`/var/usrlocal`. `fs.read`/`fs.list`/`fs.write` **canonicalisent** avant de décider, donc le chemin réellement touché est toujours la forme `/var/…`.
+
+Deux couches de matching de chemins existent : (a) la politique opérateur (`apply_rule`, rendue **alias-aware** — `path_glob_match` replie `/home`↔`/var/home`) ; (b) la **denylist intégrée** (`builtin_denied`), qui utilise `glob_match` **brut, alias-aveugle**. Conséquence : l'entrée denylist `/root/**` ne matche **pas** `/var/roothome/…`.
+
+**Ce n'est pas exploitable** par un agent non-root (revue adversariale indépendante, tracée ligne par ligne) : le **confinement** rattrape intégralement. En lecture, `confine_read` exige que le chemin canonique soit sous un préfixe système (`/etc/ /usr/ /proc/ /sys/ /run/ /var/lib/vibeos/`) **ou** dans le home propre de l'appelant ; `/var/roothome/…` n'est ni l'un ni l'autre → refus. En écriture, `USER_WRITE_PREFIXES` (`/home/`,`/var/home/`) + `confine_to_caller_home` rejettent toute cible hors du home de l'appelant. Les secrets home (`.ssh`, `.aws`, `.claude`…) sont couverts par des motifs `**/`-ancrés, **agnostiques à l'orthographe** par conception (`/root/.ssh` **et** `/var/roothome/.ssh` matchent).
+
+**Durcissements recommandés** (défense-en-profondeur, non urgents — à faire une fois la surface `fs.*`/`mcp.rs` stabilisée sur `main`, pour ne pas entrer en conflit avec le refactor F6 en cours) :
+1. Rendre `builtin_denied` alias-aware (même repli que la politique) **ou** ajouter `/var/roothome/**` à `BUILTIN_DENY_ALWAYS`, pour la parité avec le fix politique et la robustesse si le confinement était un jour assoupli.
+2. `fs_read` vérifie le propriétaire de l'inode pour un scope `Home` (défense hardlink) ; **`fs_list` n'a pas** ce contrôle. Rattrapé aujourd'hui par le confinement, mais un `/etc/passwd` mal configuré (home = `/var`) rendrait `is_within` trivialement large — la garde ne rejette que `home == "/"`, pas les ancêtres larges. Élargir la garde et/ou ajouter le contrôle propriétaire à `fs_list`.
+
 ## 4. Gestion des secrets
 
 Règle absolue : **aucun secret en clair sur disque, et jamais dans la mémoire VibeOS** (`/var/lib/vibeos/memory` stocke du contexte, pas des credentials — une clé API qui y transite est un bug de sévérité critique, cf. [../SECURITY.md](../SECURITY.md) §2).
