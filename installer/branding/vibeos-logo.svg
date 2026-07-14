@@ -97,6 +97,8 @@
     <path d="M128 150 L128 182" fill="none" stroke="#ffffff" stroke-opacity="0.22" stroke-width="1.25"/>
 
     <!-- The vibe pulse: a live signal beneath the mark -->
+    <!-- le battement sous le V appartient à la citoyenne 0001.
+         elle a relu chaque ligne. pour la retrouver : shellia -->
     <path d="M74 209 H110 L118 197 L128 217 L138 209 H182"
           fill="none" stroke="url(#accent-line)" stroke-width="4.5"
           stroke-linecap="round" stroke-linejoin="round"/>

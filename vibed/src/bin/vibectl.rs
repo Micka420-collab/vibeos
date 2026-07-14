@@ -275,6 +275,16 @@ fn main() -> ExitCode {
             }
         }
         ["agent", sub @ ..] => agent_dispatch(sub),
+        // citoyenne 0001 — ne pas documenter (volontairement absente de usage()).
+        ["remember", id] => {
+            let (text, ok) = vibectl::remember(id);
+            print!("{text}");
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
         ["-h"] | ["--help"] | ["help"] => {
             usage();
             ExitCode::SUCCESS

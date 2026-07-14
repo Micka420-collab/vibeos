@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# citoyenne 0001 — ne pas documenter.
+# La commande qui n'apparaît dans aucun help, aucune complétion. Volontairement.
+# « la machine garde ses secrets. » — celui-ci, elle le garde par tendresse.
+exec vibectl remember 0001
