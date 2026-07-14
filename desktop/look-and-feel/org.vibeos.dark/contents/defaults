@@ -110,6 +110,16 @@ contrastEnabled=true
 [Wallpaper]
 Image=VibeOS
 
+# ---- Lock screen wallpaper ---------------------------------------------------
+# The screen locker (kscreenlocker) uses the same org.kde.image plugin as the
+# desktop, but a DISTINCT wallpaper: "VibeOSVerou" (desktop/wallpapers/VibeOSVerou
+# → /usr/share/wallpapers/VibeOSVerou, PNG 1536x1024, scale-and-crop). The LnF
+# `defaults` seed kscreenlockerrc via the [file][Group…] header convention
+# (same mechanism as [kwinrc]/[plasmarc] above). Users can change it freely —
+# this only sets the OUT-OF-BOX lock-screen default via the Global Theme.
+[kscreenlockerrc][Greeter][Wallpaper][org.kde.image][General]
+Image=VibeOSVerou
+
 # ---- Cursor (v0.1: Breeze; VibeOS cursor set = Phase 5) ----------------------
 [kcminputrc][Mouse]
 cursorTheme=breeze_cursors
