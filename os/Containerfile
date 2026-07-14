@@ -186,9 +186,14 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 # Tools not packaged in Fedora, from well-maintained COPRs (probed working on
 # Kinoite 42): starship (atim), zellij (varlad), lazygit (atim), ghostty
 # (scottames), yazi (lihaohong). dnf5-plugins provides the `dnf copr`
-# subcommand. The COPR repos stay enabled so these tools receive updates on
-# image rebuilds (same model as the VSCodium repo). /etc/skel configures
-# fish -> starship, Ghostty, the Zellij "vibe" layout and yazi.
+# subcommand. SUPPLY CHAIN (audit decision): the COPR repos are enabled only
+# for the install below and DISABLED before the layer ends — a deployed
+# system never trusts a COPR repo at runtime. Updates still flow through
+# image rebuilds (this step re-enables, installs current versions,
+# re-disables); the exact shipped versions are recorded in the NEVRA
+# manifest (/usr/share/vibeos/packages-nevra.txt, layer 8).
+# /etc/skel configures fish -> starship, Ghostty, the Zellij "vibe" layout
+# and yazi.
 RUN dnf -y install dnf5-plugins \
     && dnf -y copr enable atim/starship \
     && dnf -y copr enable varlad/zellij \
@@ -201,6 +206,11 @@ RUN dnf -y install dnf5-plugins \
         lazygit \
         ghostty \
         yazi \
+    && dnf -y copr disable atim/starship \
+    && dnf -y copr disable varlad/zellij \
+    && dnf -y copr disable atim/lazygit \
+    && dnf -y copr disable scottames/ghostty \
+    && dnf -y copr disable lihaohong/yazi \
     && dnf clean all
 
 # --- 1f. mise (vendor rpm repo) ----------------------------------------------
@@ -330,15 +340,40 @@ RUN set -eu; \
 #    (see docs/ARCHITECTURE.md §4.4, ADR-006 and docs/ECOSYSTEM.md).
 #    opencode (sst/opencode, MIT): multi-provider terminal agent, fully local
 #    via ollama — the curated default addition to the shipped CLIs.
+#    SUPPLY CHAIN (audit decision): --ignore-scripts — no npm lifecycle script
+#    (postinstall & co, a classic exfiltration/backdoor vector) executes at
+#    build time. TWO deliberate, scoped exceptions, re-run via a targeted
+#    `npm rebuild` (every other package's scripts stay ignored) — both caught
+#    by the verification layer below on 2026-07-08, exactly as designed:
+#      * @anthropic-ai/claude-code: postinstall installs the first-party
+#        native binary ("claude native binary not installed" without it);
+#      * opencode-ai: postinstall wires the platform binary shipped in its
+#        own optionalDependencies ("postinstall script was not run" without).
+#    The verification layer proves each CLI works; if a future version starts
+#    requiring its scripts, the BUILD fails there and any new exception is
+#    made deliberately, here, in review.
 # =============================================================================
 RUN HOME=/tmp npm_config_cache=/tmp/.npm-cache \
-        npm install -g --prefix=/usr \
+        npm install -g --prefix=/usr --ignore-scripts \
         @anthropic-ai/claude-code@2.1.199 \
         @anthropic-ai/claude-agent-sdk@0.3.199 \
         @google/gemini-cli@0.49.0 \
         @openai/codex@0.142.5 \
         opencode-ai@1.17.13 \
+    && HOME=/tmp npm_config_cache=/tmp/.npm-cache \
+        npm rebuild -g --prefix=/usr --foreground-scripts \
+        @anthropic-ai/claude-code \
+        opencode-ai \
     && rm -rf /tmp/.npm-cache
+
+# --- 5bis. Prove the CLIs run without their npm lifecycle scripts -------------
+# Every shipped CLI must answer --version in the image being built (this is
+# also a Phase 1 exit criterion, ROADMAP.md). HOME=/tmp: /root is a dangling
+# symlink at build time (OSTree), and some CLIs write state on first run.
+RUN HOME=/tmp claude --version \
+    && HOME=/tmp gemini --version \
+    && HOME=/tmp codex --version \
+    && HOME=/tmp opencode --version
 
 # =============================================================================
 # 6. aider — NOT shipped by default (optional user install)
@@ -425,15 +460,29 @@ COPY --from=quickshell-builder /out/usr/ /usr/
 RUN QT_QPA_PLATFORM=offscreen /usr/bin/quickshell --version
 
 # =============================================================================
-# 8. Finalize: scrub machine-local state, then validate the image
+# 8. Finalize: NEVRA manifest, scrub machine-local state, validate the image
 #    /var must ship empty in a bootc image (it is deploy-time machine state);
 #    dnf/npm/pip/akmods leave caches and logs behind. /run and /tmp are
 #    runtime-only tmpfs and must ship empty too (npm's node-gyp cache landed in
 #    /tmp/.cache because we set HOME=/tmp for the CLI install). `bootc container
 #    lint` warns on any content in /run and /tmp. Keep this as the FINAL step.
 # =============================================================================
+# --- Supply chain: exact RPM inventory of the shipped image -------------------
+# COPR/vendor packages are deliberately not version-pinned at install time
+# (old NEVRAs vanish from those repos and would break rebuilds), so the shipped
+# set is RECORDED instead: one NEVRA per line, diffable between releases and
+# usable to re-audit exactly what a given image contains.
+RUN rpm -qa --qf '%{NEVRA}\n' | sort > /usr/share/vibeos/packages-nevra.txt \
+    && wc -l /usr/share/vibeos/packages-nevra.txt
 # Note: do NOT wipe all of /run — podman bind-mounts /run/systemd/resolve for
 # build-time DNS and it is busy. Only the dnf cruft under /run needs removing.
+# The post-scrub `claude`/`opencode` --version runs prove the binaries wired
+# by the scoped `npm rebuild` (layer 5) live in IMAGE content (/usr), not in
+# a build-time $HOME that this scrub just deleted — fresh empty HOME, exactly
+# like a user's first run. Their /tmp droppings are wiped again before lint.
 RUN rm -rf /var/cache/* /var/log/* /var/lib/dnf /var/tmp/* /root/.cache \
              /tmp/* /tmp/.[!.]* /run/dnf \
+    && HOME=/tmp /usr/bin/claude --version \
+    && HOME=/tmp /usr/bin/opencode --version \
+    && rm -rf /tmp/* /tmp/.[!.]* \
     && bootc container lint
