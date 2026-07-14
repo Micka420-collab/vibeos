@@ -45,6 +45,11 @@ const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// final path component is a symbolic link, instead of silently following it.
 /// Defined here to keep the crate free of a libc dependency.
 pub(crate) const O_NOFOLLOW: i32 = 0x20000;
+/// `O_NONBLOCK` (Linux): open() does not block. Belt-and-suspenders for fs.read
+/// against a FIFO — even if a regular file is swapped for a FIFO in the TOCTOU
+/// window after the file-type check, the open returns instead of hanging the
+/// worker thread forever (a FIFO with no writer would otherwise block).
+const O_NONBLOCK: i32 = 0x800;
 /// Per-file cap when scanning memory content in memory.query.
 pub(crate) const MAX_MEMORY_SCAN_BYTES: usize = 64 * 1024;
 /// Chars of content returned per match by memory.query (so an agent can read
@@ -1413,16 +1418,24 @@ fn fs_read(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String
     }
     recheck_policy_canonical(policy, "fs.read", &canonical_str)?;
     // Cross-user confinement: a system tree or the caller's OWN home only.
-    confine_read("fs.read", caller, &canonical_str)?;
+    let scope = confine_read("fs.read", caller, &canonical_str)?;
 
-    // Reject anything that is not a regular file: character/block devices
-    // (e.g. /dev/urandom) would exhaust memory, and FIFOs would block the
-    // worker thread forever. O_NOFOLLOW: canonicalize already resolved every
-    // symlink, so the final component of `canonical` must not be one anymore —
-    // if it is (post-canonicalization swap), open() fails with ELOOP.
+    // Reject anything that is not a regular file BEFORE opening: a FIFO opened
+    // O_RDONLY with no writer BLOCKS the spawn_blocking worker forever (a DoS —
+    // enough of them exhaust the blocking pool and stall every user's calls),
+    // and a character/block device would exhaust memory. `validated` is the
+    // lstat of the already-canonical path (no symlink left), so its type is
+    // authoritative — check it here, not after the (potentially blocking) open.
+    if !validated.file_type().is_file() {
+        return Err(format!("fs.read: '{canonical_str}' is not a regular file"));
+    }
+    // O_NOFOLLOW: canonicalize already resolved every symlink, so the final
+    // component must not be one anymore — a post-canonicalization swap fails
+    // with ELOOP. O_NONBLOCK: belt-and-suspenders so a swap to a FIFO in the
+    // TOCTOU window returns instead of blocking (regular-file reads ignore it).
     let mut file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(&canonical)
         .map_err(|e| format!("fs.read {path}: {e}"))?;
     let opened = file
@@ -1430,6 +1443,24 @@ fn fs_read(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<String
         .map_err(|e| format!("fs.read {path}: {e}"))?;
     if !opened.is_file() {
         return Err(format!("fs.read: '{canonical_str}' is not a regular file"));
+    }
+    // Hardlink defense (cross-owner): the path-based denylist + home confinement
+    // are blind to hardlinks (canonicalize resolves symlinks, not hardlinks), so
+    // an agent could hardlink another user's / a root-owned inode into its own
+    // home and have root-`vibed` read it. For a read resolved INTO the caller's
+    // home, require the opened inode to be owned by the caller — a system-tree
+    // read is legitimately root-owned and exempt. (A hardlink to the caller's
+    // OWN file stays readable: the agent already owns it via its uid.)
+    if scope == ReadScope::Home {
+        use std::os::unix::fs::MetadataExt;
+        if Some(opened.uid()) != caller.uid {
+            return Err(format!(
+                "fs.read: '{canonical_str}' is owned by uid {} but the caller is uid {:?}; \
+                 refusing (possible cross-owner hardlink)",
+                opened.uid(),
+                caller.uid
+            ));
+        }
     }
     // The file actually opened must be the very inode that passed the
     // denylist/policy checks above (fstat on the open fd is authoritative).
@@ -1667,6 +1698,17 @@ fn fs_write(args: &Value, policy: &PolicyEngine, caller: Caller) -> Result<Strin
     // itself a symlink, open() fails with ELOOP instead of following it out of
     // the confinement (canonicalize above deliberately did NOT resolve the
     // final component, precisely so this guard can fire).
+    //
+    // RESIDUAL TOCTOU (Phase 3): O_NOFOLLOW guards only the FINAL component. The
+    // open() below re-walks the whole path, so an agent that swaps an
+    // INTERMEDIATE parent directory for a symlink in the tiny window between
+    // canonicalize(parent) and this open (vibed runs as root) could still route
+    // the create+truncate elsewhere. Unlike fs.read, an O_CREAT|O_TRUNC write
+    // cannot be undone by a post-open dev/ino recheck. Full closure needs a
+    // single atomic resolve+open — `openat2(RESOLVE_NO_SYMLINKS)` — which lands
+    // with per-tool sandboxing in Phase 3. Winning the race is hard (a tight,
+    // repeated swap) and the common cases (symlinked final component, symlinked
+    // parent already in place at check time) are already refused above.
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -1717,6 +1759,13 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
     let canonical_home = std::fs::canonicalize(&home)
         .map_err(|e| format!("fs.write: cannot resolve home '{home}' for uid {uid}: {e}"))?;
     let canonical_home_str = canonical_home.to_string_lossy();
+    // A home of '/' (or a broad ancestor) would make is_within() trivially true
+    // and disable write confinement — refuse fail-closed.
+    if canonical_home_str == "/" {
+        return Err(format!(
+            "fs.write: uid {uid}'s home resolves to '/' — refusing (would disable confinement)"
+        ));
+    }
     if !is_within(canonical_target, &canonical_home_str) {
         return Err(format!(
             "fs.write: cross-user write refused: '{canonical_target}' is not within uid {uid}'s \
@@ -1726,18 +1775,27 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
     Ok(())
 }
 
+/// Which allowed area a read resolved into. The caller applies extra checks per
+/// scope (an in-`Home` read must be owned by the caller — hardlink defense —
+/// whereas a `System` tree read is legitimately root-owned).
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum ReadScope {
+    System,
+    Home,
+}
+
 /// Read confinement for fs.read / fs.list. `canonical` is allowed iff it is a
 /// system-read tree (SYSTEM_READ_PREFIXES) OR inside the calling uid's own home
 /// (resolved from SO_PEERCRED). Fail-closed: an unknown/unresolvable caller may
 /// still read the system trees, but NEVER a home — so a missing peer cred
 /// cannot be leveraged to read personal data. The built-in denylist is applied
 /// separately (before this) and always wins.
-fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<(), String> {
+fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<ReadScope, String> {
     if SYSTEM_READ_PREFIXES
         .iter()
         .any(|p| canonical == p.trim_end_matches('/') || canonical.starts_with(p))
     {
-        return Ok(());
+        return Ok(ReadScope::System);
     }
     // Otherwise it must be within the caller's OWN home.
     let uid = caller.uid.ok_or_else(|| {
@@ -1750,8 +1808,17 @@ fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<(), Strin
         .ok_or_else(|| format!("{tool}: no home for uid {uid} in /etc/passwd; refusing"))?;
     let canonical_home = std::fs::canonicalize(&home)
         .map_err(|e| format!("{tool}: cannot resolve home '{home}' for uid {uid}: {e}"))?;
-    if is_within(canonical, &canonical_home.to_string_lossy()) {
-        return Ok(());
+    let canonical_home_str = canonical_home.to_string_lossy();
+    // A home that resolves to "/" (some system accounts) or any broad ancestor
+    // would make is_within() trivially true — home confinement would silently
+    // become a no-op, opening every path. Refuse fail-closed instead.
+    if canonical_home_str == "/" {
+        return Err(format!(
+            "{tool}: uid {uid}'s home resolves to '/' — refusing (would disable confinement)"
+        ));
+    }
+    if is_within(canonical, &canonical_home_str) {
+        return Ok(ReadScope::Home);
     }
     Err(format!(
         "{tool}: '{canonical}' is neither a readable system path nor inside uid {uid}'s own home; \
@@ -2306,6 +2373,23 @@ mod tests {
             err.contains("not a regular file"),
             "directory must be refused: {err}"
         );
+        // A FIFO in the caller's own home: open(O_RDONLY) with no writer would
+        // BLOCK the worker forever without the pre-open type check (the DoS this
+        // guards). It must return a refusal instead of hanging the test.
+        let fifo = base.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if made {
+            let err =
+                fs_read(&json!({"path": fifo.to_string_lossy()}), &policy, caller).unwrap_err();
+            assert!(
+                err.contains("not a regular file"),
+                "a FIFO must be refused BEFORE the blocking open: {err}"
+            );
+        }
         // A char device outside the readable trees is refused by confinement.
         if std::path::Path::new("/dev/zero").exists() {
             let err = fs_read(&json!({"path": "/dev/zero"}), &policy, caller).unwrap_err();
