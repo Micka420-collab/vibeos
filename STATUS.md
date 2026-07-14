@@ -1,5 +1,13 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
+> ## 🧊 PR #11 GELÉE — aucun nouveau commit sur `worktree-amelioration-2026-07-13`
+> **[PR #11](https://github.com/Micka420-collab/vibeos/pull/11)** (HEAD `9cee9c6`)
+> est **gelée intentionnellement** : mergeable, vérifiée (merge local dans `main`
+> simulé sans conflit, `toml=0.8`), CI verte (7 pass, 0 échec), **en attente de
+> revue humaine**. Elle est déjà à 95 commits / +14k lignes — au plafond d'une
+> revue. **Tout travail postérieur va sur des branches/PR séparées et petites**
+> (F6 fs → `f6-fs-refactor`, etc.), **jamais** réintégré ici. Décision 2026-07-14.
+>
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
 > Dernière mise à jour : **2026-07-13 (nuit)** — `svc.restart` T2 réel, extension Zed câblée dans l'image (bundle, gardée), Phase 2.5 (unité agent + TPM2 + egress), E2E Zed turnkey (Tier A validé live), HUD branché en live. **PR #11 → main MERGEABLE, CI Rust verte.**
 
