@@ -13,7 +13,10 @@
 //   * fs.read  (T0) -> "allow"            -> auto-allowed, NO editor prompt
 //   * fs.list  (T0) -> "allow"            -> auto-allowed, NO editor prompt
 //   * pkg.install (T2) -> "require_approval" -> NOT auto-allowed, editor prompts
-//   * svc.restart (T2) -> "require_approval" -> NOT auto-allowed, editor prompts
+//   * svc.restart on a NON-critical unit (T2) -> "require_approval" -> editor prompts
+//   * svc.restart on a DENY-LISTED critical unit (e.g. sshd.service) -> "deny" ->
+//     refused outright before the approval floor: the editor suppresses the
+//     prompt AND blocks (an agent cannot even queue an approval for it)
 //   * an unknown tool -> "deny" or null   -> never auto-allowed
 //
 // Tier B (the full editor round-trip: Zed spawns the Claude binary, a real tool
@@ -30,7 +33,11 @@ const cases = [
   ["fs.read", "/etc/os-release", "allow", true],
   ["fs.list", "/etc", "allow", true],
   ["pkg.install", "htop", "require_approval", false],
-  ["svc.restart", "sshd.service", "require_approval", false],
+  // A non-critical unit hits the T2 approval floor -> the editor prompts.
+  ["svc.restart", "myapp.service", "require_approval", false],
+  // A deny-listed critical unit is refused OUTRIGHT (before the approval floor):
+  // policy.check says "deny", so the editor suppresses the prompt AND blocks.
+  ["svc.restart", "sshd.service", "deny", false],
 ];
 
 let failures = 0;
