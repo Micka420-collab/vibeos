@@ -423,6 +423,36 @@ fn recheck_policy_canonical(
     }
 }
 
+/// A caller "home" (resolved from `/etc/passwd`, then canonicalized) that is the
+/// root, a top-level system directory, or the PARENT of the whole home namespace
+/// would make `is_within()` trivially true for OTHER users' files or entire
+/// system trees — a misconfigured passwd (home = `/var`, `/var/home`, `/home`, …)
+/// must never silently disable home confinement. A legitimate home is a directory
+/// UNDER the home namespace (the resolved `/var/home/<user>`) or root's own
+/// `/var/roothome`; none of those are in this set.
+fn home_is_too_broad(home: &str) -> bool {
+    const BROAD: &[&str] = &[
+        "/",
+        "/var",
+        "/var/home",
+        "/home",
+        "/usr",
+        "/etc",
+        "/run",
+        "/tmp",
+        "/proc",
+        "/sys",
+        "/boot",
+        "/dev",
+        "/opt",
+        "/srv",
+        "/mnt",
+    ];
+    let trimmed = home.trim_end_matches('/');
+    let trimmed = if trimmed.is_empty() { "/" } else { trimmed };
+    BROAD.contains(&trimmed)
+}
+
 /// Require that `canonical_target` lives inside the calling uid's own home
 /// directory. Fail-closed: an unknown caller uid, a uid with no `/etc/passwd`
 /// entry, or a home that cannot be resolved all refuse the write.
@@ -438,11 +468,12 @@ fn confine_to_caller_home(caller: Caller, canonical_target: &str) -> Result<(), 
     let canonical_home = std::fs::canonicalize(&home)
         .map_err(|e| format!("fs.write: cannot resolve home '{home}' for uid {uid}: {e}"))?;
     let canonical_home_str = canonical_home.to_string_lossy();
-    // A home of '/' (or a broad ancestor) would make is_within() trivially true
+    // A home of '/' or any broad ancestor would make is_within() trivially true
     // and disable write confinement — refuse fail-closed.
-    if canonical_home_str == "/" {
+    if home_is_too_broad(&canonical_home_str) {
         return Err(format!(
-            "fs.write: uid {uid}'s home resolves to '/' — refusing (would disable confinement)"
+            "fs.write: uid {uid}'s home '{canonical_home_str}' is too broad — refusing \
+             (would disable confinement)"
         ));
     }
     if !is_within(canonical_target, &canonical_home_str) {
@@ -489,11 +520,13 @@ fn confine_read(tool: &str, caller: Caller, canonical: &str) -> Result<ReadScope
         .map_err(|e| format!("{tool}: cannot resolve home '{home}' for uid {uid}: {e}"))?;
     let canonical_home_str = canonical_home.to_string_lossy();
     // A home that resolves to "/" (some system accounts) or any broad ancestor
-    // would make is_within() trivially true — home confinement would silently
-    // become a no-op, opening every path. Refuse fail-closed instead.
-    if canonical_home_str == "/" {
+    // (/var, /var/home, /home, … — the parent of the whole home namespace) would
+    // make is_within() trivially true — home confinement would silently become a
+    // no-op, opening every user's files. Refuse fail-closed instead.
+    if home_is_too_broad(&canonical_home_str) {
         return Err(format!(
-            "{tool}: uid {uid}'s home resolves to '/' — refusing (would disable confinement)"
+            "{tool}: uid {uid}'s home '{canonical_home_str}' is too broad — refusing \
+             (would disable confinement)"
         ));
     }
     if is_within(canonical, &canonical_home_str) {
@@ -964,6 +997,38 @@ mod tests {
         assert!(is_within("/home/dev", "/home/dev"));
         assert!(!is_within("/home/dev2/x", "/home/dev"));
         assert!(!is_within("/home", "/home/dev"));
+    }
+
+    #[test]
+    fn home_is_too_broad_rejects_ancestors_but_accepts_real_homes() {
+        // A misconfigured passwd home that is root, a top-level dir, or the
+        // parent of the whole home namespace would disable confinement.
+        for broad in [
+            "/",
+            "/var",
+            "/var/home",
+            "/var/home/",
+            "/home",
+            "/usr",
+            "/etc",
+            "/tmp",
+            "/proc",
+            "/opt",
+        ] {
+            assert!(
+                home_is_too_broad(broad),
+                "{broad} must be refused as a home"
+            );
+        }
+        // Real per-user homes (and root's own, resolved) must be accepted.
+        for ok in [
+            "/var/home/dev",
+            "/var/home/svc",
+            "/home/dev",
+            "/var/roothome",
+        ] {
+            assert!(!home_is_too_broad(ok), "{ok} must be accepted as a home");
+        }
     }
 
     // -- fs.list (T0) ----------------------------------------------------------
