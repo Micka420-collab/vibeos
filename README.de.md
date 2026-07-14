@@ -57,7 +57,7 @@ VibeOS ist **security-first**: Ein professioneller Pentest/DFIR-Werkzeugkasten i
 VibeOS zielt auf **linux/amd64 und linux/arm64**. Seit dem Release `v0.1.0-dev` baut die CI beide Architekturen auf **nativen Runnern**, veröffentlicht das **cosign-signierte Multi-Arch-Manifest** (keyless, Rekor-Log) auf ghcr.io und erzeugt **eine ISO pro Architektur** als Release-Artefakte. Die **NVIDIA**-Treiberschicht (akmod, RPM Fusion) wird beim Image-Build kompiliert, nur auf amd64; ihre **Validierung auf dem Referenz-PC** (RTX 3070 Ti) ist ein Ausgangskriterium der Phase 1, noch offen – siehe [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ### 🎨 Ein für das Vibecoding gestaltetes Desktop-Erlebnis
-Ein Plasma-6-Desktop, organisiert um das Triptychon **Agent / Kontext / Vertrauen**. Die Sitzung öffnet sich im **Global Theme „VibeOS Dark"** (Systemstandard, Kvantum-Engine inklusive) mit dem **Agenten-HUD** (Quickshell, ins Image kompiliert, automatisch gestartet – es wird den Agentenstatus, die aktuelle Policy-Stufe und die Anzeigen des lokalen Modells zeigen; **gemockte Daten, bis seine Live-Anbindung an `vibed` programmiert ist**, aus Ehrlichkeit). Das Terminal ist ab dem ersten Start einsatzbereit: Ghostty + fish + Starship + Zellij mit dem charakteristischen Layout „Agent + lazygit + Audit", Neovim-Preset „VibeVim". Diese Auswahl ist das Ergebnis einer **Kuratierung von 113 Open-Source-Projekten**, gefiltert nach weiterverteilbarer Lizenz und Kohärenz – detailliert in [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) und [docs/DESKTOP.md](docs/DESKTOP.md).
+Ein Plasma-6-Desktop, organisiert um das Triptychon **Agent / Kontext / Vertrauen**. Die Sitzung öffnet sich im **Global Theme „VibeOS Dark"** (Systemstandard, Kvantum-Engine inklusive) mit dem **Agenten-HUD** (Quickshell, ins Image kompiliert, automatisch gestartet – Agentenstatus, aktuelle Policy-Stufe und Anzeigen des lokalen Modells; **live an `vibed` angebunden** via `Quickshell.Io.Socket`: os.status, Speicher, Reasoning und das uid-beschränkte Roster sind real, mit sauberer Offline-Degradierung). Das Terminal ist ab dem ersten Start einsatzbereit: Ghostty + fish + Starship + Zellij mit dem charakteristischen Layout „Agent + lazygit + Audit", Neovim-Preset „VibeVim". Diese Auswahl ist das Ergebnis einer **Kuratierung von 113 Open-Source-Projekten**, gefiltert nach weiterverteilbarer Lizenz und Kohärenz – detailliert in [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) und [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ---
 
@@ -80,14 +80,15 @@ Ein Plasma-6-Desktop, organisiert um das Triptychon **Agent / Kontext / Vertraue
 | **Rate-Limiting pro uid** (Token-Bucket, Anti-Flood; begrenzter Freigabe-Speicher) | ✅ Ausgeliefert (Phase 2) |
 | Genesis beim ersten Boot (Speicher **im Klartext** erzeugt, Unit + `genesis.sh`) | ✅ Ausgeliefert v0.1 |
 | Global Theme **VibeOS Dark standardmäßig** (`/etc/xdg/kdeglobals` + Kvantum) | ✅ Ausgeliefert (Phase 2) |
-| **Quickshell-HUD** installiert + automatisch gestartet (Runtime ins Image kompiliert) | ✅ Ausgeliefert (Phase 2) — gemockte Daten |
+| **Quickshell-HUD** installiert + automatisch gestartet (Runtime ins Image kompiliert), **live an `vibed` angebunden** (os.status, Speicher, Reasoning, Roster) | ✅ Ausgeliefert (Phase 2.5) |
+| **`svc.restart` (T2) — echtes Backend** hinter Freigabe + Ziel-Deny-Liste (Zugang/Audit/Freigabe-Units vor der Warteschlange abgelehnt) · **`agents.list` (T0)** uid-beschränktes Roster | ✅ Ausgeliefert (Phase 2.5) |
 | **Claude-Code-MCP-Konfiguration** ausgeliefert (`/etc/skel/.claude.json` → `vibed`-Socket) | ✅ Ausgeliefert (Phase 2) |
 | **Live**-Anbindung des HUD an den `vibed`-Socket (QML `Quickshell.Io`) | 🛣️ Phase 2 |
 | **`memory.append`** (T1, additiv: journal + knowledge) · `scope`/`limit` von `memory.query` | ✅ Ausgeliefert (Phase 2) |
 | Zusätzliche **echte T1-Werkzeuge** · `user`/`projects`-Scopes von `memory.append` | 🛣️ Phase 2 |
-| **Agenten-Supervisor** mit Budgets + **Always-on-Autonomiemodus** (voll T0/T1, T2/T3 asynchron in Warteschlange – Freigabe-Schwelle nie gesenkt) | 🛣️ Phase 2.5 (vorgeschlagen) |
-| **Erfassung des Reasonings** der Agenten (Tap auf den `stream-json`-Strom) + T0-Werkzeug `agent.thinking` | 🛣️ Phase 2.5 (vorgeschlagen) |
-| **Abo-Authentifizierung** (setup-token) TPM2-versiegelt + Egress-Allowlist pro Unit | 🛣️ Phase 2.5 (vorgeschlagen) |
+| **Agenten-Supervisor** mit Budgets + **Always-on-Autonomiemodus** (voll T0/T1, T2/T3 asynchron in Warteschlange – Freigabe-Schwelle nie gesenkt) | ✅ Ausgeliefert (Phase 2.5, Mechanismus) |
+| **Erfassung des Reasonings** der Agenten (Tap auf den `stream-json`-Strom) + T0-Werkzeug `agent.thinking` | ✅ Ausgeliefert (Phase 2.5, Mechanismus) |
+| Unit `vibeos-agent@.service` + **TPM2-versiegeltes Abo-Token** + **Egress-Allowlist pro Hostname** | ✅ Ausgeliefert (Phase 2.5, Scaffolding) — Boot-Enforcement ausstehend |
 | LUKS/TPM2-Verschlüsselung des Speichers | 🛣️ Phase 3 |
 | Amnestischer Modus (tmpfs bei jedem Boot neu erzeugt, systemd-Generator) | 🛣️ Phase 3 |
 | Geburts-Interview (Prototyp: `agent/genesis_interview.py`, in v0.1 nicht verdrahtet) | 🛣️ Phase 3 |
@@ -192,8 +193,8 @@ podman build -t vibeos:dev -f os/Containerfile .
 
 | | |
 |---|---|
-| **Phase** | Pre-Alpha — Phase 1 „Erste ISO" (VM-Validierung ausstehend) · Phase 2 „vibed + MCP" in Arbeit · Phase 2.5 „Regierte Autonomie" vorgeschlagen |
-| **Letzte Aktualisierung** | 2026-07-13 |
+| **Phase** | Pre-Alpha — Phase 1 „Erste ISO" (VM-Validierung ausstehend) · Phase 2 „vibed + MCP" weit fortgeschritten · Phase 2.5 „Regierte Autonomie" weitgehend umgesetzt (Supervisor, Reasoning-Erfassung, echtes `svc.restart`, Agent-Runner + TPM2 + Egress, Live-HUD) |
+| **Letzte Aktualisierung** | 2026-07-14 |
 | **OS-Image** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — amd64- + arm64-Manifest, **cosign-signiert** (Rekor) |
 | **ISO** | amd64 (7,0 GB) + arm64 (6,3 GB) — CI-Artefakte des Releases `v0.1.0-dev` |
 | **Build** | Grüne CI (native Runner, ~15 min/Arch) · `bootc container lint` OK · 114 grüne `vibed`-Tests |

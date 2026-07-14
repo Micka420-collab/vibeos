@@ -57,7 +57,7 @@ VibeOS is **security-first**: a professional pentest/DFIR toolkit is embedded in
 VibeOS targets **linux/amd64 and linux/arm64**. Since the `v0.1.0-dev` release, CI builds both architectures on **native runners**, publishes the **cosign-signed multi-arch manifest** (keyless, Rekor log) to ghcr.io and generates **one ISO per architecture** as release artifacts. The **NVIDIA** driver layer (akmod, RPM Fusion) is compiled at image build time, on amd64 only; its **validation on the reference PC** (RTX 3070 Ti) is a Phase 1 exit criterion, still open — see [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ### 🎨 A desktop experience designed for vibecoding
-A Plasma 6 desktop organized around the **Agent / Context / Trust** triptych. The session opens in the **Global Theme "VibeOS Dark"** (system default, Kvantum engine included) with the **agents HUD** (Quickshell, compiled into the image, autostarted — it will show agent state, the current policy tier and local-model gauges; **mocked data until its live wiring to `vibed` is coded**, honesty first). The terminal is ready on first boot: Ghostty + fish + Starship + Zellij with the signature "agent + lazygit + audit" layout, "VibeVim" Neovim preset. This selection is the result of a **curation of 113 open-source projects**, filtered by redistributable license and coherence — detailed in [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) and [docs/DESKTOP.md](docs/DESKTOP.md).
+A Plasma 6 desktop organized around the **Agent / Context / Trust** triptych. The session opens in the **Global Theme "VibeOS Dark"** (system default, Kvantum engine included) with the **agents HUD** (Quickshell, compiled into the image, autostarted — agent state, current policy tier and local-model gauges; **live-wired to `vibed`** via `Quickshell.Io.Socket`: os.status, memory, reasoning and the uid-confined roster are real, with graceful offline degradation). The terminal is ready on first boot: Ghostty + fish + Starship + Zellij with the signature "agent + lazygit + audit" layout, "VibeVim" Neovim preset. This selection is the result of a **curation of 113 open-source projects**, filtered by redistributable license and coherence — detailed in [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) and [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ---
 
@@ -80,14 +80,15 @@ A Plasma 6 desktop organized around the **Agent / Context / Trust** triptych. Th
 | **Per-uid rate-limiting** (token bucket, anti-flood; bounded approval store) | ✅ Delivered (Phase 2) |
 | Genesis on first boot (memory created **in cleartext**, unit + `genesis.sh`) | ✅ Delivered v0.1 |
 | Global Theme **VibeOS Dark by default** (`/etc/xdg/kdeglobals` + Kvantum) | ✅ Delivered (Phase 2) |
-| **Quickshell HUD** installed + autostarted (runtime compiled into the image) | ✅ Delivered (Phase 2) — mocked data |
+| **Quickshell HUD** installed + autostarted (runtime compiled into the image), **live-wired to `vibed`** (os.status, memory, reasoning, uid-confined roster) | ✅ Delivered (Phase 2.5) |
+| **`svc.restart` (T2) — real backend** behind approval + target deny-list (access/audit/approval units refused before the queue) · **`agents.list` (T0)** uid-confined roster | ✅ Delivered (Phase 2.5) |
 | **Claude Code MCP config** shipped (`/etc/skel/.claude.json` → `vibed` socket) | ✅ Delivered (Phase 2) |
 | **Live** HUD wiring to the `vibed` socket (QML `Quickshell.Io`) | 🛣️ Phase 2 |
 | **`memory.append`** (T1, additive: journal + knowledge) · `scope`/`limit` on `memory.query` | ✅ Delivered (Phase 2) |
 | Additional **real T1 tools** · `user`/`projects` scopes of `memory.append` | 🛣️ Phase 2 |
-| **Agent supervisor** with budgets + **always-on autonomous mode** (full T0/T1, T2/T3 async-queued — approval floor never lifted) | 🛣️ Phase 2.5 (proposed) |
-| **Reasoning capture** of agents (tap on the `stream-json` stream) + T0 tool `agent.thinking` | 🛣️ Phase 2.5 (proposed) |
-| **Subscription auth** (setup-token) TPM2-sealed + per-unit egress allowlist | 🛣️ Phase 2.5 (proposed) |
+| **Agent supervisor** with budgets + **always-on autonomous mode** (full T0/T1, T2/T3 async-queued — approval floor never lifted) | ✅ Delivered (Phase 2.5, mechanism) |
+| **Reasoning capture** of agents (tap on the `stream-json` stream) + T0 tool `agent.thinking` | ✅ Delivered (Phase 2.5, mechanism) |
+| `vibeos-agent@.service` unit + **TPM2-sealed subscription token** + **per-host egress allowlist** | ✅ Delivered (Phase 2.5, scaffolding) — boot enforcement pending |
 | LUKS/TPM2 memory encryption | 🛣️ Phase 3 |
 | Amnesic mode (tmpfs recreated at each boot, systemd generator) | 🛣️ Phase 3 |
 | Birth interview (prototype: `agent/genesis_interview.py`, not wired in v0.1) | 🛣️ Phase 3 |
@@ -192,8 +193,8 @@ podman build -t vibeos:dev -f os/Containerfile .
 
 | | |
 |---|---|
-| **Phase** | Pre-alpha — Phase 1 "First ISO" (VM validation remaining) · Phase 2 "vibed + MCP" in progress · Phase 2.5 "Governed autonomy" proposed |
-| **Last update** | 2026-07-13 |
+| **Phase** | Pre-alpha — Phase 1 "First ISO" (VM validation remaining) · Phase 2 "vibed + MCP" well advanced · Phase 2.5 "Governed autonomy" largely implemented (supervisor, reasoning capture, real `svc.restart`, agent-runner + TPM2 + egress, live HUD) |
+| **Last update** | 2026-07-14 |
 | **OS image** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — amd64 + arm64 manifest, **cosign-signed** (Rekor) |
 | **ISO** | amd64 (7.0 GB) + arm64 (6.3 GB) — CI artifacts of the `v0.1.0-dev` release |
 | **Build** | Green CI (native runners, ~15 min/arch) · `bootc container lint` OK · 114 green `vibed` tests |

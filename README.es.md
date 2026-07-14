@@ -57,7 +57,7 @@ VibeOS es **security-first**: una caja de herramientas profesional de pentest/DF
 VibeOS apunta a **linux/amd64 y linux/arm64**. Desde la release `v0.1.0-dev`, la CI construye ambas arquitecturas en **runners nativos**, publica el **manifiesto multiarquitectura firmado con cosign** (keyless, registro Rekor) en ghcr.io y genera **una ISO por arquitectura** como artefactos de release. La capa del controlador **NVIDIA** (akmod, RPM Fusion) se compila al construir la imagen, solo en amd64; su **validación en el PC de referencia** (RTX 3070 Ti) es un criterio de salida de la Fase 1, aún abierto —véase [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ### 🎨 Una experiencia de escritorio pensada para el vibecoding
-Un escritorio Plasma 6 organizado en torno al tríptico **Agente / Contexto / Confianza**. La sesión se abre con el **Global Theme «VibeOS Dark»** (predeterminado del sistema, motor Kvantum incluido) con el **HUD de agentes** (Quickshell, compilado en la imagen, autoarrancado —mostrará el estado de los agentes, el nivel de política actual y los medidores del modelo local; **datos simulados hasta que se programe su conexión en vivo a `vibed`**, por honestidad). El terminal está listo para usar desde el primer arranque: Ghostty + fish + Starship + Zellij con el layout característico «agente + lazygit + auditoría», preset de Neovim «VibeVim». Esta selección es fruto de una **curación de 113 proyectos de código abierto**, filtrada por licencia redistribuible y coherencia —detallada en [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) y [docs/DESKTOP.md](docs/DESKTOP.md).
+Un escritorio Plasma 6 organizado en torno al tríptico **Agente / Contexto / Confianza**. La sesión se abre con el **Global Theme «VibeOS Dark»** (predeterminado del sistema, motor Kvantum incluido) con el **HUD de agentes** (Quickshell, compilado en la imagen, autoarrancado — estado de los agentes, nivel de política actual y medidores del modelo local; **conectado en vivo a `vibed`** vía `Quickshell.Io.Socket`: os.status, memoria, razonamiento y el roster confinado por uid son reales, con degradación elegante sin conexión). El terminal está listo para usar desde el primer arranque: Ghostty + fish + Starship + Zellij con el layout característico «agente + lazygit + auditoría», preset de Neovim «VibeVim». Esta selección es fruto de una **curación de 113 proyectos de código abierto**, filtrada por licencia redistribuible y coherencia —detallada en [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) y [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ---
 
@@ -80,14 +80,15 @@ Un escritorio Plasma 6 organizado en torno al tríptico **Agente / Contexto / Co
 | **Limitador de tasa por uid** (token bucket, anti-inundación; almacén de aprobación acotado) | ✅ Entregado (Fase 2) |
 | Genesis en el primer arranque (memoria creada **en texto claro**, unidad + `genesis.sh`) | ✅ Entregado v0.1 |
 | Global Theme **VibeOS Dark por defecto** (`/etc/xdg/kdeglobals` + Kvantum) | ✅ Entregado (Fase 2) |
-| **HUD Quickshell** instalado + autoarrancado (runtime compilado en la imagen) | ✅ Entregado (Fase 2) — datos simulados |
+| **HUD Quickshell** instalado + autoarrancado (runtime compilado en la imagen), **conectado en vivo a `vibed`** (os.status, memoria, razonamiento, roster) | ✅ Entregado (Fase 2.5) |
+| **`svc.restart` (T2) — backend real** tras aprobación + deny-list de objetivos (unidades de acceso/auditoría/aprobación rechazadas antes de la cola) · **`agents.list` (T0)** roster confinado por uid | ✅ Entregado (Fase 2.5) |
 | **Config MCP de Claude Code** entregada (`/etc/skel/.claude.json` → socket `vibed`) | ✅ Entregado (Fase 2) |
 | Conexión **en vivo** del HUD al socket `vibed` (QML `Quickshell.Io`) | 🛣️ Fase 2 |
 | **`memory.append`** (T1, aditivo: journal + knowledge) · `scope`/`limit` de `memory.query` | ✅ Entregado (Fase 2) |
 | **Herramientas T1 reales** adicionales · scopes `user`/`projects` de `memory.append` | 🛣️ Fase 2 |
-| **Supervisor de agentes** con presupuestos + **modo autónomo always-on** (T0/T1 total, T2/T3 en cola asíncrona — el umbral de aprobación nunca se rebaja) | 🛣️ Fase 2.5 (propuesto) |
-| **Captura del razonamiento** de los agentes (tap sobre el flujo `stream-json`) + herramienta T0 `agent.thinking` | 🛣️ Fase 2.5 (propuesto) |
-| **Autenticación por suscripción** (setup-token) sellada con TPM2 + allowlist de egress por unidad | 🛣️ Fase 2.5 (propuesto) |
+| **Supervisor de agentes** con presupuestos + **modo autónomo always-on** (T0/T1 total, T2/T3 en cola asíncrona — el umbral de aprobación nunca se rebaja) | ✅ Entregado (Fase 2.5, mecanismo) |
+| **Captura del razonamiento** de los agentes (tap sobre el flujo `stream-json`) + herramienta T0 `agent.thinking` | ✅ Entregado (Fase 2.5, mecanismo) |
+| Unidad `vibeos-agent@.service` + **token de suscripción sellado con TPM2** + **allowlist de egress por nombre de host** | ✅ Entregado (Fase 2.5, scaffolding) — enforcement en arranque pendiente |
 | Cifrado LUKS/TPM2 de la memoria | 🛣️ Fase 3 |
 | Modo amnésico (tmpfs recreado en cada arranque, generador systemd) | 🛣️ Fase 3 |
 | Entrevista de nacimiento (prototipo: `agent/genesis_interview.py`, no conectado en v0.1) | 🛣️ Fase 3 |
@@ -192,8 +193,8 @@ podman build -t vibeos:dev -f os/Containerfile .
 
 | | |
 |---|---|
-| **Fase** | Pre-alpha — Fase 1 «Primera ISO» (validación en VM pendiente) · Fase 2 «vibed + MCP» en curso · Fase 2.5 «Autonomía gobernada» propuesta |
-| **Última actualización** | 2026-07-13 |
+| **Fase** | Pre-alpha — Fase 1 «Primera ISO» (validación en VM pendiente) · Fase 2 «vibed + MCP» muy avanzada · Fase 2.5 «Autonomía gobernada» ampliamente implementada (supervisor, captura del razonamiento, `svc.restart` real, agent-runner + TPM2 + egress, HUD en vivo) |
+| **Última actualización** | 2026-07-14 |
 | **Imagen del SO** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — manifiesto amd64 + arm64, **firmado con cosign** (Rekor) |
 | **ISO** | amd64 (7,0 GB) + arm64 (6,3 GB) — artefactos de CI de la release `v0.1.0-dev` |
 | **Build** | CI en verde (runners nativos, ~15 min/arq) · `bootc container lint` OK · 114 pruebas `vibed` en verde |
