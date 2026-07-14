@@ -132,4 +132,23 @@ mod tests {
         assert!(rl.check(None, 0));
         assert!(!rl.check(None, 0), "unknown-uid bucket is bounded too");
     }
+
+    #[test]
+    fn a_backward_clock_never_refills_tokens() {
+        // The `saturating_sub` guard (line: elapsed) means a wall clock that
+        // jumps BACKWARD hands out no free tokens — a stepped/adjusted clock
+        // cannot be used to reset an exhausted bucket.
+        let rl = RateLimiter::new(5.0, 10.0);
+        for _ in 0..5 {
+            assert!(rl.check(Some(1000), 1000));
+        }
+        assert!(!rl.check(Some(1000), 1000), "burst spent at t=1000");
+        // Clock jumps back 500s: elapsed saturates to 0, so no refill.
+        assert!(
+            !rl.check(Some(1000), 500),
+            "a backward clock must not refill the bucket"
+        );
+        // And time resuming forward still refills normally (one token at +1s).
+        assert!(rl.check(Some(1000), 501), "forward time refills again");
+    }
 }
