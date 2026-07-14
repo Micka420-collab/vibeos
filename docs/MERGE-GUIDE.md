@@ -43,3 +43,7 @@ sinon tu mergerais dans la branche du dessous.
   durcissement de politique qui ne fait que resserrer (#13).
 - Après le merge des trois : marquer **F6 fs terminé** dans `ROADMAP.md`
   (encore listé comme « différé, session dédiée » côté `main`).
+
+## PR indépendante (hors pile)
+
+- **[PR #14](https://github.com/Micka420-collab/vibeos/pull/14)** `vibeos-validation-harness` → **base `main`** : harnais de validation E2E/boot (`vibeos-selfcheck.sh` + `docs/VALIDATION.md`). **Aucune dépendance** avec la pile ci-dessus — merge quand tu veux, dans n'importe quel ordre. Volontairement hors pile pour ne pas allonger la chaîne de merge.
