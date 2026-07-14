@@ -1,14 +1,16 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
-> # ⚠️ ACTION HUMAINE REQUISE — 2 PR À MERGER DANS `main`
-> Deux correctifs ont été **échoués hors de `main`** par un merge de pile mal
+> # ⚠️ ACTION HUMAINE REQUISE — 3 PR À MERGER DANS `main`
+> Des correctifs ont été **échoués hors de `main`** par un merge de pile mal
 > orienté (les ex-PR #12/#13 ont été mergées dans des branches intermédiaires,
 > pas dans `main`). **Ils NE SONT PAS sur `main` :**
 > 1. 🔒 **fix sécurité** alias `/home`↔`/var/home` (**vuln vivante sur `main`**) — **[PR #20](https://github.com/Micka420-collab/vibeos/pull/20)** (`security-home-alias-fix`)
 > 2. **refactor F6** (`fs.*` hors de `mcp.rs`) — **[PR #19](https://github.com/Micka420-collab/vibeos/pull/19)** (`f6-fs-extraction`)
+> 3. 🔒 **durcissement denylist** alias `/root`↔`/var/roothome` (défense-en-profondeur) — **[PR #21](https://github.com/Micka420-collab/vibeos/pull/21)** (`denylist-roothome-alias`)
 >
-> **Les deux sont des PR indépendantes basées sur `main` — merge-les toutes les
-> deux** (n'importe quel ordre). **NE PAS** les re-merger via des branches
+> **Les trois sont des PR indépendantes basées sur `main` — merge-les toutes les
+> trois** (n'importe quel ordre ; vérifié localement : les trois mergent ensemble
+> sans conflit, 151 tests verts). **NE PAS** les re-merger via des branches
 > empilées. Détail : **[docs/MERGE-GUIDE.md](docs/MERGE-GUIDE.md)**.
 
 > ### 🤖 PR Dependabot #15/#16/#17 — évaluées, sûres à merger (2026-07-14)

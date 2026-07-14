@@ -123,9 +123,9 @@ Deux couches de matching de chemins existent : (a) la politique opérateur (`app
 
 **Ce n'est pas exploitable** par un agent non-root (revue adversariale indépendante, tracée ligne par ligne) : le **confinement** rattrape intégralement. En lecture, `confine_read` exige que le chemin canonique soit sous un préfixe système (`/etc/ /usr/ /proc/ /sys/ /run/ /var/lib/vibeos/`) **ou** dans le home propre de l'appelant ; `/var/roothome/…` n'est ni l'un ni l'autre → refus. En écriture, `USER_WRITE_PREFIXES` (`/home/`,`/var/home/`) + `confine_to_caller_home` rejettent toute cible hors du home de l'appelant. Les secrets home (`.ssh`, `.aws`, `.claude`…) sont couverts par des motifs `**/`-ancrés, **agnostiques à l'orthographe** par conception (`/root/.ssh` **et** `/var/roothome/.ssh` matchent).
 
-**Durcissements recommandés** (défense-en-profondeur, non urgents — à faire une fois la surface `fs.*`/`mcp.rs` stabilisée sur `main`, pour ne pas entrer en conflit avec le refactor F6 en cours) :
-1. Rendre `builtin_denied` alias-aware (même repli que la politique) **ou** ajouter `/var/roothome/**` à `BUILTIN_DENY_ALWAYS`, pour la parité avec le fix politique et la robustesse si le confinement était un jour assoupli.
-2. `fs_read` vérifie le propriétaire de l'inode pour un scope `Home` (défense hardlink) ; **`fs_list` n'a pas** ce contrôle. Rattrapé aujourd'hui par le confinement, mais un `/etc/passwd` mal configuré (home = `/var`) rendrait `is_within` trivialement large — la garde ne rejette que `home == "/"`, pas les ancêtres larges. Élargir la garde et/ou ajouter le contrôle propriétaire à `fs_list`.
+**Durcissements** (défense-en-profondeur, non urgents) :
+1. ✅ **Fait ([PR #21](https://github.com/Micka420-collab/vibeos/pull/21))** : `/var/roothome/**` ajouté à `BUILTIN_DENY_ALWAYS` en miroir de `/root/**`, pour la parité avec le fix politique et la robustesse si le confinement était un jour assoupli. `/root` est la seule entrée alias-sensible de la denylist.
+2. **À faire** (une fois `mcp.rs`/`fs.*` stabilisé sur `main`) : `fs_read` vérifie le propriétaire de l'inode pour un scope `Home` (défense hardlink) ; **`fs_list` n'a pas** ce contrôle. Rattrapé aujourd'hui par le confinement, mais un `/etc/passwd` mal configuré (home = `/var`) rendrait `is_within` trivialement large — la garde ne rejette que `home == "/"`, pas les ancêtres larges. Élargir la garde et/ou ajouter le contrôle propriétaire à `fs_list`.
 
 ## 4. Gestion des secrets
 
