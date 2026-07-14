@@ -39,6 +39,7 @@
 //! denied  = ["vibed.service"]
 //! ```
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -305,18 +306,46 @@ impl PolicyEngine {
     }
 }
 
+/// On Fedora bootc systems `/home` is a symlink to `/var/home`, so the SAME
+/// in-home file is addressable under both spellings. The fs tools canonicalize
+/// before their post-resolution policy re-check, and `canonicalize` always
+/// yields the `/var/home` form — so an operator glob authored as `/home/...`
+/// would silently fail to match a `/var/home/...` target (and vice-versa),
+/// letting an agent evade the operator's OWN `paths.denied` rule just by
+/// choosing the other spelling. Fold both spellings to the canonical
+/// `/var/home` form so a path rule holds regardless of how the path is spelled.
+/// The built-in secret denylist is already spelling-agnostic (`**/`-anchored),
+/// so this only tightens custom operator path rules — never loosens anything.
+fn fold_home_alias(s: &str) -> Cow<'_, str> {
+    if s == "/home" {
+        return Cow::Borrowed("/var/home");
+    }
+    match s.strip_prefix("/home/") {
+        Some(rest) => Cow::Owned(format!("/var/home/{rest}")),
+        None => Cow::Borrowed(s),
+    }
+}
+
+/// Glob-match a filesystem path against a policy pattern, treating the
+/// `/home`↔`/var/home` bootc alias as equivalent (see `fold_home_alias`).
+/// Used only for path constraints; service patterns are matched verbatim.
+fn path_glob_match(pattern: &str, path: &str) -> bool {
+    glob_match(&fold_home_alias(pattern), &fold_home_alias(path))
+}
+
 fn apply_rule(rule: &Rule, registry_tier: Tier, ctx: CallContext<'_>) -> Decision {
     match rule.action {
         Action::Deny => Decision::Deny,
         Action::Allow => {
             // Path constraints: denied wins; when an allowed list is present
-            // the path must match it.
+            // the path must match it. Matching is `/home`↔`/var/home`-aware so
+            // a rule cannot be dodged by choosing the alternate bootc spelling.
             if let (Some(path), Some(constraints)) = (ctx.path, rule.paths.as_ref()) {
-                if constraints.denied.iter().any(|p| glob_match(p, path)) {
+                if constraints.denied.iter().any(|p| path_glob_match(p, path)) {
                     return Decision::Deny;
                 }
                 if let Some(allowed) = &constraints.allowed {
-                    if !allowed.iter().any(|p| glob_match(p, path)) {
+                    if !allowed.iter().any(|p| path_glob_match(p, path)) {
                         return Decision::Deny;
                     }
                 }
@@ -584,6 +613,83 @@ mod tests {
                 Some(Tier::T1),
                 ctx("/home/dev/.ssh/authorized_keys")
             ),
+            Decision::Deny
+        );
+    }
+
+    /// Regression: on bootc `/home` is a symlink to `/var/home`, and the fs
+    /// tools canonicalize to the `/var/home` spelling before re-checking policy.
+    /// A `paths.denied` rule authored in EITHER spelling must therefore hold no
+    /// matter which spelling the agent uses to address the same file — otherwise
+    /// the operator's own deny is dodged by choosing the alternate name (the
+    /// symmetric, path-flavoured cousin of the svc.restart raw-name bypass).
+    #[test]
+    fn home_var_home_alias_is_matched_in_both_spellings() {
+        let ctx = |p: &'static str| CallContext {
+            path: Some(p),
+            service: None,
+        };
+        // Deny authored with the `/home` spelling.
+        let e_home = engine(
+            r#"
+            [[rule]]
+            id = "fs-read"
+            tools = ["fs.read"]
+            tier = "T0"
+            action = "allow"
+            [rule.paths]
+            allowed = ["/home/**", "/var/home/**"]
+            denied = ["/home/*/private/**"]
+            "#,
+        );
+        for spelling in ["/home/dev/private/secret", "/var/home/dev/private/secret"] {
+            assert_eq!(
+                e_home.evaluate("fs.read", Some(Tier::T0), ctx(spelling)),
+                Decision::Deny,
+                "deny '/home/*/private/**' must catch {spelling}"
+            );
+        }
+        // ...and symmetrically when the deny is authored with `/var/home`.
+        let e_var = engine(
+            r#"
+            [[rule]]
+            id = "fs-read"
+            tools = ["fs.read"]
+            tier = "T0"
+            action = "allow"
+            [rule.paths]
+            allowed = ["/home/**", "/var/home/**"]
+            denied = ["/var/home/*/private/**"]
+            "#,
+        );
+        for spelling in ["/home/dev/private/secret", "/var/home/dev/private/secret"] {
+            assert_eq!(
+                e_var.evaluate("fs.read", Some(Tier::T0), ctx(spelling)),
+                Decision::Deny,
+                "deny '/var/home/*/private/**' must catch {spelling}"
+            );
+        }
+        // A single-spelling ALLOW now covers both spellings of the alias too
+        // (the shipped policy still lists both, but one suffices).
+        let e_allow = engine(
+            r#"
+            [[rule]]
+            id = "fs-read"
+            tools = ["fs.read"]
+            tier = "T0"
+            action = "allow"
+            [rule.paths]
+            allowed = ["/home/**"]
+            "#,
+        );
+        assert_eq!(
+            e_allow.evaluate("fs.read", Some(Tier::T0), ctx("/var/home/dev/ok.txt")),
+            Decision::Allow,
+            "allow '/home/**' must also cover the /var/home spelling"
+        );
+        // A path that is neither /home nor /var/home is unaffected by folding.
+        assert_eq!(
+            e_allow.evaluate("fs.read", Some(Tier::T0), ctx("/etc/os-release")),
             Decision::Deny
         );
     }
