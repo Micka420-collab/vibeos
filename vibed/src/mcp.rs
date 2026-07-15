@@ -423,6 +423,9 @@ async fn handle_tools_call(
     let raw_service = args.get("unit").and_then(Value::as_str);
     let service_owned = derive_service(&name, raw_service);
     let service = service_owned.as_deref();
+    let raw_url = args.get("url").and_then(Value::as_str);
+    let domain_owned = derive_domain(&name, raw_url);
+    let domain = domain_owned.as_deref();
 
     // Human-readable, non-secret target recorded in the audit trail so an
     // action's subject (which file / unit / package) is recoverable in
@@ -525,6 +528,7 @@ async fn handle_tools_call(
     let ctx = CallContext {
         path: normalized_path.as_deref(),
         service,
+        domain,
     };
     let decision = policy.evaluate(&name, tier, ctx);
 
@@ -1072,6 +1076,34 @@ fn derive_service(tool: &str, raw_unit: Option<&str>) -> Option<String> {
     Some(crate::tools::svc::validate_unit_name(raw).unwrap_or_else(|_| raw.to_string()))
 }
 
+/// Does this tool carry a `url` argument the policy is entitled to read?
+///
+/// Same reasoning as `unit_bearing`: an allow-list is only as good as its
+/// certainty about WHAT it is matching. A `url` on a tool that has no business
+/// with URLs is caller-supplied noise, and must never reach a `[rule.domains]`
+/// scope — otherwise an agent appends `"url": "docs.rs"` to an unrelated call
+/// and borrows a trusted rule's tier.
+fn url_bearing(tool: &str) -> bool {
+    tool.starts_with("browser.")
+}
+
+/// The host a call targets, AS THE POLICY SEES IT. Twin of `derive_service`:
+/// the ONE helper both `handle_tools_call` (the real decision) and
+/// `policy_check` (the dry-run hint) call, so the two cannot drift apart —
+/// parity is structural here, not merely asserted by a test. That drift is not
+/// hypothetical: it already shipped once for units.
+///
+/// `None` means "no host could be established", never "any host". A rule scoped
+/// with `[rule.domains]` does not apply to a `None` host (see
+/// `policy::rule_domain_applies`), so an unparseable or hostile URL falls
+/// through to the untrusted rule and meets a human instead of inheriting T1.
+fn derive_domain(tool: &str, raw_url: Option<&str>) -> Option<String> {
+    if !url_bearing(tool) {
+        return None;
+    }
+    crate::domain::host_of(raw_url?)
+}
+
 fn list_tools() -> Vec<Value> {
     tool_catalog()
         .into_iter()
@@ -1184,9 +1216,11 @@ fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     // "sshd" against a deny rule listing "sshd.service", answered
     // "require_approval", and the daemon then denied that very call).
     let service_owned = derive_service(tool, target);
+    let domain_owned = derive_domain(tool, target);
     let ctx = CallContext {
         path: normalized.as_deref(),
         service: service_owned.as_deref(),
+        domain: domain_owned.as_deref(),
     };
     let decision = match policy.evaluate(tool, tier, ctx) {
         Decision::Allow => "allow",
