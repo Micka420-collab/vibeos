@@ -18,6 +18,46 @@ Before=vibeos-agent@%i.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/vibeos/vibeos-agent-egress.sh %i
+# Hardening. This unit runs as ROOT and COMPILES THE DROP-IN THAT CONTAINS the
+# agent's egress allowlist — it decides what the agent can reach. It was the only
+# unit in the tree with no hardening block at all, which was an oversight rather
+# than a decision: same floor as its closest sibling vibeos-agents-group.service
+# (also oneshot, also root, also writing system state).
+#
+# Its whole side-effect surface, audited line by line: READ /etc/vibeos/*, WRITE
+# only under /run/systemd/system/<agent>.service.d/, resolve names via `getent
+# ahosts`, then `systemctl daemon-reload`.
+#
+# ProtectSystem=full (not strict): the script's only write target is /run, which
+# `strict` would also mount read-only — that needs a ReadWritePaths= carve-out,
+# and picking it right (/run/systemd exists at boot, /run/systemd/system may not)
+# is exactly the kind of thing that fails on a booted machine and not here. `full`
+# already locks /usr and /boot and cannot break any of the four operations above.
+# Tightening to strict is a fair follow-up, but it belongs to a pass that can
+# actually boot the unit.
+# NOT PrivateNetwork: the whole job is resolving hostnames.
+ProtectSystem=full
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# Deny-list of capabilities the script never needs (it writes /run as root via
+# DAC and talks to PID 1 over a socket). Same floor as vibed.service.
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_TIME CAP_AUDIT_CONTROL
+# The drop-in is read by PID 1 (root); nothing else has any business reading
+# which hosts this agent may reach.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
