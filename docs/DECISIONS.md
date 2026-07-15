@@ -777,3 +777,51 @@ gouvernée. (+) La cohérence avec `svc.restart` (allowlist de cibles avant le f
 est préservée pour le jour de l'implémentation. (−) `pkg.install` reste non
 fonctionnel — mais il l'était déjà (stub), et l'alternative utilisateur (distrobox)
 existe hors gouvernance système.
+
+## ADR-018 — Comment `vibed` pilote un navigateur : `chromedriver` des dépôts Fedora, en HTTP/JSON — *décidé (2026-07-15)*
+
+**Statut** : **DÉCIDÉ le 2026-07-15**. Tranche la question qu'[ADR-017](#adr-017) laissait ouverte : cette ADR y disait « pilotant un navigateur (Playwright/CDP) » sans choisir — or ce choix décide de la faisabilité, pas de l'esthétique. Décision d'ingénierie : aucune capacité nouvelle n'est ouverte ici (l'allowlist de cibles a déjà été tranchée par la décision n°1 d'ADR-017).
+
+### Contrainte qui élimine la moitié des options
+
+La **décision n°3 d'ADR-017** (« profil persistant, connexions autorisées ») impose un navigateur **long-vivant** : un `chromium --dump-dom` par appel ne garde ni cookies, ni session, ni onglet. Il faut donc un processus qui vit, et un protocole pour lui parler.
+
+### Faits vérifiés (2026-07-15, `dnf repoquery` sur les vrais dépôts f44, pas une page web)
+
+| Fait | Vérification |
+|---|---|
+| `chromium` **et** `chromedriver` en **x86_64 ET aarch64**, même version `150.0.7871.114` | `repoquery --forcearch=aarch64` |
+| `chromedriver` est un **sous-paquet de la source `chromium`** | `sourcerpm = chromium-150.0.7871.114-1.fc44.src.rpm` |
+| Codecs **libres** | `chromium` requiert `libavcodec.so.62` → fourni par **`libavcodec-free`** (ffmpeg sans les codecs brevetés). Le chromium à codecs propriétaires n'est **pas** dans Fedora (il vit chez RPM Fusion) |
+| `chromedriver` → `/usr/bin/chromedriver` ; `chromium` → `/usr/bin/chromium-browser` | `repoquery -l` |
+| **WebDriver = HTTP + JSON** simple, requête/réponse | [spec W3C](https://w3c.github.io/webdriver/) |
+| **CDP exige un WebSocket** (les endpoints HTTP ne servent qu'à la découverte) | [docs CDP](https://chromedevtools.github.io/devtools-protocol/) |
+| Profil persistant = `goog:chromeOptions.args` → `user-data-dir=…` | [docs ChromeDriver](https://developer.chrome.com/docs/chromedriver/capabilities) |
+
+### Décision
+
+**`chromium` + `chromedriver` des dépôts Fedora, pilotés par `vibed` en W3C WebDriver (HTTP/JSON) sur une boucle locale.**
+
+Ce qui l'emporte, dans l'ordre :
+
+1. **Le verrouillage de version est structurel.** `chromedriver` est bâti depuis la source `chromium` : les deux montent ensemble à chaque mise à jour. Le décalage navigateur/driver est *le* mode de panne classique de l'automatisation Chrome — ici il ne peut pas arriver.
+2. **`vibed` n'a pas de client WebSocket**, et CDP en exige un. WebDriver est du HTTP/1.1 + JSON : un client minimal, testable sur fixtures, sans dépendance nouvelle — cohérent avec un dépôt qui écrit déjà son `sha256.rs` et son `glob.rs` à la main. **Cette contrainte est décisive** : ajouter une pile WebSocket à la TCB pour parler à un composant qu'on traite justement comme hostile serait le mauvais échange.
+3. **Zéro téléchargement à l'exécution.** Une transaction RPM, deux arches, rien de mutable — c'est le modèle bootc.
+4. **Les codecs sont déjà réglés** par Fedora (`libavcodec-free`), sans reconstruire quoi que ce soit. C'est exactement le blocage qui a fait rejeter BrowserOS (ADR-017 §« pourquoi on ne peut PAS l'expédier tel quel ») : ici il n'existe pas.
+
+### Rejeté
+
+- **Playwright** — pourtant annoncé par `ECOSYSTEM.md`. Exige **Node** ; **télécharge ses propres binaires** depuis un CDN Microsoft dans `~/.cache/ms-playwright` (un cache mutable qui se bat frontalement avec l'immuabilité) ; **Fedora n'est pas une distro supportée** (Ubuntu/Debian seulement) ; et sur **arm64** Google ne publie pas de Chrome, donc la matrice testée n'existe pas. Trois contradictions avec le modèle bootc, pour un gain nul par rapport à WebDriver.
+- **CDP direct** — impose un client WebSocket dans la TCB. Le seul gain réel est l'arbre d'accessibilité complet (voir ci-dessous) : insuffisant pour payer ce prix aujourd'hui.
+- **Firefox + geckodriver** — **`geckodriver` n'est packagé nulle part dans Fedora** (aucun résultat sur f43/f44/rawhide/EPEL). Il faudrait vendoriser un binaire hors distro : exactement la dette qu'on refuse.
+- **Le paquet `chromium-headless`** — ⚠️ **piège nommé.** Malgré son nom, il ne contient **pas** le headless moderne : son contenu est `/usr/lib64/chromium-browser/headless_shell`, l'**ancien** shell headless (vérifié par `repoquery -l`, pas déduit). Le headless actuel est un mode du binaire principal. **Installer `chromium` et passer `--headless`** ; ne pas installer `chromium-headless`.
+
+### Ce que ça coûte — la limite à écrire maintenant, pas à découvrir plus tard
+
+**WebDriver n'expose pas d'arbre d'accessibilité complet.** Il donne le rôle et le label calculés **par élément** (`GET .../computedrole`, `.../computedlabel`), jamais un instantané de tout l'arbre. Le dump complet (`Accessibility.getFullAXTree`) est **CDP uniquement** — c'est ce que Playwright/Puppeteer appellent `accessibility.snapshot()`, et c'est précisément ce que `ECOSYSTEM.md` vante pour Playwright (« snapshots a11y »).
+
+Conséquence honnête : **un outil `browser.read` qui rendrait la page « telle qu'un lecteur d'écran la voit » n'est pas livrable sur WebDriver seul.** Il faudra soit composer depuis le DOM + les rôles par élément (approximation), soit revenir à CDP. **C'est la seule chose qui pourrait faire rouvrir cette ADR** — et l'interception réseau, également CDP-only, la rouvrirait aussi si elle devenait un besoin.
+
+### Conséquence à traiter ailleurs
+
+`ECOSYSTEM.md` annonce toujours « **Playwright MCP** » comme brique Phase 2 du navigateur, « enveloppée dans les policy tiers ». C'est en tension directe avec ADR-017 **et** avec cette ADR : un serveur MCP tiers auquel l'agent parle **directement** n'est pas enveloppé par `vibed` — il est hors politique, hors tiers, hors audit, ce qu'ADR-017 reproche précisément au MCP intégré de BrowserOS. Aujourd'hui rien n'est cassé (`/etc/skel/.claude.json` ne déclare **que** `vibeos`), donc c'est un **plan** contradictoire, pas un mensonge en production. À réconcilier dans `ECOSYSTEM.md`.
