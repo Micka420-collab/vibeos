@@ -1,14 +1,19 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
-> ✅ **`main` à jour (2026-07-14)** — le contenu qui avait été échoué hors de `main`
-> a été rapatrié et **mergé** : F6 (`fs.*` → `tools/fs.rs`, merge `c001166` / #19),
-> fix sécurité alias politique `/home`↔`/var/home` (`ce0fb00` / #20), durcissement
-> denylist `/root`↔`/var/roothome` (`ab70856` / #21), et les 3 bumps Dependabot
-> évalués sûrs (`425b996` / #15, `5704a0a` / #16, `923d29e` / #17). **Plus rien en
-> attente de merge**, branches mortes (ex-#12/#13) supprimées.
+> ✅ **`main` à jour (2026-07-15)** — la nuit du 14→15 est **mergée** (#33→#45) :
+> `log.read` (T0, ADR-011), **4 correctifs sécurité réels** (#38 denylist mémoire
+> noyau/cross-user, #39 `/proc/<pid>` confiné, #42 egress anti-SSRF, #43 budget
+> agent sur horloge monotone), garde-fou CI anti-dérive (#33), note de trajectoire
+> Phase 4 (#34), assets du splash de boot (#35).
+> **PR ouvertes, en attente de revue humaine** : #46 (README traduits), #47
+> (historique de raisonnement HUD), #48 (épinglage des clés de dépôts tiers),
+> #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth).
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-13 (nuit)** — `svc.restart` T2 réel, extension Zed câblée dans l'image (bundle, gardée), Phase 2.5 (unité agent + TPM2 + egress), E2E Zed turnkey (Tier A validé live), HUD branché en live. **PR #11 → main MERGEABLE, CI Rust verte.**
+> Dernière mise à jour : **2026-07-15 (matin)** — passe de justesse : ce fichier
+> avait sauté la session du 14→15 (donc annonçait encore `log.read` « en attente
+> de revue » alors qu'il est mergé, et « plus rien en attente de merge » alors que
+> 5 PR sont ouvertes).
 
 ## Vue d'ensemble
 
@@ -105,9 +110,22 @@
   - **Revue adversariale** (sous-agent) → 1 HIGH + 2 MED corrigés ; durcissement des helpers agent-runner (validation d'instance).
   - **149 tests vibed verts** (138 unit + 8 e2e MCP + 3 politique) + **17 vitest** + smoke ACP + bundle Zed ; clippy/fmt/shellcheck propres (incl. durcissements fs + fix audit torn-write).
 
+- **2026-07-14 → 15 (nuit, session autonome)** — Audit sécurité adversarial + `log.read` + garde-fou anti-dérive. **Tout mergé sur `main`** (#33 → #45) :
+  - **Garde-fou CI anti-dérive documentaire** ([#33](https://github.com/Micka420-collab/vibeos/pull/33)) : `scripts/verify-roadmap-truth.sh` vérifie **mécaniquement** ce qui est vérifiable — lien markdown mort et fichier annoncé mais absent **échouent la CI** ; compteur de tests annoncé vs réel et PR citée « mergée » mais absente de `git log` **avertissent** seulement. Il attrape les incohérences **mécaniques**, jamais le sens (« proposé » vs « en cours » reste un jugement humain). Il a trouvé de la vraie dérive dès son premier passage.
+  - **Note de trajectoire Phase 4** ([#34](https://github.com/Micka420-collab/vibeos/pull/34)) : datée et honnête, en tête de la section Phase 4 du ROADMAP — 11 jours après la Phase 0, SELinux `vibed_t` / boot mesuré / sandbox par outil sont à **zéro**, `vibed` tourne toujours en **root**. **La question de séquencement est posée à Micka, pas tranchée par l'agent.**
+  - **`log.read` (T0, ADR-011)** ([#37](https://github.com/Micka420-collab/vibeos/pull/37)) : allowlist d'unités **évaluée avant le plancher de tier** (une unité hors liste est refusée **avant** la file d'approbation, jamais « approbation requise »), sortie bornée (200 lignes / 64 Kio, re-plafonnée **après** rédaction — un masque peut être plus long que le secret qu'il remplace), rédaction heuristique **non garantie** et documentée comme telle.
+  - **4 correctifs sécurité RÉELS** issus d'un audit adversarial à 3 vagues (8 sous-agents + revues manuelles) :
+    - **[#38] HIGH — denylist mémoire noyau + cross-user** : `/proc/kcore` (RAM physique), `/proc/kallsyms` (défait KASLR), `/proc/*/mem`, `/proc/*/pagemap`, `/run/user/**` (runtime de **tous** les utilisateurs), `/run/secrets/**`, secrets `/etc` (krb5/sssd/ipsec/pki). `vibed` tourne en root : tout ce qui n'est pas denylisté sous les préfixes lisibles était exposé.
+    - **[#39] `/proc/<pid>` confiné à l'uid propriétaire** — un agent ne peut plus lire le `/proc` d'un processus d'un autre utilisateur.
+    - **[#42] egress anti-SSRF** : l'allowlist par nom d'hôte résolvait le DNS puis autorisait l'IP obtenue — un CNAME vers `169.254.169.254` ou une IP RFC1918 perçait le mur default-deny. Les IP internes/link-local/metadata sont désormais **écartées avant** d'émettre `IPAddressAllow`.
+    - **[#43] budget agent sur horloge monotone** : le budget wall-clock comparait des `SystemTime` — **un recul d'horloge laissait un agent emballé survivre à son `--budget`**. Passé sur `Instant`.
+  - **Le reste de l'audit : vérifié robuste, aucun bypass** — approval (portail T2/T3, grant one-shot atomique), allowlist policy, pipeline mcp (rate-limit→denylist→policy→approbation→exec), gouvernance Zed (fail-closed), chaîne d'audit SHA-256, Containerfile (supply-chain), glob.rs, memory.rs, sha256.rs (vecteurs NIST présents). **Ne pas refaire cet audit.**
+  - **Assets du splash de boot** ([#35](https://github.com/Micka420-collab/vibeos/pull/35)) : générateur Pillow (`desktop/plymouth/generate-assets.py`) — spirale galactique mauve→blue, cœur qui respire, wordmark. **Œuvre originale, reproductible.** Le thème reste **non activé** (Phase 5).
+  - **CI/tests/docs** : shellcheck étendu aux scripts sécurité agent (#44), test du garde anti-recul d'horloge du rate-limiter (#41), SECURITY-ARCHITECTURE §3.3 recalé (durcissements fs = **faits**, plus « à faire ») (#45), THREAT-MODEL (log.read + denylist).
+
 ## 📋 Reste à faire (court terme)
 
-1. **Merger [PR #11 → main](https://github.com/Micka420-collab/vibeos/pull/11)** (côté utilisateur) : **MERGEABLE, CI Rust verte** ; laisser finir le build image (~15 min). Ensuite **fermer manuellement [PR #4](https://github.com/Micka420-collab/vibeos/pull/4)** (même branche source, base `phase2-supply-chain` ≠ `main` → GitHub ne la ferme pas automatiquement, et `deleteBranchOnMerge=false`).
+1. **Revoir et merger les 5 PR ouvertes** (côté utilisateur) : #46 (README traduits), #47 (historique de raisonnement HUD + 1er contrôle CI du JS du HUD), #48 (clés des dépôts tiers épinglées dans le dépôt — **vérifier les 2 empreintes hors-bande si tu veux l'assurance forte**), #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth manquants). *(PR #11 : **mergée** le 2026-07-14 ; PR #4 : **fermée**. Fait.)*
 2. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (thème VibeOS Dark, wallpaper officiel, HUD au premier login) ; valider NVIDIA sur le PC de référence.
 3. **E2E Zed Tier B** (côté utilisateur, machine avec Zed) : lancer `zed/vibeos-claude-acp/scripts/e2e-zed.sh` — Tier A auto, puis la checklist éditeur (fs.read sans prompt, pkg.install qui prompte). Le Tier A (décisions live) est déjà vérifié.
 4. **Activer l'expédition de l'extension Zed** (`WITH_ZED_AGENT=1`) une fois le Tier B validé ; **brancher l'agent-runner** sur une vraie machine (TPM2 + egress live).
@@ -117,7 +135,7 @@
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
 - **Phase 1 (v0.1)** : CI verte sur GitHub Actions, ISO amd64+arm64 bootables en VM, validation NVIDIA sur le PC de référence.
-- **Phase 2 (v0.2)** : `vibed` embarqué ✅ · HUD installé + auto-démarré ✅ · Global Theme par défaut ✅ · config MCP client ✅ · `memory.append` + `scope`/`limit` ✅ · tests d'intégration MCP e2e en CI ✅ · `svc.status` + `fs.list` (T0) ✅ · groupe `vibeos-agents` automatique ✅ — restent les **outils T1 réels** supplémentaires, les scopes `user`/`projects` de `memory.append` ✅, la **lecture du journal** (T0 — **conception arrêtée en [ADR-011](docs/DECISIONS.md), implémentation en attente de revue** : allowlist d'unités + sortie bornée + rédaction + audit contre la fuite de secrets), le **branchement live du HUD** et le preset **Panel Colorizer**.
+- **Phase 2 (v0.2)** : `vibed` embarqué ✅ · HUD installé + auto-démarré ✅ · Global Theme par défaut ✅ · config MCP client ✅ · `memory.append` + `scope`/`limit` ✅ · tests d'intégration MCP e2e en CI ✅ · `svc.status` + `fs.list` (T0) ✅ · groupe `vibeos-agents` automatique ✅ — les scopes `user`/`projects` de `memory.append` ✅ · **lecture du journal `log.read` (T0)** ✅ **livrée et mergée** ([ADR-011](docs/DECISIONS.md), [#37](https://github.com/Micka420-collab/vibeos/pull/37)) : allowlist d'unités évaluée **avant** le plancher de tier, sortie bornée, rédaction heuristique **non garantie** (documentée comme telle) · **branchement live du HUD** ✅ — restent les **outils T1 réels** supplémentaires (**quelle cible, quelle allowlist → décision Micka**) et le preset **Panel Colorizer**.
 - **Phase 2.5 (v0.2.5) — « Autonomie encadrée & accès IA externes »** *(proposée, ~3-5 semaines)* : superviseur d'agent budgété (`vibectl agent run`, budget wall-clock + nombre d'appels, **kill-switch humain** `vibectl agent stop`), **auth par abonnement** (`claude setup-token`/`codex`) scellée **TPM2** via `systemd-creds`, **allowlist d'egress par unité** (`IPAddressAllow/Deny`), type de journal réservé `autonomous_session`. **Périmètre figé T0/T1** (pas d'anticipation T2/T3). Voir [ROADMAP.md](ROADMAP.md) §4 bis.
 - **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée, **sandbox par outil (systemd-run, seccomp, landlock)**.
 - **Phase 4 (v0.4)** : durcissement (UKI / boot mesuré, SELinux dédiée `vibed_t`, hash-chaining audit, `User=vibed`).

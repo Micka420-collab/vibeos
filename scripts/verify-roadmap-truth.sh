@@ -174,16 +174,28 @@ except Exception as exc:  # pas d'historique (checkout superficiel) : on saute
 if log:
     PR_RE = re.compile(r"#(\d{2,4})\b")
     cited = {}
-    # Une PR décrite comme morte/superseded/supprimée n'est PAS une réclamation
-    # « présente dans main » : on saute ces lignes pour ne pas crier au loup.
-    DEAD = ("supprimé", "morte", "mort ", "fermé", "abandonné", "remplacé",
-            "ex-#", "obsolète", "superseded", "non mergé")
+    # Toute ligne citant une PR n'affirme pas qu'elle est DANS main. Deux cas :
+    #  - PR morte/superseded/supprimée ;
+    #  - PR explicitement décrite comme OUVERTE / en attente de revue — c'est
+    #    précisément ce qu'un STATUS honnête doit lister, et le lui reprocher
+    #    apprendrait à ne plus le faire (faux positif observé le 2026-07-15 sur
+    #    « PR ouvertes, en attente de revue humaine : #46, #47… », que le
+    #    déclencheur « pr » attrapait).
+    # On ne garde donc que les lignes qui prétendent réellement à un merge.
+    NOT_A_MERGE_CLAIM = (
+        # morte / remplacée
+        "supprimé", "morte", "mort ", "fermé", "abandonné", "remplacé",
+        "ex-#", "obsolète", "superseded", "non mergé",
+        # ouverte / en attente
+        "ouverte", "ouvertes", "en attente", "à revoir", "à merger",
+        "draft", "brouillon", "en cours de revue",
+    )
     for doc in ("STATUS.md", "ROADMAP.md"):
         for i, line in lines(doc):
             low = line.lower()
             if not ("pr " in low or "pull request" in low or "merg" in low):
                 continue
-            if any(d in low for d in DEAD):
+            if any(d in low for d in NOT_A_MERGE_CLAIM):
                 continue
             for m in PR_RE.finditer(line):
                 cited.setdefault(m.group(1), (doc, i))
