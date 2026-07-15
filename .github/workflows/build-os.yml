@@ -57,6 +57,15 @@ on:
           vérification amd64 sans push.
         required: false
         default: ""
+      check_arm64:
+        description: >-
+          Ajouter arm64 au build de VÉRIFICATION (sans aucun push). Sans cette
+          option, arm64 n'est construit QUE sur une release : une casse arm64 ne
+          se découvre donc qu'au moment du tag, en pleine publication — le motif
+          exact du `cannot depsolve` de l'ISO.
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -105,6 +114,7 @@ jobs:
         # un piège documenté et rendre le fichier cohérent avec lui-même.
         env:
           CONFIRM_RELEASE: ${{ inputs.confirm_release }}
+          CHECK_ARM64: ${{ inputs.check_arm64 }}
         run: |
           # repo = owner/name (no registry) for buildah/push; image = full ref
           # (with registry) for manifest/iso docker:// references.
@@ -116,6 +126,19 @@ jobs:
              || { [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]] \
                   && [[ "${CONFIRM_RELEASE:-}" == "publier" ]]; }; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"},{"arch":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]}' >> "$GITHUB_OUTPUT"
+          elif [[ "${CHECK_ARM64:-}" == "true" ]]; then
+            # Vérification arm64 SANS publication : la matrice est découplée de
+            # `publish`. Tout ce qui pousse (login, manifest, cosign, ISO, SBOM)
+            # reste gardé par `publish == 'true'`, donc l'image arm64 est
+            # construite, lintée, puis jetée — c'est précisément le contrôle
+            # voulu.
+            #
+            # Pourquoi cette option existe : sans elle, arm64 n'est bâti QUE sur
+            # un tag. Une casse arm64 ne se découvre donc qu'EN PLEINE release —
+            # le motif exact du `cannot depsolve` de l'ISO, dont le job ne
+            # tournait jamais sur une PR et qui a tué une release au tag.
+            echo "publish=false" >> "$GITHUB_OUTPUT"
             echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"},{"arch":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]}' >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
