@@ -149,6 +149,18 @@ fn shipped_policy_denies_restart_of_critical_units_before_approval() {
         "dbus-broker.service",    // system bus
         "dbus.service",
         "dbus.socket", // the bus is socket-activated
+        // Every VibeOS unit — an agent must never touch what governs it. The
+        // egress warden in particular used to slip through: the old glob
+        // `vibeos-agent@*.service` cannot match `vibeos-agent-egress@…` (it wants
+        // `@` where the text has `-egress@`), so an agent could ask to restart
+        // the unit that compiles its own egress allow-list.
+        "vibeos-agent-egress@alice.service",
+        "vibeos-agents-group.service",
+        "vibeos-genesis.service",
+        // Axis (3), the inverse of "cut the operator's access": `systemctl
+        // restart` on an INACTIVE unit STARTS it. An approved `svc.restart
+        // sshd.socket` reads as innocuous while it turns remote SSH ON.
+        "sshd.socket",
     ] {
         assert_eq!(
             engine.evaluate("svc.restart", Some(Tier::T2), svc(unit)),
