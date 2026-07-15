@@ -165,6 +165,69 @@ for (const bad of [null, undefined, {}, { lines: [] }]) {
   check(`reasoningToLive(${JSON.stringify(bad) || String(bad)})`, threw === null, threw);
 }
 
+group("reasoningToLive: what the user reads as the agent's thinking");
+const think = (blocks) => V.reasoningToLive({
+  session_id: "S",
+  lines: blocks.map((b, i) => ({ ts_unix: 1783468800 + i, session_id: "S", block: b })),
+});
+const streamed = think([{ kind: "thinking", text: "abc" }, { kind: "thinking_delta", text: "def" }]);
+check("concatenates blocks in order", streamed[0].text === "abcdef", streamed[0].text);
+check("carries the session id", streamed[0].sessionId === "S");
+check("a trailing delta reads as still streaming", streamed[0].streaming === true);
+const settled = think([{ kind: "thinking_delta", text: "a" }, { kind: "thinking", text: "b" }]);
+check("a settled last block is not streaming", settled.length > 0 && settled[0].streaming === false,
+  JSON.stringify(settled));
+// A provider-encrypted turn carries NO text. It must still surface — the panel
+// tells the user why it cannot show the reasoning instead of showing nothing.
+const red = think([{ kind: "redacted_thinking" }]);
+check("a redacted-only turn is surfaced, not swallowed", red.length === 1, JSON.stringify(red));
+check("redacted turn is flagged", red.length === 1 && red[0].redacted === true);
+check("nothing at all -> [] (panel shows its placeholder)", think([]).length === 0);
+check("blocks with no text and no redaction -> []", think([{ kind: "other" }]).length === 0);
+// provider/model are NOT in the reasoning store: they must stay blank, never
+// invented (the supervisor writes them to the memory journal instead).
+check("provider stays an honest blank", streamed[0].provider === "");
+check("model stays an honest blank", streamed[0].model === "");
+check("raw=false (a cloud summary is not raw local reasoning)", streamed[0].raw === false);
+// A malformed line must not poison the whole session view.
+const mixed = V.reasoningToLive({
+  session_id: "S",
+  lines: [{ block: { kind: "thinking", text: "ok" } }, { block: null }, {}, null],
+});
+check("malformed lines are skipped, good text survives",
+  mixed.length === 1 && mixed[0].text === "ok", JSON.stringify(mixed));
+
+group("agentsListToRoster: the lock must mean what it says");
+const roster = V.agentsListToRoster({
+  agents: [
+    { name: "claude", tier: 2, awaiting_approval: true, activity: "fs.write", idle_seconds: 3 },
+    { name: "opencode", tier: 0, awaiting_approval: false, activity: "idle", idle_seconds: 0 },
+  ],
+});
+check("maps every agent", roster.length === 2);
+check("tier travels as a number", roster[0].tier === 2, String(roster[0].tier));
+check("a pending approval raises the lock", roster[0].awaitingApproval === true);
+check("no pending approval, no lock", roster[1].awaitingApproval === false);
+check("idle_seconds 0 still renders (0 is not 'unknown')",
+  roster[1].elapsed !== "", roster[1].elapsed);
+// STRICT === true: the padlock claims "a human is being asked to approve". Any
+// value that is not literally true must not raise it.
+for (const junk of ["true", 1, {}, "yes"]) {
+  const r = V.agentsListToRoster({ agents: [{ name: "a", awaiting_approval: junk }] });
+  check(`awaiting_approval=${JSON.stringify(junk)} does not raise the lock`,
+    r[0].awaitingApproval === false);
+}
+const bare = V.agentsListToRoster({ agents: [{}] });
+check("a nameless agent still renders with a fallback", bare[0].name === "agent", bare[0].name);
+check("a tierless agent defaults to T0, not undefined", bare[0].tier === 0, String(bare[0].tier));
+check("a missing idle_seconds yields no elapsed claim", bare[0].elapsed === "", bare[0].elapsed);
+for (const bad of [null, undefined, {}, { agents: [] }]) {
+  let threw = null;
+  try { V.agentsListToRoster(bad); } catch (e) { threw = e.message; }
+  check(`agentsListToRoster(${JSON.stringify(bad) || String(bad)}) does not throw`,
+    threw === null, threw);
+}
+
 group("historyKey: only a REAL change may reset the ListView model");
 // Reassigning ListView.model destroys delegates and throws away the user's
 // scroll position. agent.sessions is polled every 5s, so an unconditional
