@@ -238,14 +238,41 @@ reason = "Service restarts require human approval; access-, audit- and approval-
 
 # Non-negotiable deny-list: a matching unit is DENIED outright (policy.rs
 # apply_rule checks service.denied BEFORE the T2 approval floor), so an agent
-# cannot even put these into the approval queue. Two axes: (1) units whose
-# restart would cut the operator's ACCESS to the machine or to the approval
-# path, and (2) the warden/audit pipeline itself. Glob patterns allowed.
+# cannot even put these into the approval queue. THREE axes:
+#   (1) units whose restart would CUT the operator's ACCESS to the machine or to
+#       the approval path;
+#   (2) the warden/audit pipeline itself;
+#   (3) units whose restart would GRANT new access. `systemctl restart` on an
+#       INACTIVE unit is a START — so a "restart" is not only a way to take
+#       something away, it is also a way to turn something ON. Axes (1) and (2)
+#       both reason about removal/tampering; this one is their inverse and was
+#       missing (added 2026-07-15).
+# Glob patterns allowed.
+#
+# NOTE ON SHAPE — this is a DENY-list, i.e. enumerate-the-bad, while the project's
+# canonical rule is default-deny (and `log.read` above rightly uses `allowed`, an
+# allow-list). Enumeration cannot be complete: axis (3) in particular is
+# unbounded (any inactive access-granting unit present in the image). What caps
+# the damage is NOT this list — it is the T2 human floor: a miss here does not
+# grant a restart, it only lets the agent ASK. This list's real job is to stop an
+# agent from social-engineering the operator into approving something
+# catastrophic. Turning `svc.restart` into an allow-list would be structurally
+# correct, but requires deciding WHICH units an agent may ever restart — an
+# operator decision, deliberately not taken here.
 [rule.services]
 denied = [
   # Warden + approval mechanism — an agent must never touch what governs it.
   "vibed.service",              # the policy warden + approval store owner
-  "vibeos-agent@*.service",     # the agent supervisor itself
+  # The `vibeos-` prefix is a RESERVED NAMESPACE: no agent may restart anything
+  # in it. This is a prefix glob rather than an enumeration on purpose — the
+  # enumeration is exactly what failed. `vibeos-agent@*.service` did NOT cover
+  # `vibeos-agent-egress@*.service` (the glob wants `@` where the text has
+  # `-egress@`), so an agent could ask to restart the very unit that compiles its
+  # own egress allow-list. Someone added a governance unit and did not think to
+  # come back here; a namespace claim makes the next one denied by default.
+  # Cost: a unit named `vibeos-*` that is NOT ours can never be restarted by an
+  # agent either. That is the intended trade — the prefix is ours.
+  "vibeos-*",                   # supervisor, egress warden, group setup, genesis
   "polkit.service",             # authorization backbone
   # Audit / log pipeline — tamper resistance.
   "systemd-journald.service",   # log pipeline stays out of reach
@@ -253,6 +280,11 @@ denied = [
   # Operator ACCESS — restarting any of these can lock the human out, removing
   # the very ability to approve or intervene.
   "sshd.service",               # remote SSH access
+  # ...and its socket. Axis (3): SSH may be installed but INACTIVE, and a
+  # "restart" of an inactive unit STARTS it — an approved `svc.restart
+  # sshd.socket` reads as innocuous to an operator while it actually turns
+  # remote SSH ON. Denying the .service alone only covered the removal axis.
+  "sshd.socket",                # socket activation would START ssh, not cut it
   "NetworkManager.service",     # network (remote access) — common impl
   "systemd-networkd.service",   # network — alternative impl
   "display-manager.service",    # the graphical session where approval happens

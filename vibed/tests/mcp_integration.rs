@@ -373,7 +373,12 @@ async fn svc_restart_bare_critical_unit_is_denied_not_merely_pending() {
 #[tokio::test]
 async fn t2_svc_restart_human_approval_chain_end_to_end() {
     let mut srv = Server::start("svc-restart-approval");
-    let unit = "vibeos-approval-e2e.service";
+    // An ORDINARY unit, which is what this test is about: one that is not on the
+    // deny-list and must therefore reach the human-approval floor. Deliberately
+    // NOT `vibeos-*`: the shipped policy reserves that prefix for VibeOS's own
+    // governance units and denies restarting anything in it outright, so a
+    // `vibeos-`-prefixed name would test the deny path, not the approval chain.
+    let unit = "approval-e2e.service";
 
     // 1. No grant yet: the T2 floor refuses and records a pending request.
     let (is_error, text) = srv.tool_call(1, "svc.restart", json!({"unit": unit})).await;
