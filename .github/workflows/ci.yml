@@ -99,6 +99,17 @@ jobs:
       - name: Clippy — dev-overrides feature (harnais E2E, jamais expédié)
         run: cargo clippy --all-targets --locked --features dev-overrides -- -D warnings
 
+      # Critère de sortie Phase 2 (ROADMAP §4) : « Aucune fuite d'informations
+      # sensibles (tokens, contenus de fichiers) dans les logs de niveau info. »
+      # Vrai le 2026-07-15, vérifié en relisant les 26 appels tracing de
+      # vibed/src — mais vrai PAR DISCIPLINE : rien n'empêchait le prochain
+      # `info!("… args={args}")` d'expédier les arguments d'outil dans le
+      # journal. Un critère vrai seulement jusqu'à ce que quelqu'un oublie n'est
+      # pas un critère, c'est une coïncidence.
+      - name: Hygiène des logs (aucun secret loggé)
+        working-directory: .
+        run: python3 scripts/check-log-hygiene.py
+
   audit:
     name: vibed — cargo audit (RustSec)
     runs-on: ubuntu-latest

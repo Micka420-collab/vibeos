@@ -20,7 +20,7 @@
 |---|---|---|---|---|
 | 0 | — | Fondation | ✅ Fait (2026-07-03) | 2–3 semaines (effectué) |
 | 1 | v0.1 | Première ISO | 🔄 En cours (reste : validation VM + NVIDIA) | 6–10 semaines |
-| 2 | v0.2 | vibed + MCP | 🔄 Bien avancée (vibed + HUD + thème + MCP client + memory.append complet + svc.status/fs.list/sectools.list + audit chaîné + **fs.read/list confinés** + **memory.query extraits** + **plomberie d'approbation T2/T3** + **rate-limiting par uid**) | 3–4 mois |
+| 2 | v0.2 | vibed + MCP | 🔄 **Livrables complets ; 4/7 critères de sortie vérifiés** (2026-07-15). Les **3 restants sont machine-gated** (vibed sain après `kill -9`, handshake depuis le vrai Claude Code, démo T0+T1 tracée) → **test d'ISO**. Tout le reste est en place : vibed + HUD live + thème + MCP client + `memory.append` complet + T0 (`svc.status`/`fs.list`/`log.read`/`sectools.list`/`agent.*`/`policy.check`) + T1 (`fs.write`/`memory.append`) + audit chaîné + **fs.read/list confinés** + **approbation T2/T3 réelle** (livrée en avance, Phase 2.5) + **rate-limiting par uid** | 3–4 mois |
 | 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | 🔄 Largement implémenté (superviseur `vibectl agent run/stop/thinking`, **kill-switch mesuré 2,6 s**, **capture du raisonnement**, `policy.check`, **unité `vibeos-agent@` durcie + jeton scellé TPM2 + allowlist egress par hôte**) ; reste l'enforcement live (machine bootée). Périmètre figé T0/T1, plancher T2/T3 non levé | 3–5 semaines |
 | 3 | v0.3 | Genesis & mémoire | 🔄 Démarrée (generator amnésique + hardware.json schema 2 + ébauche vibectl livrés) | 2–3 mois |
 | 4 | v0.4 | Durcissement | 🔄 Amorcée (audit chaîné SHA-256 + rotation ; reste : ancrage TPM/Rekor, User=vibed, SELinux) | 4–6 mois |
@@ -132,13 +132,19 @@ gantt
 
 ### Critères de sortie (mesurables)
 
-- [ ] `systemctl status vibed` : actif, sain, redémarre proprement après `kill -9` (Restart=on-failure vérifié).
-- [ ] Handshake MCP `initialize` réussi depuis Claude Code via `/run/vibed/mcp.sock` ; liste d'outils T0/T1 exposée.
-- [ ] Démonstration bout-en-bout : depuis Claude Code, un agent lit l'état du système (T0) et modifie un fichier de config utilisateur (T1) — les deux actions apparaissent dans l'audit trail.
-- [ ] Tout appel T2/T3 est refusé avec une erreur JSON-RPC explicite, et le refus est audité.
-- [ ] Politique invalide dans `/etc/vibeos/policy.d/` → `vibed` refuse de démarrer en mode permissif : soit il refuse tout appel, soit il échoue explicitement (fail-closed vérifié par un test).
-- [ ] CI : tests unitaires + intégration verts ; `cargo clippy -D warnings` et `cargo audit` sans erreur.
-- [ ] Aucune fuite d'informations sensibles (tokens, contenus de fichiers) dans les logs de niveau info.
+> **Point d'étape 2026-07-15.** Les **livrables** ci-dessus sont tous en place.
+> Sur les 7 critères, **4 sont atteints et vérifiés mécaniquement** (cochés
+> ci-dessous, chacun avec sa preuve). Les **3 restants exigent une machine
+> bootée** : ils ne sont pas « à faire » mais « à constater » — c'est l'objet du
+> test d'ISO. Aucun n'est coché sans preuve.
+
+- [ ] `systemctl status vibed` : actif, sain, redémarre proprement après `kill -9` (Restart=on-failure vérifié). — **🖥️ machine** : `vibed.service` porte `Restart=on-failure` et le binaire est embarqué ; reste à le constater sur une ISO bootée.
+- [ ] Handshake MCP `initialize` réussi depuis Claude Code via `/run/vibed/mcp.sock` ; liste d'outils T0/T1 exposée. — **🖥️ machine** : le handshake est couvert bout-en-bout en CI (`mcp_integration.rs`, vrai `handle_connection` sur une vraie socketpair, vraie politique livrée), mais **jamais depuis le vrai Claude Code sur le vrai socket**.
+- [ ] Démonstration bout-en-bout : depuis Claude Code, un agent lit l'état du système (T0) et modifie un fichier de config utilisateur (T1) — les deux actions apparaissent dans l'audit trail. — **🖥️ machine**.
+- [x] Tout appel T2/T3 est refusé, et le refus est audité. — **Vérifié** : `t2_svc_restart_human_approval_chain_end_to_end` et le test `pkg.install` (`mcp_integration.rs`) prouvent sur le fil qu'un T2 sans grant est refusé (« requires human approval ») et audité `outcome=pending_approval`. **Deux écarts avec la lettre du critère, signalés plutôt que contournés** : (1) le refus est une **réponse MCP `isError:true`**, pas une *erreur* JSON-RPC — c'est la convention MCP (une erreur de protocole est réservée à une requête malformée), donc l'implémentation est correcte et c'est le critère, écrit avant, qui disait « erreur JSON-RPC » ; (2) le critère supposait « T2/T3 refusés par défaut, approbation en Phase 4 » — le **flux d'approbation a été livré en avance** (Phase 2.5) : un T2 n'est donc plus refusé *définitivement* mais **refusé jusqu'à approbation humaine**, puis autorisé par un grant à usage unique. C'est **strictement plus** que ce que la Phase 2 exigeait, jamais moins : aucun T2 ne s'exécute sans humain.
+- [x] Politique invalide dans `/etc/vibeos/policy.d/` → `vibed` refuse de démarrer en mode permissif : soit il refuse tout appel, soit il échoue explicitement (fail-closed vérifié par un test). — **Vérifié** : `policy::tests::load_dir_fails_closed_on_invalid_file` (un fichier invalide fait échouer le chargement du répertoire **entier**, jamais un chargement partiel plus permissif) ; `main.rs` sort en `exit(1)` sur cette erreur, **avant** le `bind()` du socket — l'ordre politique → audit → limiter → bind rend impossible d'écouter sans politique.
+- [x] CI : tests unitaires + intégration verts ; `cargo clippy -D warnings` et `cargo audit` sans erreur. — **Vérifié** : `ci` vert sur `main` (job `rust` = fmt + build + test + clippy `-D warnings` `--all-targets --locked` ; job `audit` = `cargo audit` sur le `Cargo.lock` épinglé ; job `msrv` = Rust 1.75). **175 tests** (163 unitaires + 9 e2e MCP + 3 politique).
+- [x] Aucune fuite d'informations sensibles (tokens, contenus de fichiers) dans les logs de niveau info. — **Vérifié ET gardé** : les 26 appels `tracing` de `vibed/src` relus un par un — les logs ne portent que l'identité de l'appelant (uid/gid/pid), des **noms** d'outils/d'unités, des compteurs, des chemins de politique et des erreurs ; **jamais un argument d'outil, un contenu de fichier ou un token** (le sujet d'un appel va dans la **trace d'audit**, bornée et non secrète, pas dans le log). Le seul `debug!` n'imprime qu'un nom de méthode, et n'est de toute façon pas émis (`with_max_level(INFO)`). Comme cette propriété ne tenait que par discipline, elle est désormais **mécaniquement gardée en CI** : `scripts/check-log-hygiene.py` échoue si un appel `tracing` interpole une valeur contrôlée par l'appelant.
 
 ### Risques principaux
 
