@@ -1,11 +1,168 @@
-# SESSION_LOG — session autonome du 2026-07-13
+# SESSION_LOG — sessions autonomes (2026-07-13 → )
 
-> Journal de la session de travail autonome (matin → 23h). Point d'entrée
-> permanent : [STATUS.md](STATUS.md). Branche : `worktree-amelioration-2026-07-13`.
-> PR principale : **[PR #11](https://github.com/Micka420-collab/vibeos/pull/11)**
-> (branche → `main`, MERGEABLE). La [PR #4](https://github.com/Micka420-collab/vibeos/pull/4)
-> (empilée sur les draft PRs Phase 2, cible `phase2-supply-chain`) est **antérieure
-> et superseded** par #11 ; son sort (fermeture) est laissé à l'humain.
+> Journal des sessions de travail autonomes, **anti-chronologique** (le plus
+> récent en tête). Point d'entrée permanent : [STATUS.md](STATUS.md).
+> *(Historique : la [PR #11](https://github.com/Micka420-collab/vibeos/pull/11) qui
+> portait les sessions des 13-14 juillet a été **mergée** le 2026-07-14, et la
+> [PR #4](https://github.com/Micka420-collab/vibeos/pull/4) qu'elle supersedait est
+> **fermée**. Le travail passe désormais par des PR petites et indépendantes sur
+> `main`.)*
+
+## 🔧 Session 2026-07-15 (jour, autonome) — le fil rouge : ce qui se dit fait sans l'être
+
+Onze PR, toutes indépendantes sur `main`. **Aucune inventée** : chacune corrige un
+écart entre ce que le dépôt *affirme* et ce qu'il *fait*.
+
+**La leçon de la journée, apprise deux fois à mes dépens : j'ai écrit deux tests
+qui ne testaient rien.** Le premier était **tautologique** (il passait déjà sans
+le correctif) ; le second n'assertait que **la direction facile** d'une propriété
+— ses 4 contrôles vérifiaient qu'une clé *change*, jamais qu'elle *reste stable*,
+qui était sa seule raison d'être ; c'est pour ça qu'un vrai bug est passé au vert.
+Un contrôle qui n'asserte que la direction facile est **pire que pas de contrôle :
+il achète de la fausse confiance**. Discipline désormais systématique : **rétablir
+le bug et vérifier que le test échoue** — appliqué à chaque correctif ci-dessous.
+
+**Un vrai bug de sécurité, trouvé en faisant relire ma propre PR.**
+[PR #49](https://github.com/Micka420-collab/vibeos/pull/49) : `target` n'est pas un
+champ de log — c'est **la clé du grant d'approbation** (`check_and_consume_grant`
+la compare à l'identique) **et la seule description de l'action que l'opérateur
+voit** (la demande en attente ne porte jamais les arguments). Or il était dérivé du
+« premier non-nul parmi (chemin, unité, paquet) » pour *tous* les outils, alors que
+`path`/`unit` sont lus sur les arguments de *n'importe quel* appel. Donc :
+`svc.restart {"unit":"nginx.service","path":"/etc/nginx/nginx.conf"}` → le chemin
+gagne → l'opérateur approuve un « redémarrage » d'un **fichier de config**
+d'apparence plausible → le grant est keyé sur ce chemin → le **même grant**
+autorise ensuite le redémarrage de **n'importe quelle autre unité non-denylistée**
+(l'unité n'est jamais comparée au grant). Symétrique pour `pkg.install
+{"name":"evil","unit":"vim"}`. **Pas un bypass** (le plancher T2/T3 exige toujours
+un humain) mais ça vide la mitigation S1 n°2 — « *l'humain voit l'action réelle* » —
+de son sens. Cible désormais dérivée **par outil**, depuis l'argument qu'il utilise
+vraiment. Parité **structurelle** via `derive_service()` : un seul endroit dérive
+l'unité, appelé par le vrai chemin ET par `policy.check`.
+**Mea culpa au passage** : un de mes tests de la veille était **tautologique** (il
+passait déjà sans le correctif — il visait `policy_check` alors que le repli fautif
+vivait dans `handle_tools_call`). Remplacé. Depuis, chaque test de régression est
+**vérifié en restaurant le bug** : il doit échouer.
+
+**Denylist `svc.restart` — l'axe manquant.**
+[PR #52](https://github.com/Micka420-collab/vibeos/pull/52) : les deux axes déclarés
+(« couper l'ACCÈS », « pipeline d'audit ») raisonnent tous les deux sur du
+**retrait** de capacité. Or **`systemctl restart` sur une unité INACTIVE la
+DÉMARRE** : `sshd.socket` n'était pas refusé → un redémarrage d'apparence anodine
+**allume le SSH distant**. Axe (3) nommé. Et le glob `vibeos-agent@*.service` ne
+pouvait pas matcher `vibeos-agent-egress@…` (il attend `@` là où le texte a
+`-egress@`) → l'agent pouvait demander le redémarrage de l'unité qui compile **sa
+propre allowlist d'egress**. Remplacé par un **espace de noms réservé** `vibeos-*`,
+parce que c'est l'énumération qui a échoué. **Question de structure posée, pas
+tranchée** : c'est un deny-list alors que la règle canonique est default-deny ;
+passer `svc.restart` en allow-list exige de décider *quelles* unités — décision
+opérateur.
+
+**Supply chain : `gpgcheck` était un théâtre.**
+[PR #48](https://github.com/Micka420-collab/vibeos/pull/48) : `rpm --import <url>`
+(VSCodium) et `dnf -y` acceptant la clé annoncée par un `.repo` amont (mise)
+faisaient un **TOFU à chaque build** — une URL compromise faisait importer une clé
+hostile **sans aucun signal**, et `gpgcheck=1` la validait ensuite fidèlement. Clés
+**épinglées dans le dépôt** (ASCII-armored, relisibles en diff), importées depuis
+le disque, `gpgkey=` sur un chemin local. **Vérifiées** contre la signature réelle
+du `repomd.xml.asc` : VSCodium recoupé **entre deux hôtes distincts**
+(clé sur gitlab, paquets sur download.vscodium.com), mise sur un **hôte unique**
+(plus faible, documenté). Portée honnête : empêche une clé de **changer** sans
+qu'on le voie ; ne **prouve pas** son authenticité à la capture.
+
+**Le HUD : un panneau déclaré mais mort.**
+[PR #47](https://github.com/Micka420-collab/vibeos/pull/47) : `ReasoningPanel.history`
+était déclaré et jamais lié ; sélectionner une session affichait « (chargement —
+Phase 2.5) ». **Aucun outil MCP nouveau** : `agent.sessions` listait déjà tout et
+le HUD **jetait la liste**. Outil existant enrichi (métadonnées par session,
+**plafonné à 200** avec `total`/`truncated` — l'ADR-012 prétendait une « sortie
+bornée » alors qu'elle croissait sans limite ; tri par **mtime** et non lexical —
+l'ordre ne *paraissait* chronologique que parce que les ids intègrent un ts de
+largeur fixe). **Aucun compteur de tours** : le produire imposerait de relire chaque
+fichier à chaque poll (amplification I/O sur un T0 répétable). Relecture
+adversariale du QML → **5 défauts user-visible** corrigés, dont la **sélection par
+index** alors que la liste est retriée à chaque poll : le panneau aurait attribué le
+raisonnement d'une session à une **autre** — le mensonge exact qu'il existe pour
+empêcher. **1er contrôle CI du JS du HUD** (`scripts/check-hud-client.js`, 72
+contrôles sous node **sans Qt** — `vibed_client.js` est une `.pragma library`) :
+cette couche shippait **totalement non testée**.
+
+**Durcissements issus d'un audit des zones jamais couvertes** (`main.rs`,
+`tools/svc.rs`, `tools/sectools.rs`, `test_support.rs`, unités systemd) :
+- [PR #53](https://github.com/Micka420-collab/vibeos/pull/53) :
+  `vibeos-agent-egress@.service` était la **seule unité sans aucun durcissement**,
+  alors qu'elle tourne en root et **compile le drop-in qui contient l'allowlist
+  d'egress**. `ProtectSystem=full` et non `strict` — délibérément : sa seule cible
+  d'écriture est `/run`, que `strict` monterait RO ; choisir la bonne dérogation
+  casse sur une machine bootée, pas ici.
+- [PR #54](https://github.com/Micka420-collab/vibeos/pull/54) : `VIBED_POLICY_DIR`
+  (qui **remplace toute la politique**) était compilé dans le binaire de release
+  alors que le commentaire disait « dev **only** ». Passé derrière la feature cargo
+  `dev-overrides`, absente par défaut. **Prouvé** : `strings` sur les deux binaires
+  → 1 occurrence avec la feature, **0 dans celui que l'image livre**. Lint CI ajouté
+  **avec** la feature, sinon ce chemin ne serait plus jamais compilé et pourrirait
+  jusqu'à casser le harnais E2E.
+- **Résultat négatif de valeur** : `validate_unit_name` a résisté à tout
+  (homoglyphes unicode, NUL, espaces, `SSHD.service`, `sshd.service.`, `sshd@`,
+  traversée, échappements `\x`, injection d'options). Sa robustesse tient à une
+  raison non évidente : **son charset est byte-pour-byte celui de systemd**, donc
+  `unit_name_mangle()` ne réécrit jamais rien. `sectools.rs` et `test_support.rs`
+  propres. **Ne pas re-auditer.**
+
+**Le boot que tu avais demandé ship inerte.**
+[PR #50](https://github.com/Micka420-collab/vibeos/pull/50) : le README réclamait
+`plymouth-plugin-script`… **jamais installé**. Le thème déclare `ModuleName=script`
+et le thème Fedora par défaut ne l'utilise pas → **rien ne le tirait**. Le jour où
+la Phase 5 bascule le défaut, Plymouth serait retombé sur le thème de la distro. Un
+piège posé pour plus tard. **N'active rien** : l'allumage (initramfs) reste Phase 5,
+non testable sans machine — **décision Micka**.
+
+**Doc.** [PR #51](https://github.com/Micka420-collab/vibeos/pull/51) : STATUS avait
+sauté la session du 14→15 et annonçait donc `log.read` « en attente de revue »
+(mergé) et « plus rien en attente de merge » (5 PR ouvertes). Le garde-fou
+mécanique ne peut pas attraper ça — c'est du sens. Corrigé **un faux positif du
+garde-fou** révélé par ce commit même : lister ses PR **ouvertes** est ce qu'un
+STATUS honnête doit faire, mais le déclencheur `pr` le lisait comme une réclamation
+de merge. *Un garde-fou qui punit l'honnêteté apprend à mentir.*
+
+**Le CLI opérateur — la seule zone jamais auditée, et c'est par là que la décision
+humaine entre.**
+[PR #56](https://github.com/Micka420-collab/vibeos/pull/56) : **aucun
+contournement du plancher** — usurpation d'euid, traversée par l'id (`safe_id` est
+même *plus* strict que `safe_session_id`), injection terminal, TOCTOU
+liste→approve : les quatre classes sont fermées. **Mais deux de ces défenses
+tenaient par accident.** (1) L'injection terminal est bloquée par **effet de bord**
+de l'encodage JSON (serde_json échappe tout 0x00–0x1F) — rien ne le disait,
+`approvals_list` n'avait **aucun test**, et un futur « beau tableau » rouvrait
+toute la classe en silence ; désormais un point de passage **nommé**
+(`render_for_operator`), l'invariant énoncé, et un test qui pousse CSI+CR+BEL à
+travers `target`. (2) `parse_effective_uid` retournait sur la **première** ligne
+`Uid:` — or `Name:` vaut le basename de l'exécutable et un nom de fichier Linux
+peut contenir un saut de ligne ; ça ne marche que parce que le **noyau** échappe
+`comm`, garantie dont ce code n'a pas à dépendre en silence. Exige désormais une
+seule correspondance.
+Et [#49](https://github.com/Micka420-collab/vibeos/pull/49) borne la cible **à la
+source** : elle n'était plafonnée qu'à 1 Mio × 16 demandes = ~16 Mio de texte
+déversés dans le terminal de l'opérateur, avec `target` s'affichant **avant**
+`tier`/`tool` (clés JSON alphabétiques) — l'action réelle poussée hors écran.
+**Rejeter, pas tronquer** : tronquer donnerait une primitive de tromperie qui
+n'existe pas (lire un préfixe, approuver la chaîne entière).
+
+**Mes propres correctifs relus — et deux étaient faux.**
+Un correctif est exactement l'endroit où se cache le bug suivant. Sur
+[#47](https://github.com/Micka420-collab/vibeos/pull/47) : mon garde anti-reset
+**ne gardait rien** (j'avais écrit que les libellés étaient « grossiers » — faux :
+précision à la seconde, à l'octet ; la session live est dans la liste, donc la clé
+changeait à **100 % des polls** dès qu'un agent écrivait — l'échec exact qu'il
+devait empêcher). Corrigé à la racine : le modèle n'est plus remplacé mais
+**diffé en place** (ListModel). Et un **échec de lecture devenait une
+affirmation** (« aucun raisonnement capté ») — un fait fabriqué, déclenchable par
+un simple redémarrage de vibed ; il se dit maintenant échec.
+
+**Reste ouvert (décision Micka, pas de l'agent)** : allumer le splash de boot ;
+`svc.restart` en allow-list ? ; quel outil T1 réel + son allowlist ; Phase 4 ;
+« l'IA modifie l'OS » ; Mammouth AI ; voix/GUI. **Machine-gated** : boot VM, TPM2
+live, egress live, rendu HUD sur Plasma booté, Zed Tier B, NVIDIA.
 
 ## 🔧 Session 2026-07-14/15 (nuit, autonome) — log.read + revue adversariale (8 sous-agents, 2 vagues) → 4 vrais bugs sécurité corrigés
 
