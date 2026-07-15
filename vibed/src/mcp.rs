@@ -414,29 +414,8 @@ async fn handle_tools_call(
         None => None,
     };
     let raw_service = args.get("unit").and_then(Value::as_str);
-    // Canonicalize the unit name for svc.* tools BEFORE the policy decision, so
-    // the deny-list (which lists fully-qualified units like "sshd.service")
-    // matches a bare "sshd" too. Without this an agent bypasses the deny-list by
-    // dropping the ".service" suffix: the tool canonicalizes the name only
-    // internally, AFTER the decision, so "vibed"/"sshd" would slip past the deny
-    // rule and reach the T2 approval queue instead of an outright Deny. An
-    // invalid unit falls through to the raw name (execution rejects it anyway).
-    let canonical_unit: Option<String> = if unit_bearing(&name) {
-        raw_service.and_then(|u| crate::tools::svc::validate_unit_name(u).ok())
-    } else {
-        None
-    };
-    // A tool that carries no unit reaches the policy with service = None. It used
-    // to fall back to `raw_service` for EVERY tool, so an arbitrary `unit`
-    // argument smuggled into, say, an fs.read call landed in the policy context
-    // as caller-controlled, never-canonicalized data — and `policy.check`, which
-    // only ever derived a unit for unit-bearing tools, disagreed with the real
-    // decision for the same call.
-    let service = if unit_bearing(&name) {
-        canonical_unit.as_deref().or(raw_service)
-    } else {
-        None
-    };
+    let service_owned = derive_service(&name, raw_service);
+    let service = service_owned.as_deref();
 
     // Human-readable, non-secret target recorded in the audit trail so an
     // action's subject (which file / unit / package) is recoverable in
@@ -699,23 +678,48 @@ async fn handle_tools_call(
 /// Derive the non-secret audit target for a call: the normalized path for
 /// filesystem tools, the unit for service tools, the package name for
 /// pkg.install. Returns `None` when the tool carries no such subject.
+/// SECURITY-CRITICAL — this is not merely a log field.
+///
+/// `target` is (1) the approval GRANT KEY (`approval::check_and_consume_grant`
+/// matches `(tool, target, uid)` by exact string compare) and (2) the ONLY
+/// description of the action the operator ever sees: the pending record carries
+/// `{id, tool, target, tier, caller_uid}` and NOT the arguments. Meanwhile
+/// `execute_tool` re-reads the RAW arguments. So the target must name the thing
+/// the tool will actually act on — otherwise one approval authorises a different
+/// action, and the audit trail describes something that did not happen.
+///
+/// It is therefore derived PER TOOL, from the argument that tool actually uses.
+/// It used to be "the first non-None of (path, unit, package name)" for every
+/// tool, which broke that binding in both directions, because `path` and `unit`
+/// are read off the arguments of ANY call:
+///   * `svc.restart {"unit":"x","path":"/etc/nginx/nginx.conf"}` → the path won,
+///     so the operator was asked to approve `svc.restart` on a plausible-looking
+///     CONFIG FILE, the grant was keyed on that path, and the same grant then
+///     authorised restarting ANY other non-denied unit (the unit is never
+///     compared to the grant). The audit recorded the path, not the unit.
+///   * `pkg.install {"name":"evil","unit":"vim"}` → the unit won, so a grant
+///     approved for `vim` matched a call installing `evil`.
+///
+/// Binding the target to the tool's real subject closes both.
 fn audit_target(
     name: &str,
     normalized_path: Option<&str>,
     service: Option<&str>,
     args: &Value,
 ) -> Option<String> {
-    if let Some(path) = normalized_path {
-        return Some(path.to_string());
+    if name.starts_with("fs.") {
+        return normalized_path.map(str::to_string);
     }
-    if let Some(unit) = service {
-        return Some(unit.to_string());
+    if unit_bearing(name) {
+        return service.map(str::to_string);
     }
     if name == "pkg.install" {
-        if let Some(pkg) = args.get("name").and_then(Value::as_str) {
-            return Some(pkg.to_string());
-        }
+        return args.get("name").and_then(Value::as_str).map(str::to_string);
     }
+    // Every other tool acts on no nameable subject (os.status, memory.*,
+    // agent.*, sectools.list, policy.check). A `path`/`unit` smuggled into their
+    // arguments is read by nothing — recording it would put caller-controlled
+    // fiction in the audit trail.
     None
 }
 
@@ -992,6 +996,25 @@ pub(crate) fn unit_bearing(tool: &str) -> bool {
     tool.starts_with("svc.") || tool == "log.read"
 }
 
+/// The systemd unit a call targets, AS THE POLICY SEES IT. The one helper both
+/// `handle_tools_call` (the real decision) and `policy_check` (the dry-run hint)
+/// call, so the two cannot drift apart again — parity is structural here, not
+/// merely asserted by a test.
+///
+/// Canonicalizes BEFORE the decision so a bare `sshd` matches a deny rule that
+/// spells `sshd.service` (without this an agent drops the suffix and walks past
+/// the deny-list). An invalid name falls through to the raw string: it will not
+/// match any allow rule, and execution re-validates and refuses — fail-closed.
+/// A tool that carries no unit gets `None`: its `unit` argument, if any, is
+/// caller-supplied data that nothing reads, and must never reach the policy.
+fn derive_service(tool: &str, raw_unit: Option<&str>) -> Option<String> {
+    if !unit_bearing(tool) {
+        return None;
+    }
+    let raw = raw_unit?;
+    Some(crate::tools::svc::validate_unit_name(raw).unwrap_or_else(|_| raw.to_string()))
+}
+
 fn list_tools() -> Vec<Value> {
     tool_catalog()
         .into_iter()
@@ -1077,6 +1100,17 @@ fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     } else {
         None
     };
+    // A path the real pipeline REFUSES to normalize (relative, or climbing above
+    // `/`) is rejected there before any policy evaluation. The hint must say so:
+    // silently dropping it left the path constraints unevaluated and answered
+    // "allow" for a call the daemon denies outright.
+    if tool.starts_with("fs.") && target.is_some() && normalized.is_none() {
+        return Ok(json!({
+            "tool": tool, "target": target, "decision": "deny",
+            "by": "invalid_path", "note": note
+        })
+        .to_string());
+    }
     if let Some(path) = normalized.as_deref() {
         if let Some(pattern) = builtin_denied(path, tool == "fs.write") {
             return Ok(json!({
@@ -1088,23 +1122,14 @@ fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     }
 
     let tier = tool_tier(tool);
-    // Canonicalize the unit exactly like the real pipeline does. Without this the
-    // hint evaluated a bare "sshd" against a deny rule listing "sshd.service",
-    // answered "allow", and the daemon then denied the very call the hint had
-    // blessed — the dry-run must mirror the decision it predicts, not a laxer one.
-    let canonical_target: Option<String> = if unit_bearing(tool) {
-        target.and_then(|u| crate::tools::svc::validate_unit_name(u).ok())
-    } else {
-        None
-    };
-    let service = if unit_bearing(tool) {
-        canonical_target.as_deref().or(target)
-    } else {
-        None
-    };
+    // Exactly what the real pipeline derives — same helper, so the hint cannot
+    // drift laxer than the decision it predicts (it had: it compared a bare
+    // "sshd" against a deny rule listing "sshd.service", answered
+    // "require_approval", and the daemon then denied that very call).
+    let service_owned = derive_service(tool, target);
     let ctx = CallContext {
         path: normalized.as_deref(),
-        service,
+        service: service_owned.as_deref(),
     };
     let decision = match policy.evaluate(tool, tier, ctx) {
         Decision::Allow => "allow",
@@ -1909,21 +1934,114 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_constraint_never_governs_a_tool_that_carries_no_unit() {
-        // Guards the fix: `service` used to fall back to the raw `unit` argument
-        // for EVERY tool, so caller-controlled data reached the policy on tools
-        // that have no unit at all. fs.read has no unit -> the services
-        // constraint is simply not applicable, and the rule's own verdict stands.
+    fn derive_service_is_the_one_derivation_both_call_sites_use() {
+        // Canonicalized before any decision: a bare name must match a deny rule
+        // that spells the unit out, or the suffix trick walks past the deny-list.
+        assert_eq!(
+            derive_service("svc.restart", Some("sshd")).as_deref(),
+            Some("sshd.service")
+        );
+        assert_eq!(
+            derive_service("log.read", Some("vibed")).as_deref(),
+            Some("vibed.service")
+        );
+        // A tool with no unit never carries one into the policy, whatever the
+        // caller claims.
+        assert_eq!(derive_service("fs.read", Some("sshd.service")), None);
+        assert_eq!(derive_service("pkg.install", Some("vim.service")), None);
+        assert_eq!(derive_service("os.status", Some("anything")), None);
+        // No unit argument at all -> nothing to constrain on.
+        assert_eq!(derive_service("svc.restart", None), None);
+        // An unusable name is NOT dropped: dropping it would let a rule match on
+        // "no unit at all". It falls through raw; execution re-validates.
+        assert_eq!(
+            derive_service("svc.restart", Some("../etc/passwd")).as_deref(),
+            Some("../etc/passwd")
+        );
+    }
+
+    #[test]
+    fn the_approval_grant_key_names_what_the_tool_actually_acts_on() {
+        // `target` is the approval GRANT KEY (approval::check_and_consume_grant
+        // compares it verbatim) AND the only thing the operator is shown. It must
+        // name the tool's real subject: execute_tool re-reads the raw args, so a
+        // target taken from an argument the tool ignores lets one approval
+        // authorise a different action.
+
+        // svc.restart acts on `unit`. A `path` smuggled alongside used to WIN and
+        // become the target: the operator was asked to approve svc.restart on a
+        // plausible-looking config file, and the resulting grant then authorised
+        // restarting ANY other non-denied unit (the unit is never compared to the
+        // grant).
+        assert_eq!(
+            audit_target(
+                "svc.restart",
+                Some("/etc/nginx/nginx.conf"),
+                Some("nginx.service"),
+                &json!({"unit": "nginx.service", "path": "/etc/nginx/nginx.conf"}),
+            )
+            .as_deref(),
+            Some("nginx.service"),
+            "a stray path must never become the approval subject of a unit restart"
+        );
+
+        // pkg.install acts on `name`. A stray `unit` used to win, so a grant
+        // approved for "vim" matched a call installing something else.
+        assert_eq!(
+            audit_target(
+                "pkg.install",
+                None,
+                None,
+                &json!({"name": "evil-pkg", "unit": "vim"}),
+            )
+            .as_deref(),
+            Some("evil-pkg"),
+            "the package actually being installed is the approval subject"
+        );
+
+        // fs.* act on `path` — unchanged, and a stray unit cannot displace it.
+        assert_eq!(
+            audit_target(
+                "fs.write",
+                Some("/var/home/u/notes.txt"),
+                None,
+                &json!({"path": "/var/home/u/notes.txt", "unit": "sshd.service"}),
+            )
+            .as_deref(),
+            Some("/var/home/u/notes.txt")
+        );
+
+        // A tool that acts on no nameable subject records none — a path or unit
+        // smuggled into its args is fiction that nothing reads.
+        assert_eq!(
+            audit_target(
+                "memory.append",
+                Some("/etc/passwd"),
+                None,
+                &json!({"path": "/etc/passwd"}),
+            ),
+            None,
+            "caller-supplied fiction must not enter the audit trail"
+        );
+        assert_eq!(audit_target("os.status", None, None, &json!({})), None);
+    }
+
+    #[test]
+    fn policy_check_refuses_a_path_the_real_pipeline_would_refuse() {
         let policy = policy_from_toml(
-            "[[rule]]\nid=\"fsread\"\ntools=[\"fs.read\"]\ntier=\"T0\"\naction=\"allow\"\n\
-             [rule.services]\nallowed=[\"vibed.service\"]\n",
+            "[[rule]]\nid=\"fsw\"\ntools=[\"fs.write\"]\ntier=\"T1\"\naction=\"allow\"\n",
         );
         let check = |args: Value| -> Value {
             serde_json::from_str(&policy_check(&args, &policy).unwrap()).unwrap()
         };
-        // Whatever a caller claims about a unit, an fs.read decision is unchanged.
+        // The daemon rejects a non-absolute path before evaluating any rule. The
+        // hint used to skip normalization silently and answer "allow".
+        let rel = check(json!({"tool": "fs.write", "target": "etc/passwd"}));
+        assert_eq!(rel["decision"], "deny", "relative path: {rel}");
+        assert_eq!(rel["by"], "invalid_path");
+        // An absolute path still evaluates normally.
         assert_eq!(
-            check(json!({"tool": "fs.read", "target": "/etc/os-release"}))["decision"],
+            check(json!({"tool": "fs.write", "target": "/var/home/u/a.txt"}))["decision"],
             "allow"
         );
     }
