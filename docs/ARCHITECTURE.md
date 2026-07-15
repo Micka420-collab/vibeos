@@ -271,7 +271,13 @@ flowchart LR
 
 ## 8. Invariants d'architecture
 
-1. **Aucun agent IA ne contourne `vibed`** : le socket MCP est l'unique surface de contrôle système exposée aux agents.
+1. **Aucun agent IA n'obtient une capacité PRIVILÉGIÉE sans `vibed`** : le socket MCP est l'unique surface par laquelle un agent atteint quoi que ce soit qu'il ne peut pas faire sous son propre compte. Il tourne comme l'utilisateur, **jamais root** ; `/usr`, `/etc` et `/boot` sont en lecture seule. Tout ce qui exige root — services, paquets, configuration système — passe donc par le moteur de politiques, sans alternative.
+
+   ⚠️ **Ce que cet invariant ne dit PAS, et qu'il disait à tort.** Il énonçait *« aucun agent IA ne contourne `vibed` : le socket MCP est l'unique surface de contrôle système exposée aux agents »*. C'est **faux pour la configuration livrée**, et le dépôt le savait ailleurs : `DECISIONS.md` (ADR-014/015) acte *« décision **Zed-only**, **le terminal garde ses outils** »*. Claude Code en terminal exécute ses `Read`/`Write`/`Edit`/`Bash` **natifs** dans le sous-process du SDK ; le serveur MCP `vibeos` **ajoute** des outils, il ne **remplace** pas les siens. Conséquence concrète et vérifiable : `vibeos:fs.read ~/.ssh/id_rsa` est **refusé** (denylist intégrée), tandis que `Bash("cat ~/.ssh/id_rsa")` **passe** — sans tier, sans approbation, sans audit.
+
+   L'agent reste borné par **l'autorité de l'utilisateur** (unité `vibeos-agent@%i` : `User=%i`, `IPAddressDeny=any` + allowlist). Mais cette unité ne couvre que l'agent supervisé *always-on* : un `claude` lancé à la main dans un terminal est un processus utilisateur ordinaire, sans unité et **sans restriction d'egress**.
+
+   **Décision ouverte, côté humain** : `permissions.deny: ["Read","Write","Edit","Bash"]` fermerait l'écart — mais via des settings Claude Code **partagés**, donc en terminal aussi, pas seulement dans Zed. C'est un arbitrage produit (gouvernance réelle contre confort d'édition directe), pas une correction de documentation. Voir `DECISIONS.md` ADR-015 §« couche 1 ».
 2. **Aucune action T2+ sans humain** : l'approbation humaine par défaut pour T2/T3 est une propriété du produit, pas une option de confort.
 3. **Aucun appel d'outil sans trace** : l'audit précède la réponse à l'agent ; si l'audit échoue, l'action échoue.
 4. **La racine ne s'écrit jamais** : toute personnalisation passe par `/etc` (overlay), `/var`, Flatpak ou une nouvelle image.
