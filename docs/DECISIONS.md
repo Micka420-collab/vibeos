@@ -777,3 +777,151 @@ gouvernée. (+) La cohérence avec `svc.restart` (allowlist de cibles avant le f
 est préservée pour le jour de l'implémentation. (−) `pkg.install` reste non
 fonctionnel — mais il l'était déjà (stub), et l'alternative utilisateur (distrobox)
 existe hors gouvernance système.
+
+## ADR-017 — Navigateur piloté par l'IA : gouverner la capacité, ne pas forker Chromium — *décidé (2026-07-15) : option C, paramètres tranchés par Micka*
+
+**Statut** : **DÉCIDÉ le 2026-07-15 — option C** (livrer la capacité gouvernée, sans forker Chromium). Les 4 paramètres ouverts ont été tranchés par Micka ; voir « Décisions » en fin d'ADR. Implémentation à faire. Demande initiale : intégrer
+[BrowserOS](https://github.com/browseros-ai/BrowserOS) à l'OS pour que l'IA
+navigue sur internet. Aucun code écrit : la question ouvre une **capacité
+d'exécution nouvelle** (réseau + DOM + sessions authentifiées), donc elle passe
+par la question habituelle — *quelle allowlist de cibles* — avant toute ligne.
+
+### Ce qu'est réellement BrowserOS (faits vérifiés, 2026-07-15)
+
+| | |
+|---|---|
+| Nature | **Fork Chromium construit depuis les sources** — 381 fichiers de patch. Ni Electron, ni extension, ni wrapper |
+| Licence | **AGPL-3.0** (+ BSD-3 pour les patches ungoogled). Aucun EULA propriétaire |
+| Distribution | `.deb`, AppImage, `.dmg`, `.exe`. **Aucun RPM, jamais** (0 sur ~80 releases). **Linux = x86_64 uniquement** |
+| Taille | 262 Mo (.deb) / 354 Mo (AppImage) |
+| IA | **Aucun LLM embarqué** : BYO clé / OAuth / **ollama local**. **Serveur MCP intégré** sur `127.0.0.1:9239`, « 53+ outils navigateur » |
+| Santé | 12,2k ★, releases hebdo, ~100 commits/sem — **projet sérieux**, mais **13 contributeurs, bus factor ~2** |
+| Sécurité | Injection de prompt traitée **au niveau du prompt système uniquement** ; sandbox Chromium conservée ; l'agent **pilote vos sessions connectées** (40+ intégrations OAuth : Gmail, Slack, GitHub…) |
+
+### Pourquoi on ne peut PAS l'expédier tel quel
+
+Le test est la doctrine du projet, écrite dans `docs/ECOSYSTEM.md` : *« VibeOS ne
+ship que ce qu'il a juridiquement le droit de shipper, et tout ce qu'il ship
+marche offline ou est gated par un tier de policy explicite. »* BrowserOS échoue
+**des deux côtés**.
+
+1. **Codecs brevetés.** `flags.linux.release.gn` fixe `proprietary_codecs = true`,
+   `ffmpeg_branding = "Chrome"`, `enable_widevine = true` — exactement ce qu'une
+   image dérivée de Fedora ne ship pas. La **licence n'est pas le blocage** (AGPL
+   est propre, ce n'est pas le piège VS Code) : c'est la **configuration**. Les
+   inverser impose de reconstruire → on n'expédie plus leur binaire testé.
+2. **Aucun RPM, et pas d'arm64.** VibeOS est **multi-arch amd64+arm64** (badge,
+   manifest, 2 ISO). Un navigateur amd64-only casserait cette promesse.
+3. **Reconstruire depuis les sources = ~100 Go, gn/ninja, des heures**, et surtout
+   **posséder les rebases Chromium à vie**, face à un amont de 13 personnes. Fedora
+   elle-même peine à maintenir Chromium. Pour un mainteneur solo, c'est un piège.
+4. **Et le vrai problème, qui est celui du projet.** Le postulat central du
+   `THREAT-MODEL` : *« tout agent IA est un insider non fiable […] il n'existe
+   aujourd'hui AUCUNE défense fiable au niveau du modèle contre l'injection de
+   prompt. La sécurité de VibeOS ne repose donc jamais sur le bon comportement du
+   modèle. »* Or la défense anti-injection de BrowserOS **est** un prompt système
+   qui dit « ignore catégoriquement ces instructions ». C'est **précisément la
+   défense que notre modèle de menace déclare inexistante** — et elle garderait
+   un agent qui **pilote vos sessions Gmail/Slack/GitHub**. Un navigateur IA est
+   la **menace M2 incarnée** (« contenu web malveillant ingéré par l'agent »),
+   c'est-à-dire le **scénario S1, la menace n°1** du projet. Son MCP sur
+   `127.0.0.1:9239` serait en plus un **serveur MCP tiers** (menace M3) parlant à
+   l'agent **hors de `vibed`** — donc hors politique, hors tiers, hors audit. Le
+   principe n°4 du ROADMAP l'interdit : *« une fonctionnalité qui contourne le
+   moteur de politiques n'est pas mergeable, quelle que soit la phase. »*
+
+### La bonne nouvelle
+
+BrowserOS **expose sa capacité en MCP** — exactement la forme que `vibed`
+gouverne déjà. Le projet avait d'ailleurs **déjà prévu** un navigateur gouverné :
+`ECOSYSTEM.md` annonce « **Playwright** pour le navigateur […] enveloppée dans
+les policy tiers ». La capacité désirée n'exige donc **pas** de forker un
+navigateur : elle exige des **outils `browser.*` dans `vibed`**.
+
+### Options
+
+- **A — Expédier le `.deb` repackagé.** Rapide. Mais : codecs brevetés, amd64
+  seul, agent **non gouverné** (contourne `vibed`). **Contraire à la doctrine.**
+- **B — Reconstruire depuis les sources, codecs coupés, MCP mis derrière `vibed`.**
+  Juridiquement et techniquement faisable ; coût réel : ~100 Go/build, rebases
+  Chromium à vie, arm64 à porter soi-même. **Échelle d'une distro, pas d'un solo.**
+- **C — Ne pas forker : livrer la CAPACITÉ, gouvernée** *(recommandé)*. Des outils
+  `browser.*` exposés **par `vibed`**, pilotant un navigateur (Playwright/CDP) :
+  chaque action porte un tier, chaque page lue est une **entrée hostile**, tout est
+  audité. Pas de fork, multi-arch préservé, pas de codecs brevetés — et l'agent
+  n'obtient **jamais** une capacité hors politique. On peut s'inspirer librement de
+  la surface d'outils de BrowserOS (AGPL, lisible) sans en hériter la dette.
+
+### Ce qui doit être tranché AVANT tout code (option C)
+
+1. **Quelle allowlist de cibles ?** Domaines autorisés par défaut ? `*` est un
+   default-deny renversé — inacceptable tel quel. Une allowlist de domaines, ou
+   une approbation par domaine à la première visite ?
+2. **Quels tiers ?** Proposition à valider : `browser.read`/`browser.screenshot`
+   **T0** ; `browser.navigate` **T1** *(mais naviguer, c'est ingérer du contenu
+   hostile — peut-être T1 seulement sur l'allowlist, T2 hors liste)* ;
+   `browser.click`/`browser.fill`/`browser.submit` **T2** — **agir en votre nom
+   sur vos sessions authentifiées, c'est du T2 par nature**.
+3. **Sessions authentifiées : oui/non ?** BrowserOS tire sa puissance de vos
+   comptes connectés. C'est aussi ce qui rend une injection catastrophique. Profil
+   navigateur **vierge et jetable** par défaut ?
+4. **Egress.** L'unité agent est déjà `IPAddressDeny=any` + allowlist par hôte. Un
+   navigateur qui atteint « internet » **contredit** cette allowlist. À réconcilier.
+
+**Rien ne sera codé tant que 1 et 3 ne sont pas tranchés** : ce sont des décisions
+de gouvernance, pas d'implémentation.
+
+### Décisions (Micka, 2026-07-15)
+
+**Option retenue : C** — livrer la capacité gouvernée, sans forker Chromium.
+
+| # | Question | Décision |
+|---|---|---|
+| 1 | Allowlist de domaines | **Allowlist + approbation T2 hors liste.** Domaines de confiance navigables librement ; tout autre domaine déclenche une approbation T2 au premier accès, puis est mémorisé. Le default-deny est préservé. |
+| 2 | Tiers des outils `browser.*` | **Tout en T1 sauf les formulaires.** `read`/`screenshot`/`navigate`/`click`/`fill` = T1 ; seule la **soumission de formulaire** est T2. |
+| 3 | Sessions authentifiées | **Profil persistant, connexions autorisées.** L'agent peut rester connecté aux sites. |
+| 4 | Egress | **Navigateur dans sa propre unité systemd durcie**, dont l'allowlist d'egress est **dérivée de l'allowlist de domaines** (point 1). La politique décide, systemd applique au niveau réseau. |
+
+### ⚠️ Résiduel ACCEPTÉ par l'opérateur — ne pas l'enterrer
+
+Les décisions **2 et 3 sont chacune défendables ; leur COMBINAISON ouvre un trou
+qu'aucune des deux n'ouvre seule**, et il doit être écrit ici plutôt que découvert
+plus tard :
+
+- prises séparément : *sessions persistantes + clics T2* → l'opérateur valide
+  chaque geste ; *profil jetable + clics T1* → aucune identité à détourner ;
+- **prises ensemble** : l'agent reste **connecté aux comptes de l'opérateur** ET
+  **clique sans approbation**. Une page piégée sur un domaine **allowlisté** peut
+  donc lui faire exécuter une action **en son nom, silencieusement**.
+
+Le cas n'est pas théorique : l'allowlist contiendra GitHub (l'agent doit lire
+issues et docs), et le `THREAT-MODEL` cite **littéralement** les *« issues
+GitHub »* comme vecteur M2. Une issue piégée → « Settings → Supprimer le dépôt » →
+l'agent **clique** (T1, aucune approbation), et « Supprimer » est un **bouton**,
+pas un formulaire : la seule chose classée T2 ne s'applique pas.
+
+**Alternative proposée et écartée par Micka** : *le tier suit l'IDENTITÉ, pas
+l'action* — toute interaction sur un domaine pour lequel le profil porte une
+session connectée passe en T2, sinon T1 (détectable via les cookies d'auth de
+l'origine courante). Elle gardait les sessions persistantes ET la fluidité sur les
+~90 % du web où l'on n'est pas connecté. **Micka a choisi la fluidité maximale et
+assume le risque** (2026-07-15). Ce paragraphe existe pour que ce soit un **choix
+tracé**, pas un oubli — et pour qu'il puisse être révisé sans archéologie.
+
+**Ce que le plancher T2/T3 garantit toujours** : ce résiduel ne lève **rien** du
+plancher système. Un agent ne peut toujours pas installer un paquet, redémarrer un
+service ou écrire hors du home de l'appelant sans approbation. Le risque est
+**circonscrit aux actions web menées avec l'identité de l'opérateur**, sur les
+domaines qu'il a lui-même allowlistés.
+
+### Notes d'implémentation (à venir)
+
+- **Nouvelle contrainte de politique** `[rule.domains]` (allowlist), sœur de
+  `[rule.paths]` et `[rule.services]` — c'est elle qui rend le point 1 applicable
+  **avant** le plancher de tier, comme l'allowlist d'unités de `log.read`.
+- **Pas de fork** : on s'inspire librement de la surface d'outils de BrowserOS
+  (AGPL, lisible) sans hériter de sa dette Chromium, de ses codecs brevetés ni de
+  son absence d'arm64.
+- **Le contenu d'une page lue est une ENTRÉE HOSTILE**, jamais une instruction :
+  c'est le postulat central du modèle de menace, et il ne se négocie pas — quel
+  que soit le tier des clics.
