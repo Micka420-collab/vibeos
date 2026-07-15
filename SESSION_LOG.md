@@ -8,6 +8,124 @@
 > **fermée**. Le travail passe désormais par des PR petites et indépendantes sur
 > `main`.)*
 
+## 🔴 Session 2026-07-15 (nuit, autonome) — l'OS tournait sur une base morte
+
+**Fedora Kinoite 42 est EOL depuis le 2026-05-27.** L'image livrée — y compris l'ISO
+`v0.2.1-dev` — n'avait reçu **aucun correctif de sécurité depuis 49 jours**.
+
+**Ce qui rend ça grave, ce n'est pas la version : c'est le silence.** Le build ne
+*peut pas* échouer tout seul. Quand une release Fedora passe EOL, MirrorManager
+continue de répondre au metalink et redirige vers les miroirs d'**archive** ;
+`dnf install` renvoie **0** et installe des paquets gelés à la date d'EOL. Vérifié :
+
+    f42 repomd.xml Last-Modified: Wed, 27 May 2026 16:25:54 GMT   (gelé, archive)
+    f44 repomd.xml Last-Modified: Wed, 15 Jul 2026 01:00:29 GMT   (vivant)
+
+CI verte, ISO qui boote, image qui se fossilise. Personne ne pouvait le voir.
+
+**Micka a contesté la trouvaille** — à raison : une date d'EOL est exactement ce qu'un
+modèle hallucine. Sa règle (« EOL ≈ 4 semaines après N+2 ») était la bonne, appliquée
+avec une release en trop : F42 (avril 2025) → F43 (**oct. 2025**) → F44 (**28 avril
+2026**) → EOL 42 = **27 mai 2026**. Sa propre règle produisait la date exacte.
+`endoflife.date` a tranché en 20 secondes. **La bonne direction de confiance** : il a
+demandé une vérification, pas une soumission.
+
+**Le vrai correctif n'est pas le numéro de version** — c'est `scripts/check-base-eol.sh`,
+qui fait rougir le build si la base est EOL, ou à moins de 30 jours de l'être. Table
+d'EOL **épinglée en dépôt**, pas de fetch live, délibérément : `docs.fedoraproject.org`
+est derrière **Anubis** ; un fetch CI renverrait une *page* d'accès refusé qu'un parseur
+naïf lit « pas d'EOL trouvé » → garde-fou qui échoue **OUVERT**, pire que pas de
+garde-fou. **Vérifié en l'exécutant contre le vrai Containerfile de `main`** : il
+attrape le bug qui l'a motivé (« EOL since 2026-05-27 (49 days ago) »), et échoue
+fermé sur une release inconnue.
+
+**Et j'ai trouvé un défaut dans mon propre garde-fou** : `ci.yml` filtrait sur
+`os/rootfs/**` mais pas `os/Containerfile`. Une PR ne touchant que le Containerfile —
+donc *précisément* un changement de base — ne déclenchait pas la CI. Le garde-fou n'a
+tourné que **par accident**, ma PR touchant aussi `scripts/`. Un garde-fou qui ne
+s'exécute pas sur le fichier qu'il garde ne garde rien.
+
+**Le rebase n'était pas un changement de numéro.** Trouvé en interrogeant les vrais
+dépôts f44 (`dnf repoquery` en conteneur), pas en attendant 12 min de CI par
+découverte : `nbtscan`/`wfuzz`/`scalpel` retirés d'amont ; `nodejs`/`npm` — f44 n'a
+plus de métapaquet, que des streams (pris **24** et non 22 : node 22 meurt avril 2027,
+la base f44 juin 2027 — shipper un runtime qui meurt avant sa distro, ce serait refaire
+le bug en petit) ; `curl-minimal` disparu.
+
+**La sonde a failli me faire livrer 105 faux positifs.** Elle déclarait `git`, `tar`,
+`python3` absents de f44. Le fichier était écrit sous Windows, chaque ligne finissait
+par un CR, et `grep -qx` ne matchait jamais. Ce qui a sauvé le résultat : un **contrôle
+de cohérence dans la sonde elle-même** (« ces paquets DOIVENT résoudre, sinon la sonde
+est cassée »). Il disait `git` **ok** pendant que la boucle disait `git` **MISSING** —
+même requête, deux réponses → c'est la donnée, pas la requête.
+
+**Le bug akmods : amont, et il échouait déjà sur f42.** `kmodtool` bake dans le `%post`
+de tout akmod un appel à `akmods-ostree-post`, sans `|| :`. Ce helper appelle
+`akmodsbuild` **directement en root** là où `akmods` passe par `runuser`. Il documente
+son hypothèse : *« pretty safe because its happening in the ostree %post sandbox »* —
+vrai sous `rpm-ostree compose`, **faux sous buildah**. RHBZ #2459819 (*closed
+insufficient_data*), Bazzite a le même. **Ce n'est pas une régression f44** :
+`akmodsbuild` est byte-pour-byte identique f42→f44, et le même « Not to be used as
+root » est dans les logs des builds f42 **qui ont livré des ISO**. Ce qui a changé,
+c'est **dnf5** : f42 marquait « Non-critical error » et poursuivait, f44 fait échouer
+la transaction.
+
+### Ce que j'ai cassé, et ce que ça enseigne
+
+**J'ai ouvert la PR du rebase en PR normale alors que son build était rouge.** Elle a
+été mergée telle quelle, et le commit qui la rendait verte est resté derrière. `main`
+a été cassé. Puis **la même erreur une seconde fois** : le correctif akmods, commité
+et vérifié, n'a jamais été poussé — perdu dans un changement de contexte.
+
+Deux fois le même motif : **du travail vérifié qui reste en arrière du merge**. La
+règle qui en sort, sans exception : **build rouge → draft**. Et un commit vérifié qui
+n'est pas poussé n'existe pas.
+
+**Trois fois j'ai annoncé « vert » à tort** avant vérification : un `grep` avalant
+`cargo: command not found` (le build n'avait jamais tourné) ; un `| tail` masquant
+l'échec de clippy ; le premier échec de build attribué à f44 alors que c'était un
+flake CDN quay.io — 809 lignes de compilation Quickshell étaient passées avant, donc
+**Quickshell 0.2.1 compile sur f44**, le gros risque du rebase est levé.
+`${PIPESTATUS[0]}` désormais.
+
+### Le navigateur : décidé, mais interdit d'exécution
+
+**ADR-018** tranche ce qu'ADR-017 laissait ouvert : `chromium` + `chromedriver` des
+dépôts Fedora, pilotés en **W3C WebDriver (HTTP/JSON)**. Vérifié par `repoquery` sur
+les vrais dépôts f44 : les deux arches, même version, `chromedriver` **sous-paquet de
+la source `chromium`** (le décalage navigateur/driver, mode de panne classique, ne peut
+structurellement pas arriver), codecs **libres** (`libavcodec-free`) — le blocage exact
+qui a fait rejeter BrowserOS n'existe pas ici. Décisif : **`vibed` n'a pas de client
+WebSocket et CDP en exige un** ; ajouter une pile WebSocket à la TCB pour parler à un
+composant qu'on traite comme hostile serait le mauvais échange. Playwright écarté
+(Node, binaires d'un CDN dans un cache mutable, Fedora non supportée, pas de Chrome
+arm64). Piège nommé : le paquet `chromium-headless` ne contient **pas** le headless
+moderne (`repoquery -l` → `headless_shell`, l'ancien).
+
+**Mais rien ne sera exécuté avant la Phase 3.** Un navigateur est la menace M2
+incarnée, et les outils de `vibed` tournent **in-process, sans isolation**. Livrer
+`browser.*` avant le bac à sable mettrait un moteur de rendu qui parse du HTML hostile
+**dans le processus qui EST le moteur de politiques** : une RCE dans le parseur ne
+contournerait pas la gouvernance, elle **deviendrait** la gouvernance. Écrit dans
+l'ADR. État vérifié : la seule occurrence de `browser.` dans `vibed` est
+`url_bearing()`, un garde-fou de politique.
+
+### La contradiction sur l'invariant n°1
+
+`ARCHITECTURE.md` §8 : *« **Aucun agent IA ne contourne `vibed`** : le socket MCP est
+l'unique surface de contrôle système exposée aux agents. »*
+`DECISIONS.md` : *« décision **Zed-only**, **le terminal garde ses outils** »*.
+
+Les deux ne peuvent pas être vrais. Claude Code en terminal a des `Read`/`Write`/
+`Bash` natifs que `vibed` ne voit pas : `vibeos:fs.read ~/.ssh/id_rsa` est **refusé**
+par la denylist, `Bash("cat ~/.ssh/id_rsa")` **passe**. L'invariant est écrit trop
+large — vrai pour les capacités **privilégiées** (l'agent n'est pas root, `/usr` est
+RO), faux comme absolu. Signalé, **non corrigé** : l'arbitrage `permissions.deny`
+s'applique via des settings **partagés**, donc au terminal aussi — décision produit qui
+revient à Micka.
+
+---
+
 ## 🌐 Session 2026-07-15 (soir, autonome) — l'ISO passe, et la première brique du navigateur
 
 **Les deux ISO sont construites.** `Build install ISO (amd64)` et `(arm64)` :
