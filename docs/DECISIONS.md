@@ -778,9 +778,9 @@ est préservée pour le jour de l'implémentation. (−) `pkg.install` reste non
 fonctionnel — mais il l'était déjà (stub), et l'alternative utilisateur (distrobox)
 existe hors gouvernance système.
 
-## ADR-017 — Navigateur piloté par l'IA : gouverner la capacité, ne pas forker Chromium — *décision : à trancher par Micka (options ci-dessous)*
+## ADR-017 — Navigateur piloté par l'IA : gouverner la capacité, ne pas forker Chromium — *décidé (2026-07-15) : option C, paramètres tranchés par Micka*
 
-**Statut** : **proposé, non tranché** (2026-07-15). Demande initiale : intégrer
+**Statut** : **DÉCIDÉ le 2026-07-15 — option C** (livrer la capacité gouvernée, sans forker Chromium). Les 4 paramètres ouverts ont été tranchés par Micka ; voir « Décisions » en fin d'ADR. Implémentation à faire. Demande initiale : intégrer
 [BrowserOS](https://github.com/browseros-ai/BrowserOS) à l'OS pour que l'IA
 navigue sur internet. Aucun code écrit : la question ouvre une **capacité
 d'exécution nouvelle** (réseau + DOM + sessions authentifiées), donc elle passe
@@ -870,3 +870,58 @@ navigateur : elle exige des **outils `browser.*` dans `vibed`**.
 
 **Rien ne sera codé tant que 1 et 3 ne sont pas tranchés** : ce sont des décisions
 de gouvernance, pas d'implémentation.
+
+### Décisions (Micka, 2026-07-15)
+
+**Option retenue : C** — livrer la capacité gouvernée, sans forker Chromium.
+
+| # | Question | Décision |
+|---|---|---|
+| 1 | Allowlist de domaines | **Allowlist + approbation T2 hors liste.** Domaines de confiance navigables librement ; tout autre domaine déclenche une approbation T2 au premier accès, puis est mémorisé. Le default-deny est préservé. |
+| 2 | Tiers des outils `browser.*` | **Tout en T1 sauf les formulaires.** `read`/`screenshot`/`navigate`/`click`/`fill` = T1 ; seule la **soumission de formulaire** est T2. |
+| 3 | Sessions authentifiées | **Profil persistant, connexions autorisées.** L'agent peut rester connecté aux sites. |
+| 4 | Egress | **Navigateur dans sa propre unité systemd durcie**, dont l'allowlist d'egress est **dérivée de l'allowlist de domaines** (point 1). La politique décide, systemd applique au niveau réseau. |
+
+### ⚠️ Résiduel ACCEPTÉ par l'opérateur — ne pas l'enterrer
+
+Les décisions **2 et 3 sont chacune défendables ; leur COMBINAISON ouvre un trou
+qu'aucune des deux n'ouvre seule**, et il doit être écrit ici plutôt que découvert
+plus tard :
+
+- prises séparément : *sessions persistantes + clics T2* → l'opérateur valide
+  chaque geste ; *profil jetable + clics T1* → aucune identité à détourner ;
+- **prises ensemble** : l'agent reste **connecté aux comptes de l'opérateur** ET
+  **clique sans approbation**. Une page piégée sur un domaine **allowlisté** peut
+  donc lui faire exécuter une action **en son nom, silencieusement**.
+
+Le cas n'est pas théorique : l'allowlist contiendra GitHub (l'agent doit lire
+issues et docs), et le `THREAT-MODEL` cite **littéralement** les *« issues
+GitHub »* comme vecteur M2. Une issue piégée → « Settings → Supprimer le dépôt » →
+l'agent **clique** (T1, aucune approbation), et « Supprimer » est un **bouton**,
+pas un formulaire : la seule chose classée T2 ne s'applique pas.
+
+**Alternative proposée et écartée par Micka** : *le tier suit l'IDENTITÉ, pas
+l'action* — toute interaction sur un domaine pour lequel le profil porte une
+session connectée passe en T2, sinon T1 (détectable via les cookies d'auth de
+l'origine courante). Elle gardait les sessions persistantes ET la fluidité sur les
+~90 % du web où l'on n'est pas connecté. **Micka a choisi la fluidité maximale et
+assume le risque** (2026-07-15). Ce paragraphe existe pour que ce soit un **choix
+tracé**, pas un oubli — et pour qu'il puisse être révisé sans archéologie.
+
+**Ce que le plancher T2/T3 garantit toujours** : ce résiduel ne lève **rien** du
+plancher système. Un agent ne peut toujours pas installer un paquet, redémarrer un
+service ou écrire hors du home de l'appelant sans approbation. Le risque est
+**circonscrit aux actions web menées avec l'identité de l'opérateur**, sur les
+domaines qu'il a lui-même allowlistés.
+
+### Notes d'implémentation (à venir)
+
+- **Nouvelle contrainte de politique** `[rule.domains]` (allowlist), sœur de
+  `[rule.paths]` et `[rule.services]` — c'est elle qui rend le point 1 applicable
+  **avant** le plancher de tier, comme l'allowlist d'unités de `log.read`.
+- **Pas de fork** : on s'inspire librement de la surface d'outils de BrowserOS
+  (AGPL, lisible) sans hériter de sa dette Chromium, de ses codecs brevetés ni de
+  son absence d'arm64.
+- **Le contenu d'une page lue est une ENTRÉE HOSTILE**, jamais une instruction :
+  c'est le postulat central du modèle de menace, et il ne se négocie pas — quel
+  que soit le tier des clics.
