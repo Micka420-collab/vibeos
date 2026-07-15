@@ -12,6 +12,25 @@ description = "VibeOS system AI daemon: MCP (JSON-RPC 2.0) server over a unix so
 license = "Apache-2.0"
 readme = "README.md"
 
+[features]
+# OFF by default, and never enabled for the image build (os/Containerfile runs a
+# bare `cargo build --release --locked`). Compiles IN the VIBED_SOCKET /
+# VIBED_POLICY_DIR / VIBED_AUDIT_DIR environment overrides, so a maintainer can
+# run vibed rootless against a scratch socket and the in-repo policy — see
+# zed/vibeos-claude-acp/scripts/e2e-zed.sh, the only thing that turns this on.
+#
+# Why a feature and not a plain env::var: main.rs already claimed these were
+# "for DEV and the Zed E2E harness only", but nothing enforced "only" — they were
+# compiled into the release binary, and VIBED_POLICY_DIR swaps the ENTIRE
+# security policy. Reaching vibed's environment needs root, which the threat
+# model already treats as game over, so this is defence in depth, not a fix for a
+# live hole. It is still worth having: an unenforced "only" is a claim the code
+# does not keep, and tools/svc.rs already holds the opposite standard for a far
+# less sensitive knob (systemctl's path is a constant, never a PATH lookup, "so a
+# compromised environment can never redirect what vibed — running as root —
+# executes"). The shipped daemon now has no code path that reads these at all.
+dev-overrides = []
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync"] }
 serde = { version = "1", features = ["derive"] }

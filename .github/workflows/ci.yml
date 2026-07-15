@@ -90,6 +90,15 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      # Tout ce qui précède compile la configuration DE PRODUCTION (sans
+      # `dev-overrides`) — c'est bien ce qu'on veut valider en premier, puisque
+      # c'est ce que l'image livre. Mais du coup rien ne compilerait jamais le
+      # chemin `dev-overrides`, qui pourrirait en silence jusqu'à casser le
+      # harnais E2E Zed (le seul à l'activer, et il n'est pas joué en CI —
+      # machine-gated Tier B). Ce lint le maintient vivant sans jamais l'expédier.
+      - name: Clippy — dev-overrides feature (harnais E2E, jamais expédié)
+        run: cargo clippy --all-targets --locked --features dev-overrides -- -D warnings
+
   audit:
     name: vibed — cargo audit (RustSec)
     runs-on: ubuntu-latest

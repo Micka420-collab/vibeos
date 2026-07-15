@@ -35,6 +35,33 @@ const POLICY_DIR: &str = "/etc/vibeos/policy.d";
 /// `os/rootfs/usr/lib/sysusers.d/vibeos.conf` at image build/boot time.
 const SOCKET_GROUP: &str = "vibeos-agents";
 
+/// Read a DEV/E2E path override from the environment.
+///
+/// Compiled OUT of the shipped daemon: the image builds with a bare
+/// `cargo build --release --locked` (os/Containerfile), so without the
+/// `dev-overrides` feature the production binary contains no code path that
+/// reads these variables at all — the second body below is what ships.
+///
+/// The comment above the call sites claimed "DEV and the Zed E2E harness only"
+/// while the release binary honoured them regardless, and `VIBED_POLICY_DIR`
+/// substitutes the ENTIRE security policy. Reaching vibed's environment requires
+/// root, which the threat model already calls game over (§2 "hors modèle"), so
+/// this is defence in depth rather than a live hole — but an unenforced "only"
+/// is a claim the code does not keep, and `tools::svc` already holds the
+/// opposite standard for a far less sensitive knob (systemctl's path is a
+/// constant, never a PATH lookup, precisely "so a compromised environment can
+/// never redirect what vibed — running as root — executes").
+#[cfg(feature = "dev-overrides")]
+fn dev_override(var: &str) -> Option<String> {
+    std::env::var(var).ok()
+}
+
+/// Production: the overrides do not exist. See the `dev-overrides` variant above.
+#[cfg(not(feature = "dev-overrides"))]
+fn dev_override(_var: &str) -> Option<String> {
+    None
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     // Offline maintenance subcommand, handled before any daemon setup:
@@ -73,10 +100,11 @@ async fn main() -> std::io::Result<()> {
 
     // Socket and policy paths are fixed in production (the systemd unit and the
     // image own them). VIBED_SOCKET / VIBED_POLICY_DIR override them for DEV and
-    // the Zed E2E harness only, so a maintainer can run vibed rootless on a
-    // scratch socket + the in-repo policy (see zed/.../scripts/e2e-zed.sh).
-    let policy_dir = std::env::var("VIBED_POLICY_DIR").unwrap_or_else(|_| POLICY_DIR.to_string());
-    let socket_path = std::env::var("VIBED_SOCKET").unwrap_or_else(|_| SOCKET_PATH.to_string());
+    // the Zed E2E harness only — and "only" is now ENFORCED, not asserted: the
+    // overrides live behind the `dev-overrides` cargo feature, which the image
+    // build never enables (see `dev_override` below and vibed/Cargo.toml).
+    let policy_dir = dev_override("VIBED_POLICY_DIR").unwrap_or_else(|| POLICY_DIR.to_string());
+    let socket_path = dev_override("VIBED_SOCKET").unwrap_or_else(|| SOCKET_PATH.to_string());
 
     // Policy loading is FAIL-CLOSED: any unreadable or invalid *.toml in
     // policy.d aborts startup with a non-zero exit. A broken policy must
@@ -89,12 +117,12 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     };
-    // VIBED_AUDIT_DIR override: dev/E2E only (same rationale as VIBED_SOCKET),
-    // so a rootless run can write its fail-closed audit trail to a scratch dir
-    // instead of /var/lib/vibeos/audit.
-    let audit = Arc::new(match std::env::var("VIBED_AUDIT_DIR") {
-        Ok(dir) => audit::AuditLog::new(std::path::PathBuf::from(dir)),
-        Err(_) => audit::AuditLog::open_default(),
+    // VIBED_AUDIT_DIR override: dev/E2E only (same rationale and same feature
+    // gate as VIBED_SOCKET), so a rootless run can write its fail-closed audit
+    // trail to a scratch dir instead of /var/lib/vibeos/audit.
+    let audit = Arc::new(match dev_override("VIBED_AUDIT_DIR") {
+        Some(dir) => audit::AuditLog::new(std::path::PathBuf::from(dir)),
+        None => audit::AuditLog::open_default(),
     });
     // Process-wide per-uid rate limiter, shared across all connections so an
     // agent cannot multiply its budget by opening many sockets.
