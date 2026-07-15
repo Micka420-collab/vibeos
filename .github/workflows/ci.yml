@@ -110,6 +110,17 @@ jobs:
         working-directory: .
         run: python3 scripts/check-log-hygiene.py
 
+      # Le 2026-07-15, VibeOS construisait depuis 49 jours sur Fedora Kinoite 42,
+      # EOL le 2026-05-27 — zéro correctif de sécurité, et AUCUN signal : quand
+      # une release passe EOL, MirrorManager continue de répondre et redirige
+      # vers les miroirs d'ARCHIVE. `dnf install` renvoie 0 et installe des
+      # paquets gelés à la date d'EOL. Le build ne PEUT pas échouer tout seul ;
+      # l'image se fossilise pendant que la CI reste verte. D'où ce contrôle :
+      # c'est la seule chose qui puisse le dire.
+      - name: Base Fedora supportée (pas EOL)
+        working-directory: .
+        run: bash scripts/check-base-eol.sh os/Containerfile
+
   audit:
     name: vibed — cargo audit (RustSec)
     runs-on: ubuntu-latest

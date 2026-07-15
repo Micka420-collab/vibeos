@@ -1,7 +1,7 @@
 # `os/` — Définition de l'image VibeOS
 
 Ce dossier est la **source de vérité de l'image OS**. VibeOS est une distribution
-immuable de type *image-based* (bootc/OSTree, dérivée de Fedora Kinoite 42,
+immuable de type *image-based* (bootc/OSTree, dérivée de Fedora Kinoite 44,
 base épinglée par **digest**) : le système déployé sur les machines **est**
 exactement le contenu de l'image OCI construite ici, publiée sur
 `ghcr.io/micka420-collab/vibeos`.
@@ -83,7 +83,7 @@ flowchart LR
   La garde `ConditionPathExists=/usr/bin/vibed` reste en place : si l'étage
   est retiré (image de debug), systemd *saute* l'unité sans casser le boot.
 - `quickshell` (runtime du HUD) est **compilé depuis les sources** par
-  l'étage `quickshell-builder` — aucun paquet n'existe pour Fedora 42 (le
+  l'étage `quickshell-builder` — le paquet Fedora `quickshell` existe depuis f44 et la base est désormais f44 : cet étage est **redondant** et son retrait est suivi à part — un rebase de sécurité ne change pas aussi la provenance d'un composant livré (le
   paquet officiel commence à f44, aucun COPR n'a de chroot f42). Version
   épinglée + sha256 vérifié ; le `Containerfile` exécute
   `quickshell --version` dans l'image finale pour attraper tout décalage
