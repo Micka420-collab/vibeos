@@ -500,6 +500,38 @@ RUN set -eux \
 #      * arm64 images get no NVIDIA layer at all (no supported hardware —
 #        docs/HARDWARE.md).
 #    Skipped when TARGETARCH != amd64 or NVIDIA_ENABLED != 1.
+#
+#    tsflags=noscripts sur akmod-nvidia SEUL — pas du confort, un bug amont :
+#
+#    kmodtool bake dans le %post de TOUT akmod un appel à `akmods-ostree-post`,
+#    sans `|| :`. Ce helper appelle `akmodsbuild` DIRECTEMENT en root, là où
+#    `akmods` passe par `runuser -u akmods`. Or `akmodsbuild` refuse de tourner
+#    en root — via un proxy, `[[ -w /var ]]`. Le helper assume :
+#      « This builds as root, but this is pretty safe because its happening in
+#        the ostree %post sandbox. »
+#    Vrai sous `rpm-ostree compose` (/var non inscriptible) ; FAUX sous buildah,
+#    où root écrit /var. => RHBZ #2459819, closed insufficient_data. Bazzite a
+#    le même (ublue-os/bazzite#5106). akmodsbuild est byte-pour-byte identique
+#    de f42 à f44 : akmods n'a rien changé.
+#
+#    Il échouait donc DÉJÀ sur f42 : le même « ERROR: Not to be used as root »
+#    est dans les logs des builds f42 qui ont livré des ISO. Ce qui a changé,
+#    c'est dnf5 : f42 marquait « Non-critical error » et poursuivait, f44 fait
+#    échouer toute la transaction RPM.
+#
+#    Le scriptlet est de toute façon REDONDANT ici : c'est l'`akmods --force`
+#    ci-dessous qui construit le module (chemin `runuser`, celui qui marche —
+#    et celui qu'ublue-os/akmods utilise toujours en 2026). Prouvé par les
+#    builds f42, dont la garde `find nvidia*.ko` passait. On ne perd rien : on
+#    cesse d'exiger qu'un scriptlet cassé réussisse. La garde `find` reste le
+#    vrai contrôle — pas de module, build rouge.
+#
+#    Stubber /usr/sbin/akmods-ostree-post (l'autre correctif possible) est
+#    écarté : ça livrerait un fichier appartenant au RPM `akmods` modifié, que
+#    `rpm -Va` signalerait comme altéré — inacceptable dans une image qu'on
+#    présente comme immuable et vérifiable. `noscripts` n'altère aucun fichier.
+#    Transaction séparée : tsflags s'applique à TOUTE la transaction, les autres
+#    paquets gardent leurs scriptlets.
 # =============================================================================
 RUN set -eu; \
     if [ "${TARGETARCH}" != "amd64" ] || [ "${NVIDIA_ENABLED}" != "1" ]; then \
@@ -512,7 +544,9 @@ RUN set -eu; \
         "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm" \
         "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-44.noarch.rpm"; \
     dnf -y install --setopt=install_weak_deps=False \
-        akmod-nvidia \
+        --setopt=tsflags=noscripts \
+        akmod-nvidia; \
+    dnf -y install --setopt=install_weak_deps=False \
         xorg-x11-drv-nvidia-cuda \
         "kernel-devel-${KERNEL_VERSION}"; \
     akmods --force --kernels "${KERNEL_VERSION}" --kmod nvidia; \
