@@ -8,6 +8,68 @@
 > **fermée**. Le travail passe désormais par des PR petites et indépendantes sur
 > `main`.)*
 
+## 🌐 Session 2026-07-15 (soir, autonome) — l'ISO passe, et la première brique du navigateur
+
+**Les deux ISO sont construites.** `Build install ISO (amd64)` et `(arm64)` :
+`success`, ~7,4 Go et ~6,7 Go, artefacts du run
+[29434851047](https://github.com/Micka420-collab/vibeos/actions/runs/29434851047)
+(tag `v0.2.1-dev`, `main` @ `d9a04ab`), expirent le **2026-07-29**. Le correctif des
+dépôts vendor (`enabled=0` + `--enablerepo=`) tient : les jobs qui mouraient en ~25 s
+sur `cannot depsolve` vont désormais au bout. Pas de release publiée — un tag `-dev`
+n'en déclenche pas.
+
+**Réserve honnête sur ce run** : `SBOM + CVE scan (advisory)` est en échec, mais
+**dans l'outil** (`syft scan` s'interrompt en cours d'exécution), pas sur une
+trouvaille. Ce n'est donc pas un signal de sécurité — mais ça veut dire qu'on n'a
+**aucune donnée CVE** pour ce build. Le job est advisory par construction, il ne
+bloque pas l'ISO. *À instruire.*
+
+**Première brique d'ADR-017** — [PR #63](https://github.com/Micka420-collab/vibeos/pull/63),
+la plomberie de politique **avant** tout outil navigateur (⚠️ touche `policy.rs` →
+revue humaine explicite).
+
+La décision de conception : **`[rule.domains] only` est un *prédicat de règle*, pas
+un verdict** — volontairement à l'inverse de `[rule.services] allowed`, qui *refuse*
+une unité hors liste sur place (ADR-011). Un domaine hors liste ne refuse rien : il
+rend la règle inapplicable et l'évaluation continue. La décision n°1 de Micka
+(« domaines de confiance libres, tout autre déclenche une approbation T2 ») tombe
+alors du `first-match-wins` existant, **sans nouveau concept dans le moteur**. La clé
+s'appelle `only` et pas `allowed` pour que les deux sémantiques ne se lisent jamais
+pareil.
+
+Deux pièges désamorcés, parce qu'**une allowlist rate en silence** :
+- `"evil-github.com".ends_with("github.com")` vaut **`true`**. Cette ligne, c'est
+  tout le contournement. Le joker s'ancre donc sur une **frontière de label** — le
+  point fait partie du suffixe, jamais optionnel. D'où un `domain.rs` dédié :
+  `glob_match` découpe sur `/`, c'est un matcher de *chemins*.
+- `deny_unknown_fields` : écrire `allowed =` sous `[rule.domains]` (réflexe venu de
+  `[rule.paths]`) laisserait `only = None` → règle scopée à rien = règle s'appliquant
+  à **tous** les hôtes en T1. Une allowlist silencieusement désactivée est le pire
+  résultat possible → erreur de **chargement**.
+
+`host_of` est strict et fail-closed : userinfo refusé (`https://docs.rs@evil.tld/` —
+l'hôte réel est `evil.tld`), non-ASCII refusé (un IDN doit arriver punycodé, aucun
+homographe ne se replie sur un motif ASCII), schémas non-http, IPv6, point final,
+labels vides. **`None` ne veut jamais dire « autorisé »** : une URL illisible tombe
+vers l'humain au lieu d'hériter du T1.
+
+`derive_domain` est la **jumelle de `derive_service`** : la seule dérivation
+qu'appellent à la fois `handle_tools_call` et `policy_check`. Ce drift a déjà été
+livré une fois pour les unités — il ne peut plus l'être ici par construction.
+
+**La discipline de la journée, tenue** : les 5 garde-fous ont été *mutation-testés*
+(bug remis, échec du test constaté). Le plus instructif est le 4ᵉ — « allowlist qui
+ne matche rien » : sans lui, une allowlist n'accordant à **personne** passerait tous
+les tests « hors-liste escalade » au vert. C'est exactement le piège du test qui
+n'asserte que la direction facile, revu une quatrième fois.
+
+**Deux fois où je me suis rattrapé sur du faux vert**, dans cette même session : un
+`grep` a avalé un `cargo: command not found` (le build n'avait jamais tourné), et un
+`| tail` a masqué le code de sortie de `clippy` (qui échouait). Les deux fois,
+l'annonce « vert » était fausse avant vérification. `${PIPESTATUS[0]}` désormais.
+
+---
+
 ## 🔧 Session 2026-07-15 (jour, autonome) — le fil rouge : ce qui se dit fait sans l'être
 
 Onze PR, toutes indépendantes sur `main`. **Aucune inventée** : chacune corrige un
