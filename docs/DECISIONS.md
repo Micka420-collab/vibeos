@@ -825,3 +825,27 @@ Conséquence honnête : **un outil `browser.read` qui rendrait la page « telle 
 ### Conséquence à traiter ailleurs
 
 `ECOSYSTEM.md` annonce toujours « **Playwright MCP** » comme brique Phase 2 du navigateur, « enveloppée dans les policy tiers ». C'est en tension directe avec ADR-017 **et** avec cette ADR : un serveur MCP tiers auquel l'agent parle **directement** n'est pas enveloppé par `vibed` — il est hors politique, hors tiers, hors audit, ce qu'ADR-017 reproche précisément au MCP intégré de BrowserOS. Aujourd'hui rien n'est cassé (`/etc/skel/.claude.json` ne déclare **que** `vibeos`), donc c'est un **plan** contradictoire, pas un mensonge en production. À réconcilier dans `ECOSYSTEM.md`.
+
+### ⛔ Dépendance bloquante — l'exécution attend le bac à sable (Phase 3)
+
+Cette ADR tranche **comment** piloter un navigateur. Elle **n'autorise pas** à en
+livrer un.
+
+Un navigateur est la **menace M2 incarnée** : il ingère du contenu hostile par
+construction. Or les outils de `vibed` s'exécutent aujourd'hui **in-process**, sans
+isolation — le `THREAT-MODEL` le dit noir sur blanc (*« outils : in-process en v0.1
+— sandbox seccomp/Landlock : Phase 3 »*). Livrer `browser.*` avant ce bac à sable
+mettrait un moteur de rendu qui parse du HTML hostile **dans le processus qui EST le
+moteur de politiques**. Une RCE dans le parseur ne contournerait pas la
+gouvernance : elle **deviendrait** la gouvernance.
+
+**Donc, jusqu'à la Phase 3** (sandboxing par outil : unité systemd transitoire,
+seccomp, Landlock) :
+
+- ✅ **autorisé** : la contrainte `[rule.domains]`, les tiers, le design, l'unité
+  durcie, l'allowlist d'egress — tout ce qui *gouverne* ;
+- ⛔ **interdit** : tout outil `browser.*` qui exécute réellement quelque chose.
+
+État à ce jour (vérifié) : la seule occurrence de `browser.` dans `vibed` est
+`url_bearing()` — un garde-fou de politique. **Aucun outil exécutable n'existe**, et
+il ne doit pas en apparaître avant la Phase 3, quelle que soit l'avance du design.
