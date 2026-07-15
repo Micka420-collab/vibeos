@@ -91,6 +91,20 @@ jobs:
     steps:
       - name: Compute config
         id: cfg
+        # L'entrée de dispatch arrive par l'ENVIRONNEMENT, jamais interpolée dans
+        # le texte du script. `${{ ... }}` est substitué par Actions AVANT que le
+        # shell ne voie la ligne : une valeur contenant `"; ...; #` deviendrait du
+        # code exécuté sur le runner (celui-là même qui pousse et signe les images).
+        # Un `$VAR` shell, lui, n'est jamais réinterprété comme du code.
+        # Le reste de ce fichier appliquait déjà cette discipline (GITHUB_REF,
+        # GITHUB_EVENT_NAME, GITHUB_REPOSITORY_OWNER passent tous par l'env) —
+        # cette entrée était la seule exception.
+        # Portée honnête : seul quelqu'un ayant les droits d'écriture peut
+        # déclencher un workflow_dispatch, et il pourrait de toute façon éditer ce
+        # workflow. Ce n'est donc PAS une élévation de privilège — c'est retirer
+        # un piège documenté et rendre le fichier cohérent avec lui-même.
+        env:
+          CONFIRM_RELEASE: ${{ inputs.confirm_release }}
         run: |
           # repo = owner/name (no registry) for buildah/push; image = full ref
           # (with registry) for manifest/iso docker:// references.
@@ -100,7 +114,7 @@ jobs:
           # Un dispatch non confirmé reste un build de vérification sans push.
           if [[ "${GITHUB_REF}" == refs/tags/v* ]] \
              || { [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]] \
-                  && [[ "${{ inputs.confirm_release }}" == "publier" ]]; }; then
+                  && [[ "${CONFIRM_RELEASE:-}" == "publier" ]]; }; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
             echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-latest","platform":"linux/amd64"},{"arch":"arm64","runner":"ubuntu-24.04-arm","platform":"linux/arm64"}]}' >> "$GITHUB_OUTPUT"
           else
