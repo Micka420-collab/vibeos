@@ -1,7 +1,7 @@
 # =============================================================================
 # VibeOS — bootc/OSTree image definition (v0.1.0-dev)
 #
-# Base    : Fedora Kinoite 42 (KDE Plasma 6), bootc-native OCI image,
+# Base    : Fedora Kinoite 44 (KDE Plasma 6), bootc-native OCI image,
 #           pinned by DIGEST (supply-chain: never a mutable tag).
 # Target  : ghcr.io/micka420-collab/vibeos
 #           (keep in sync with .github/workflows/build-os.yml)
@@ -42,7 +42,7 @@ ARG WITH_ZED_AGENT=0
 # (verified with Fedora's cargo). The stage is discarded from the final image;
 # only the stripped binary is copied in.
 # -----------------------------------------------------------------------------
-FROM registry.fedoraproject.org/fedora:42 AS vibed-builder
+FROM registry.fedoraproject.org/fedora:44 AS vibed-builder
 RUN dnf -y install cargo && dnf clean all
 COPY vibed/ /src/vibed/
 WORKDIR /src/vibed
@@ -51,10 +51,22 @@ RUN cargo build --release --locked \
  && strip target/release/vibed target/release/vibectl
 
 # -----------------------------------------------------------------------------
-# PHASE 2: build Quickshell from source (multi-stage). Fedora 42 has no
-# quickshell package anywhere — the official Fedora package starts at f44 and
-# no COPR ships an f42 chroot (both verified 2026-07-08) — so the HUD runtime
-# is compiled here following the official Fedora quickshell.spec recipe
+# PHASE 2: build Quickshell from source (multi-stage).
+#
+# NOTE (2026-07-15): this stage is now REDUNDANT. It exists because Fedora 42
+# packaged no quickshell anywhere; the comment even predicted "the official
+# Fedora package starts at f44". We are now ON f44, and `quickshell-0.2.1` —
+# the exact version built here — IS packaged for BOTH x86_64 and aarch64
+# (verified 2026-07-15). Dropping this stage in favour of `dnf install
+# quickshell` would delete ~40 lines AND make the HUD receive Fedora security
+# updates instead of riding a frozen tarball.
+#
+# It is deliberately NOT dropped in this commit: a security rebase must not
+# also swap the provenance of a shipped component — that is a second change
+# with its own failure modes, and bundling them would make a bisect useless.
+# Follow-up tracked separately.
+#
+# The HUD runtime is compiled here following the official Fedora quickshell.spec recipe
 # (BuildRequires + cmake flags), then copied into /usr as immutable image
 # content. Supply chain: version pinned + sha256 verified before extraction.
 # X11=OFF: the image is Wayland-only (Kinoite heritage, docs/DESKTOP.md §4).
@@ -64,12 +76,12 @@ RUN cargo build --release --locked \
 # (layer 7) fails the build loudly on any mismatch with the pinned base —
 # bump the base digest and this stage rebuilds against the matching Qt.
 # -----------------------------------------------------------------------------
-FROM registry.fedoraproject.org/fedora:42 AS quickshell-builder
+FROM registry.fedoraproject.org/fedora:44 AS quickshell-builder
 ARG QUICKSHELL_VERSION=0.2.1
 ARG QUICKSHELL_SHA256=337bab5d4badb92e51d01ac1cfbeaeb784478bad82f3c8297fd7be42a6995af2
 # Dependency list transcribed 1:1 from the official Fedora quickshell.spec
 # (rawhide, 0.2.1): rich deps (cmake()/pkgconfig()) let dnf resolve the right
-# Fedora 42 package names instead of hardcoding them.
+# Fedora 44 package names instead of hardcoding them.
 RUN dnf -y install --setopt=install_weak_deps=False \
         cmake ninja-build gcc-c++ curl-minimal tar gzip \
         'cmake(Qt6Core)' 'cmake(Qt6Qml)' \
@@ -122,7 +134,7 @@ RUN set -eu; \
 # This stage (and its ~148-package npm install) is built ONLY when
 # WITH_ZED_AGENT=1 — the selector below keeps it out of the default graph.
 # -----------------------------------------------------------------------------
-FROM registry.fedoraproject.org/fedora:42 AS zed-agent-builder
+FROM registry.fedoraproject.org/fedora:44 AS zed-agent-builder
 RUN dnf -y install nodejs npm && dnf clean all
 WORKDIR /src/ext
 # Copy only the build inputs — never a pre-existing node_modules/ or dist/ from
@@ -140,7 +152,7 @@ RUN npm ci --ignore-scripts \
 # from the final image, so with WITH_ZED_AGENT=0 the builder above is skipped
 # entirely (no Node, no npm install). The disabled variant ships a self-
 # documenting marker instead of the bundle.
-FROM registry.fedoraproject.org/fedora:42 AS zed-agent-0
+FROM registry.fedoraproject.org/fedora:44 AS zed-agent-0
 RUN mkdir -p /out/zed-agent \
  && printf 'The VibeOS-for-Zed extension is NOT shipped in this image.\nRebuild with --build-arg WITH_ZED_AGENT=1 once the live E2E is validated\n(ADR-015 §6, BLOCKERS.md).\n' > /out/zed-agent/NOT-INSTALLED.txt
 
@@ -148,15 +160,15 @@ FROM zed-agent-builder AS zed-agent-1
 
 FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 
-# Digest pin of quay.io/fedora/fedora-kinoite:42 (manifest list, amd64+arm64).
+# Digest pin of quay.io/fedora/fedora-kinoite:44 (manifest list, amd64+arm64).
 # Tag kept as a comment for humans; bump the digest deliberately, never float.
-FROM quay.io/fedora/fedora-kinoite:42@sha256:7d1e1c6457fe8e2b8c42bcce3bc5b1cc86d2e9346ffb45e2ef3cdd12dc93e258
+FROM quay.io/fedora/fedora-kinoite:44@sha256:a95907b4cf66856e3324d200f0f10a54ac0d4755121df31db9d83fe822c23e66
 
 LABEL org.opencontainers.image.title="VibeOS" \
       org.opencontainers.image.description="AI-native, security-first, immutable Linux distribution for vibecoding" \
       org.opencontainers.image.version="0.1.0-dev" \
       org.opencontainers.image.source="https://github.com/Micka420-collab/vibeos" \
-      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:42@sha256:7d1e1c6457fe8e2b8c42bcce3bc5b1cc86d2e9346ffb45e2ef3cdd12dc93e258"
+      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:a95907b4cf66856e3324d200f0f10a54ac0d4755121df31db9d83fe822c23e66"
 
 # TARGETARCH is auto-populated by podman/buildah when building with --platform
 # (amd64 | arm64). Defaulted to amd64 for plain single-arch local builds.
@@ -323,8 +335,10 @@ RUN dnf -y install --setopt=install_weak_deps=False \
     && rm -rf /run/suricata /run/tor
 
 # --- 1e. Vibecoding terminal stack (COPR) ------------------------------------
-# Tools not packaged in Fedora, from well-maintained COPRs (probed working on
-# Kinoite 42): starship (atim), zellij (varlad), lazygit (atim), ghostty
+# Tools not packaged in Fedora, from well-maintained COPRs. All five verified
+# to ship fedora-44 chroots for BOTH x86_64 and aarch64 (2026-07-15, before the
+# f42->f44 rebase — a COPR without an f44 build would fail the image silently
+# at install time): starship (atim), zellij (varlad), lazygit (atim), ghostty
 # (scottames), yazi (lihaohong). dnf5-plugins provides the `dnf copr`
 # subcommand. SUPPLY CHAIN (audit decision): the COPR repos are enabled only
 # for the install below and DISABLED before the layer ends — a deployed
@@ -489,8 +503,8 @@ RUN set -eu; \
     KERNEL_VERSION="$(rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | tail -n 1)"; \
     echo "Building NVIDIA kmod for kernel ${KERNEL_VERSION}"; \
     dnf -y install \
-        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-42.noarch.rpm" \
-        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-42.noarch.rpm"; \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm" \
+        "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-44.noarch.rpm"; \
     dnf -y install --setopt=install_weak_deps=False \
         akmod-nvidia \
         xorg-x11-drv-nvidia-cuda \
@@ -585,8 +599,8 @@ RUN HOME=/tmp claude --version \
 
 # =============================================================================
 # 6. aider — NOT shipped by default (optional user install)
-#    aider-chat requires Python <3.13, but Fedora Kinoite 42 ships Python 3.13,
-#    so it cannot be layered into the image. The ECOSYSTEM curation already
+#    aider-chat requires Python <3.13, but the Kinoite base ships a newer
+#    Python, so it cannot be layered into the image. The ECOSYSTEM curation already
 #    flagged aider as declining and picked opencode (above) as the default
 #    terminal agent. Users who want aider install it in an isolated Python 3.12
 #    with uv, without touching the immutable OS:

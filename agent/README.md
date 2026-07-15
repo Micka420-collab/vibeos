@@ -51,7 +51,7 @@ L'image VibeOS livre un runtime hybride : cloud quand c'est possible, local quan
 
 En mode hors-ligne, `opencode` pointé sur `ollama` reste la voie de vibecoding fonctionnelle sans aucune clé API.
 
-`aider` n'est **pas** préinstallé : il exige Python < 3.13, incompatible avec le Python 3.13 de la base Fedora Kinoite 42. Il reste installable à la demande, sans toucher l'OS immuable : `uvx --python 3.12 aider-chat` (éphémère) ou `uv tool install --python 3.12 aider-chat` (persistant, `~/.local`).
+`aider` n'est **pas** préinstallé : il exige Python < 3.13, incompatible avec le Python ≥ 3.13 de la base Fedora Kinoite 44. Il reste installable à la demande, sans toucher l'OS immuable : `uvx --python 3.12 aider-chat` (éphémère) ou `uv tool install --python 3.12 aider-chat` (persistant, `~/.local`).
 
 ## Clés API et secrets
 

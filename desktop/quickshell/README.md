@@ -2,7 +2,7 @@
 
 > Statut : **runtime livré, données live-câblées, validation visuelle en attente.**
 > Le runtime Quickshell est désormais **compilé dans l'image** (étage
-> `quickshell-builder` d'`os/Containerfile` — aucun paquet n'existe pour Fedora 42)
+> `quickshell-builder` d'`os/Containerfile` — le paquet Fedora `quickshell` existe depuis f44 et la base est désormais f44 : cet étage est **redondant** et son retrait est suivi à part — un rebase de sécurité ne change pas aussi la provenance d'un composant livré)
 > et le HUD est **auto-démarré** en session Plasma
 > (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`).
 > Le QML est **branché en direct** sur le socket de `vibed` (`Quickshell.Io`, voir
