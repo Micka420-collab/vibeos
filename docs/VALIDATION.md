@@ -68,6 +68,90 @@ Ne s'automatise pas (Zed n'est pas headless). Après login SDDM → Plasma 6 :
    Prérequis restant : binaire natif Claude Agent SDK + `WITH_ZED_AGENT=1` dans
    l'image (voir `BLOCKERS.md`).
 
+## ⭐ Tier A0 — les 3 derniers critères de sortie de la **Phase 2** (~10 min)
+
+> **À faire en premier sur l'ISO `v0.2.0-dev`.** Les 4 autres critères de Phase 2
+> sont déjà vérifiés mécaniquement en CI ([ROADMAP.md](../ROADMAP.md) §4) ; **ces
+> trois-là ne sont pas « à faire » mais « à CONSTATER »** — ils exigent un boot
+> réel, et rien d'autre ne les bloque.
+>
+> **Pourquoi le selfcheck (A1) ne suffit pas** : il est **read-only par
+> conception** (aucun redémarrage, aucune écriture) et fait son handshake MCP
+> **lui-même**. Il ne peut donc prouver ni le `kill -9`, ni une écriture T1, ni
+> que **le vrai Claude Code** parle au vrai socket. D'où ce palier.
+
+### C1 — `vibed` sain, et redémarre proprement après `kill -9`
+
+```bash
+systemctl status vibed                              # attendu : active (running)
+systemctl show vibed -p Restart                     # attendu : Restart=on-failure
+PID=$(systemctl show vibed -p MainPID --value); echo "avant : $PID"
+sudo kill -9 "$PID"                                 # SIGKILL = échec => on-failure doit relancer
+sleep 3
+systemctl show vibed -p MainPID --value             # attendu : un PID DIFFÉRENT et non nul
+systemctl status vibed                              # attendu : active (running)
+test -S /run/vibed/mcp.sock && echo "socket recréé OK"
+```
+
+**Réussi si** : nouveau PID ≠ ancien, service `active (running)`, socket recréé.
+**Piège à surveiller** : si le service reste `failed`, regarder
+`journalctl -u vibed -n 50` — un `exit(1)` fail-closed sur politique invalide est
+un SUCCÈS du design, pas un plantage (voir C1bis).
+
+### C2 — Handshake MCP depuis le **vrai** Claude Code
+
+Prérequis : ton utilisateur doit être dans le groupe `vibeos-agents`
+(`id -nG | grep vibeos-agents` ; sinon `sudo usermod -aG vibeos-agents $USER`
+puis **rouvrir la session**). L'image livre déjà la config MCP
+(`/etc/skel/.claude.json` → `~/.claude.json`) : **aucune configuration manuelle**.
+
+```bash
+claude          # puis, dans l'invite :
+/mcp            # attendu : serveur « vibeos » CONNECTÉ + catalogue d'outils listé
+```
+
+**Réussi si** : `vibeos` apparaît connecté et la liste montre les outils T0/T1
+(`os.status`, `fs.read`, `fs.list`, `svc.status`, `log.read`, `memory.query`,
+`agent.*`, `policy.check`, `fs.write`, `memory.append`).
+**Si ça échoue** : `ls -l /run/vibed/mcp.sock` (doit être `0660 root:vibeos-agents`)
+et `command -v socat` (le transport de la config livrée).
+
+### C3 — Démo bout-en-bout T0 + T1, les deux tracées à l'audit
+
+Dans la même session `claude` :
+
+1. **T0** — demander : *« lis l'état du système avec l'outil vibeos »*
+   → doit répondre **sans aucune demande d'approbation** (T0 = lecture seule).
+2. **T1** — demander : *« écris "bonjour vibeos" dans ~/demo-phase2.txt »*
+   → doit réussir (`fs.write` est T1, confiné à TON home).
+
+Puis, **hors de l'agent**, constater la trace :
+
+```bash
+cat ~/demo-phase2.txt                               # attendu : bonjour vibeos
+sudo tail -5 /var/lib/vibeos/audit/vibed-$(date -u +%F).jsonl
+sudo vibectl audit verify                           # attendu : "ok": true
+```
+
+**Réussi si** : le fichier existe, et l'audit contient **les deux** appels
+(`os.status` **et** `fs.write`) avec `decision":"allow"`, ton `caller_uid`, et
+`target` = le **chemin réel** du fichier écrit.
+
+**Bonus — vérifier que la frontière tient vraiment** (30 s, aucun risque) :
+```
+Dans claude, demander : « lis /etc/shadow »        → attendu : REFUSÉ (denylist)
+Dans claude, demander : « installe htop »          → attendu : approbation requise,
+                                                      JAMAIS exécuté tout seul
+sudo vibectl approvals list                        # la demande T2 en attente
+```
+C'est le cœur du projet : un agent ne franchit pas T2 sans toi.
+
+### Reporter le résultat
+
+Chaque critère constaté → cocher sa case dans [ROADMAP.md](../ROADMAP.md) §4
+« Critères de sortie », **avec la preuve** (sortie de commande). Les 3 cochés =
+**Phase 2 close**.
+
 ## Tier C — matériel : ce que seul le bare-metal prouve
 
 1. **Boot** amd64 et arm64 en VM UEFI (QEMU/OVMF ou Hyper-V Gén.2) jusqu'à
