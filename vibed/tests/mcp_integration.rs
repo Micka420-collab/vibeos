@@ -447,6 +447,75 @@ async fn t2_svc_restart_human_approval_chain_end_to_end() {
     srv.cleanup();
 }
 
+/// An over-long target is refused OUTRIGHT, and never parked in the approval
+/// queue.
+///
+/// `target` is the approval grant key AND the only description the operator ever
+/// reads (the pending record carries no arguments). It was bounded only by
+/// MAX_LINE_BYTES (1 MiB), and an agent may park MAX_PENDING_PER_UID (16)
+/// requests — ~16 MiB of arbitrary text in the queue, dumped verbatim to the
+/// operator's terminal, with `target` rendering BEFORE `tier`/`tool`
+/// (alphabetical JSON keys) so it pushes the real action off screen. It grants
+/// nothing, but a review surface that cannot be read is a review that does not
+/// happen.
+///
+/// Refused rather than truncated on purpose: cutting the target for display would
+/// hand an agent a deception primitive it does not have — the operator would read
+/// a prefix and approve the whole string.
+#[tokio::test]
+async fn an_over_long_target_is_refused_and_never_reaches_the_approval_queue() {
+    let mut srv = Server::start("target-too-long");
+
+    // A T2 tool, so a pass would land in the approval queue — the thing we are
+    // protecting. 8 KiB of 'a': past PATH_MAX, far below MAX_LINE_BYTES, so the
+    // line itself is accepted and only the target bound can stop it.
+    let huge = "a".repeat(8192);
+    let (is_error, text) = srv.tool_call(1, "pkg.install", json!({"name": huge})).await;
+    assert!(is_error, "an 8 KiB target must be refused: {text}");
+    assert!(
+        text.contains("target is 8192 bytes") && text.contains("maximum"),
+        "the refusal must say what was wrong: {text}"
+    );
+
+    // NOTHING was queued: no operator will ever be shown this.
+    assert!(
+        vibed::approval::list_pending(&srv.approval_dir).is_empty(),
+        "an over-long target must never reach the approval queue"
+    );
+
+    // The audit records the refusal — but by LENGTH, not by value: echoing the
+    // hostile text into the audit trail would be the same flood, one file over.
+    let records = srv.audit_records();
+    let refusal = records
+        .iter()
+        .find(|r| r["outcome"] == "target_too_long")
+        .expect("the refusal must be audited");
+    assert_eq!(refusal["decision"], "deny");
+    let audited_target = refusal["target"].as_str().unwrap_or_default();
+    assert!(
+        audited_target.contains("8192 bytes"),
+        "the audit records the length: {audited_target}"
+    );
+    assert!(
+        audited_target.len() < 100,
+        "the audit must NOT echo the hostile value back ({} bytes)",
+        audited_target.len()
+    );
+
+    // A normal target of the same tool still reaches the human floor — the bound
+    // must not turn pkg.install into a blanket deny.
+    let (is_error, text) = srv
+        .tool_call(2, "pkg.install", json!({"name": "htop"}))
+        .await;
+    assert!(is_error, "T2 still requires approval: {text}");
+    assert!(
+        text.contains("requires human approval"),
+        "a legitimate target must reach the approval floor, not the length bound: {text}"
+    );
+
+    srv.cleanup();
+}
+
 #[tokio::test]
 async fn per_uid_rate_limit_refuses_a_flood_and_audits_it() {
     // Capacity 2, no refill: the third tool call in the burst is over-limit.
