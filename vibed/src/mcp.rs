@@ -39,6 +39,13 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// that sends a line longer than this (e.g. no newline ever) is disconnected,
 /// so an unbounded line can never exhaust the daemon's memory (DoS guard).
 const MAX_LINE_BYTES: usize = 1024 * 1024;
+/// Hard cap on the `target` — the call's subject, which is both the approval
+/// GRANT KEY and the only description the operator ever reads. Set to Linux's
+/// PATH_MAX: no legitimate subject comes near it (a longer path cannot be opened
+/// by the kernel at all, a unit name is capped at 255 by `validate_unit_name`,
+/// and a package name is a few dozen characters). Anything above is refused
+/// outright rather than truncated — see the check in `handle_tools_call`.
+const MAX_TARGET_BYTES: usize = 4096;
 /// `O_NOFOLLOW` (Linux, `bits/fcntl-linux.h`): open() fails with ELOOP if the
 /// final path component is a symbolic link, instead of silently following it.
 /// Defined here to keep the crate free of a libc dependency.
@@ -421,6 +428,52 @@ async fn handle_tools_call(
     // action's subject (which file / unit / package) is recoverable in
     // forensics — never any file content or secret argument.
     let target = audit_target(&name, normalized_path.as_deref(), service, &args);
+
+    // A target longer than any legitimate subject is refused OUTRIGHT, before it
+    // can be recorded anywhere.
+    //
+    // Why reject rather than truncate: `target` is the approval GRANT KEY
+    // (compared verbatim) and the only description the operator is shown. Cutting
+    // it for display would hand an agent a deception primitive it does not have
+    // today — the operator would read a prefix and approve the whole string. So
+    // the bound has to live HERE, where the call can still be refused, and the
+    // stored value stays exactly what executes.
+    //
+    // Why it matters: the only other ceiling is MAX_LINE_BYTES (1 MiB), and an
+    // agent may park MAX_PENDING_PER_UID (16) requests. That is ~16 MiB of
+    // arbitrary text sitting in the approval queue and dumped verbatim to the
+    // operator's terminal — and `target` renders BEFORE `tier`/`tool` (the JSON
+    // object is a BTreeMap, so keys print alphabetically), so a wall of garbage
+    // pushes the actual action off screen. It grants nothing, but a review
+    // surface that cannot be read is a review that does not happen.
+    //
+    // The bound is PATH_MAX: no legitimate subject comes near it — a path longer
+    // than this cannot be opened by the kernel anyway, a unit name is capped at
+    // 255 by validate_unit_name, and a package name is a few dozen characters.
+    if let Some(t) = target.as_deref() {
+        if t.len() > MAX_TARGET_BYTES {
+            try_audit(
+                audit,
+                &name,
+                &args,
+                // Audit the LENGTH, not the value: echoing 1 MiB of hostile text
+                // into the audit trail is the same flood, one file over.
+                Some(&format!("<target too long: {} bytes>", t.len())),
+                Decision::Deny,
+                "target_too_long",
+                caller,
+            );
+            return tool_result(
+                id,
+                format!(
+                    "policy: target is {} bytes; the maximum is {MAX_TARGET_BYTES} \
+                     (no legitimate path, unit or package name is that long)",
+                    t.len()
+                ),
+                true,
+            );
+        }
+    }
 
     // Per-uid rate limiting: bound a runaway or compromised agent BEFORE any
     // execution, memory write or approval-store growth. Over-limit calls are
