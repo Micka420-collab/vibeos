@@ -421,12 +421,22 @@ async fn handle_tools_call(
     // internally, AFTER the decision, so "vibed"/"sshd" would slip past the deny
     // rule and reach the T2 approval queue instead of an outright Deny. An
     // invalid unit falls through to the raw name (execution rejects it anyway).
-    let canonical_unit: Option<String> = if name.starts_with("svc.") || name == "log.read" {
+    let canonical_unit: Option<String> = if unit_bearing(&name) {
         raw_service.and_then(|u| crate::tools::svc::validate_unit_name(u).ok())
     } else {
         None
     };
-    let service = canonical_unit.as_deref().or(raw_service);
+    // A tool that carries no unit reaches the policy with service = None. It used
+    // to fall back to `raw_service` for EVERY tool, so an arbitrary `unit`
+    // argument smuggled into, say, an fs.read call landed in the policy context
+    // as caller-controlled, never-canonicalized data — and `policy.check`, which
+    // only ever derived a unit for unit-bearing tools, disagreed with the real
+    // decision for the same call.
+    let service = if unit_bearing(&name) {
+        canonical_unit.as_deref().or(raw_service)
+    } else {
+        None
+    };
 
     // Human-readable, non-secret target recorded in the audit trail so an
     // action's subject (which file / unit / package) is recoverable in
@@ -968,6 +978,20 @@ pub(crate) fn tool_tier(name: &str) -> Option<Tier> {
     tool_catalog().iter().find(|t| t.0 == name).map(|t| t.1)
 }
 
+/// Does this tool name a systemd unit? These are the ONLY tools for which
+/// `CallContext.service` is meaningful, and therefore the only ones a
+/// `[rule.services]` constraint can ever govern.
+///
+/// Single-sourced deliberately. The real pipeline (`handle_tools_call`) and the
+/// dry-run hint (`policy.check`) each derived this notion independently and had
+/// drifted: the real path fed the raw `unit` argument of ANY tool into the policy
+/// context, while the hint only ever set a unit for `svc.*`/`log.read`. Two
+/// spellings of one rule is how the hint ends up predicting a decision the daemon
+/// does not make. Adding a unit-bearing tool means editing this — once.
+pub(crate) fn unit_bearing(tool: &str) -> bool {
+    tool.starts_with("svc.") || tool == "log.read"
+}
+
 fn list_tools() -> Vec<Value> {
     tool_catalog()
         .into_iter()
@@ -1064,8 +1088,17 @@ fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     }
 
     let tier = tool_tier(tool);
-    let service = if tool.starts_with("svc.") || tool == "log.read" {
-        target
+    // Canonicalize the unit exactly like the real pipeline does. Without this the
+    // hint evaluated a bare "sshd" against a deny rule listing "sshd.service",
+    // answered "allow", and the daemon then denied the very call the hint had
+    // blessed — the dry-run must mirror the decision it predicts, not a laxer one.
+    let canonical_target: Option<String> = if unit_bearing(tool) {
+        target.and_then(|u| crate::tools::svc::validate_unit_name(u).ok())
+    } else {
+        None
+    };
+    let service = if unit_bearing(tool) {
+        canonical_target.as_deref().or(target)
     } else {
         None
     };
@@ -1829,6 +1862,70 @@ mod tests {
 
         assert_eq!(tool_tier("agents.list"), Some(Tier::T0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn policy_check_canonicalizes_the_unit_like_the_real_pipeline() {
+        // A deny rule spells units out in full, the way an operator writes them.
+        let policy = policy_from_toml(
+            "[[rule]]\nid=\"svc\"\ntools=[\"svc.restart\"]\ntier=\"T2\"\naction=\"allow\"\napproval=\"human\"\n\
+             [rule.services]\ndenied=[\"sshd.service\"]\n",
+        );
+        let check = |args: Value| -> Value {
+            serde_json::from_str(&policy_check(&args, &policy).unwrap()).unwrap()
+        };
+        // The hint used to evaluate the bare name verbatim, miss "sshd.service",
+        // and answer "require_approval" for a call the daemon denies outright.
+        assert_eq!(
+            check(json!({"tool": "svc.restart", "target": "sshd"}))["decision"],
+            "deny",
+            "a bare unit name must be canonicalized before the hint decides"
+        );
+        assert_eq!(
+            check(json!({"tool": "svc.restart", "target": "sshd.service"}))["decision"],
+            "deny"
+        );
+        // An off-list unit still reaches the human floor — the fix must not turn
+        // the hint into a blanket deny.
+        assert_eq!(
+            check(json!({"tool": "svc.restart", "target": "nginx"}))["decision"],
+            "require_approval"
+        );
+    }
+
+    #[test]
+    fn unit_bearing_is_the_single_source_of_truth_for_service_context() {
+        // Only these tools name a unit; a [rule.services] constraint can govern
+        // nothing else. Both the real pipeline and policy.check derive their
+        // CallContext.service from this one predicate.
+        assert!(unit_bearing("svc.restart"));
+        assert!(unit_bearing("svc.status"));
+        assert!(unit_bearing("log.read"));
+        assert!(!unit_bearing("fs.read"));
+        assert!(!unit_bearing("fs.write"));
+        assert!(!unit_bearing("os.status"));
+        assert!(!unit_bearing("pkg.install"));
+        assert!(!unit_bearing("memory.append"));
+    }
+
+    #[test]
+    fn a_unit_constraint_never_governs_a_tool_that_carries_no_unit() {
+        // Guards the fix: `service` used to fall back to the raw `unit` argument
+        // for EVERY tool, so caller-controlled data reached the policy on tools
+        // that have no unit at all. fs.read has no unit -> the services
+        // constraint is simply not applicable, and the rule's own verdict stands.
+        let policy = policy_from_toml(
+            "[[rule]]\nid=\"fsread\"\ntools=[\"fs.read\"]\ntier=\"T0\"\naction=\"allow\"\n\
+             [rule.services]\nallowed=[\"vibed.service\"]\n",
+        );
+        let check = |args: Value| -> Value {
+            serde_json::from_str(&policy_check(&args, &policy).unwrap()).unwrap()
+        };
+        // Whatever a caller claims about a unit, an fs.read decision is unchanged.
+        assert_eq!(
+            check(json!({"tool": "fs.read", "target": "/etc/os-release"}))["decision"],
+            "allow"
+        );
     }
 
     #[test]

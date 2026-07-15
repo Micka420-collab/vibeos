@@ -561,6 +561,19 @@ fusionnées dans `mcpServers` et surfacés via la machinerie MCP de Claude Code
     un T2/T3 sans approbation — au pire l'éditeur montre/omet un prompt à tort, mais
     `vibed` gate toujours l'appel réel. Groundwork couche 2, implémentable côté vibed
     indépendamment du fork.
+  - **« Indice » n'autorise pas « faux » (corrigé 2026-07-15).** L'indice et le vrai
+    chemin dérivaient chacun de leur côté l'unité systemd passée à la politique, et
+    avaient divergé : (a) `policy.check` **ne canonicalisait pas** le nom d'unité, si
+    bien qu'un `svc.restart` sur `sshd` répondait `require_approval` alors que le
+    démon **refuse** (la règle liste `sshd.service` ; c'est exactement le contournement
+    par suffixe que la canonicalisation du vrai chemin bloque déjà) ; (b) le vrai
+    chemin retombait sur l'argument `unit` **brut de n'importe quel outil**, donc une
+    donnée non canonicalisée et contrôlée par l'appelant atteignait le contexte de
+    politique sur des outils sans unité (`fs.read`…), là où l'indice mettait `None`.
+    Les deux dérivent désormais d'un **prédicat unique** (`mcp::unit_bearing`) et le
+    même `validate_unit_name`. La borne de sécurité était intacte (le vrai appel
+    refusait bien), mais un indice **plus laxiste que la réalité** trompe la couche 2
+    et n'a aucune raison d'être.
 
 **Build/run** : `tsc` → `dist/index.js` (`start`), `vitest` pour les tests ; entrée
 `src/index.ts` → `runAcp()` ; `src/lib.ts` réexporte `ClaudeAcpAgent`/`runAcp` (le fork
