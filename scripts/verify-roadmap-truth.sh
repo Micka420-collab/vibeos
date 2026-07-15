@@ -110,6 +110,42 @@ for doc in DOCS:
                 hard.append(f"{doc}:{i}: lien markdown mort -> {target}")
 
 
+# --- Check A2 (HARD) : le badge « base » des README == la vraie base ----------
+#
+# Le 2026-07-15, la base est passée de Fedora Kinoite 42 à 44 (la 42 était EOL
+# depuis 49 jours). Les 4 README ont continué d'afficher « Fedora Kinoite 42 »
+# EN BADGE, tout en haut de la page d'accueil, dans les 4 langues. Personne ne
+# pouvait le voir : un badge est une image, aucun test ne le lit.
+#
+# Corriger la valeur sans poser ce contrôle, c'est juste attendre qu'elle mente
+# à nouveau au prochain rebase. Le badge pointe déjà os/Containerfile — ce check
+# ne fait qu'exiger qu'il dise la vérité.
+BADGE_RE = re.compile(r"img\.shields\.io/badge/[^)\s]*Kinoite%20(\d+)")
+containerfile = (ROOT / "os" / "Containerfile")
+if containerfile.exists():
+    cf_text = containerfile.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"quay\.io/fedora/fedora-kinoite:(\d+)", cf_text)
+    if not m:
+        hard.append(
+            "os/Containerfile : impossible d'y lire la version de la base "
+            "(motif `quay.io/fedora/fedora-kinoite:<N>`) — ce check vient de "
+            "devenir aveugle, ce qui est exactement ce qu'il doit empêcher. "
+            "Corrige le motif, ne supprime pas le check."
+        )
+    else:
+        real = m.group(1)
+        for doc in ("README.md", "README.en.md", "README.es.md", "README.de.md"):
+            if not (ROOT / doc).exists():
+                continue
+            for i, line in lines(doc):
+                for shown in BADGE_RE.findall(line):
+                    if shown != real:
+                        hard.append(
+                            f"{doc}:{i}: le badge annonce Fedora Kinoite {shown} "
+                            f"alors que os/Containerfile est sur la {real}"
+                        )
+
+
 # --- Check B (HARD) : les chemins repo cités entre backticks existent ---------
 BT_RE = re.compile(r"`([^`]+)`")
 for doc in DOCS:

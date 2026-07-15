@@ -7,7 +7,7 @@
 [![CI](https://github.com/Micka420-collab/vibeos/actions/workflows/ci.yml/badge.svg)](https://github.com/Micka420-collab/vibeos/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Arch](https://img.shields.io/badge/arch-amd64%20%2B%20arm64-8a2be2.svg)](docs/HARDWARE.md)
-[![Base](https://img.shields.io/badge/base-Fedora%20Kinoite%2042-51a2da.svg)](os/Containerfile)
+[![Base](https://img.shields.io/badge/base-Fedora%20Kinoite%2044-51a2da.svg)](os/Containerfile)
 [![Desktop](https://img.shields.io/badge/desktop-KDE%20Plasma%206-1d99f3.svg)](docs/DESKTOP.md)
 [![Status](https://img.shields.io/badge/status-pre--alpha%20v0.1-orange.svg)](STATUS.md)
 
