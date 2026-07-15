@@ -353,11 +353,38 @@ RUN dnf -y install dnf5-plugins \
     && dnf -y copr disable lihaohong/yazi \
     && dnf clean all
 
+# --- 1e-bis. Signing keys of third-party repos (PINNED, shipped by this repo) --
+# Imported from DISK, never fetched at build time. `rpm --import <url>` trusts
+# whatever key that URL serves, and `dnf -y` silently accepts a key advertised by
+# an upstream .repo — after which gpgcheck=1 faithfully validates against the
+# attacker's key. Pinning moves that trust into a reviewable diff.
+# Provenance, fingerprints and the verification actually performed (each key was
+# checked against the real repomd.xml.asc it is meant to sign): os/keys/README.md.
+# Copied into the standard location so the .repo files below — and any later
+# `dnf update` inside a rebuild — resolve gpgkey= to a LOCAL path, never a URL.
+COPY os/keys/RPM-GPG-KEY-vscodium os/keys/RPM-GPG-KEY-mise /etc/pki/rpm-gpg/
+
 # --- 1f. mise (vendor rpm repo) ----------------------------------------------
 # Runtime/toolchain manager (Node, Python, Go...) installed per-user into $HOME
-# — nothing written to /usr at runtime, ideal for an immutable OS. Installed
-# from the official jdx.dev rpm repo, pinned via GPG-checked metadata.
-RUN dnf -y config-manager addrepo --from-repofile=https://mise.jdx.dev/rpm/mise.repo \
+# — nothing written to /usr at runtime, ideal for an immutable OS.
+# The .repo is written HERE rather than pulled with `config-manager addrepo
+# --from-repofile=https://...`: that fetched a repo definition whose gpgkey= was a
+# URL, so the build imported a key it had never seen. Two hardenings over the
+# upstream file: gpgkey points at the pinned key on disk, and repo_gpgcheck=1 is
+# enabled (upstream ships repomd.xml.asc but does not ask dnf to check it).
+# gpgcheck stays enforced end-to-end for future rebuilds.
+RUN set -eux \
+    && rpmkeys --import /etc/pki/rpm-gpg/RPM-GPG-KEY-mise \
+    && printf '%s\n' \
+        '[mise-repo]' \
+        'name=mise' \
+        'baseurl=https://mise.jdx.dev/rpm' \
+        'enabled=1' \
+        'gpgcheck=1' \
+        'repo_gpgcheck=1' \
+        'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mise' \
+        'metadata_expire=1h' \
+        > /etc/yum.repos.d/mise.repo \
     && dnf -y install --setopt=install_weak_deps=False mise \
     && dnf clean all
 
@@ -381,8 +408,14 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 #    codebase, wired to the Open VSX marketplace (where Cline/Continue publish).
 #    Shipping the .repo file in /etc means `dnf update codium` also works inside
 #    future image rebuilds; gpgcheck stays enforced end-to-end.
+#
+#    The signing key is imported from the PINNED copy on disk (see the COPY in
+#    §1e-bis and os/keys/README.md), and gpgkey= points at that local path. It
+#    used to be `rpm --import <gitlab raw url>` with gpgkey= on the same URL —
+#    trust-on-first-use on every build, with nothing to notice a swapped key.
 # =============================================================================
-RUN rpm --import https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/master/pub.gpg \
+RUN set -eux \
+    && rpmkeys --import /etc/pki/rpm-gpg/RPM-GPG-KEY-vscodium \
     && printf '%s\n' \
         '[vscodium]' \
         'name=VSCodium' \
@@ -390,7 +423,7 @@ RUN rpm --import https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/mast
         'enabled=1' \
         'gpgcheck=1' \
         'repo_gpgcheck=1' \
-        'gpgkey=https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/-/raw/master/pub.gpg' \
+        'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-vscodium' \
         'metadata_expire=1h' \
         > /etc/yum.repos.d/vscodium.repo \
     && dnf -y install codium \
