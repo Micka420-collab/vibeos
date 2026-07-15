@@ -33,13 +33,20 @@
 // agent.thinking tail le raisonnement (mappé par reasoningToLive). `live` et
 // `history` restent [] tant qu'aucune session n'existe ou que vibed est
 // hors-ligne. Sélectionner une session passée déclenche `historySelected` →
-// shell.qml va chercher son raisonnement (`selected`).
+// shell.qml va chercher son raisonnement (`selected`). Un ÉCHEC de lecture
+// (`selectedError`) se dit échec — jamais « rien de capté », qui serait une
+// affirmation inventée sur l'historique de l'agent.
 // Rendu visuel jamais validé sur un Plasma booté (machine-gated).
 // ---------------------------------------------------------------------------
 
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Effects
+// ListModel lives in QtQml.Models since Qt6. QtQuick re-exports it, but the
+// import is explicit here rather than inherited by luck — this is the only file
+// in the HUD that uses one, and there is no QML linter to catch it if it were
+// missing.
+import QtQml.Models
 import Quickshell
 
 Item {
@@ -58,6 +65,12 @@ Item {
     // `live`, chargé à la demande par shell.qml via agent.thinking(session_id).
     property var selected: []
     property bool selectedLoading: false
+    // Pourquoi la lecture a échoué ("" = pas d'échec). SANS cet état, un déni de
+    // politique ou un vibed coupé retombait sur « aucun raisonnement capté pour
+    // cette session » — une AFFIRMATION FABRIQUÉE sur l'historique de l'agent,
+    // exactement le mensonge que ce panneau existe pour empêcher. Un échec doit
+    // se dire échec.
+    property string selectedError: ""
     // Émis quand l'utilisateur choisit une session passée : shell.qml va chercher
     // son raisonnement. Le panneau reste un pur observateur, il n'ouvre aucun
     // socket lui-même.
@@ -79,6 +92,43 @@ Item {
     property string selectedHistoryId: ""
     // Rendu quand vibed a tronqué la liste ("" sinon) — une vue partielle le dit.
     property string historyNote: ""
+
+    // Le modèle RÉEL de la liste. `history` arrive en NOUVEAU tableau à chaque
+    // poll (5 s) ; le lier directement à ListView.model réinitialiserait la vue à
+    // chaque tick — délégués détruits, scroll rejeté en haut — parce que la
+    // session LIVE est dans la liste et que ses libellés de taille/durée changent
+    // réellement à mesure qu'elle écrit. Un garde par « clé de contenu » ne sert à
+    // rien ici : la clé change justement quand quelque chose se passe, donc il ne
+    // protège que quand il n'y a rien à protéger. On DIFFE : seules les lignes qui
+    // ont bougé sont mises à jour EN PLACE, la vue (et le scroll de
+    // l'utilisateur) ne bougent pas.
+    ListModel { id: historyModel }
+
+    function applyHistory(rows) {
+        var n = rows ? rows.length : 0
+        for (var i = 0; i < n; ++i) {
+            var r = rows[i]
+            if (i < historyModel.count) {
+                var cur = historyModel.get(i)
+                if (cur.sessionId !== r.sessionId || cur.startedAt !== r.startedAt
+                        || cur.durationLabel !== r.durationLabel
+                        || cur.sizeLabel !== r.sizeLabel)
+                    historyModel.set(i, r)   // en place : pas de reset de la vue
+            } else {
+                historyModel.append(r)
+            }
+        }
+        while (historyModel.count > n)
+            historyModel.remove(historyModel.count - 1)
+    }
+    onHistoryChanged: applyHistory(history)
+    Component.onCompleted: applyHistory(history)
+
+    // Une coupure de vibed jette `selected` (shell.qml) mais la sélection vit
+    // ICI : sans ça, le corps afficherait « aucun raisonnement capté » pour une
+    // session qu'on n'a simplement plus les moyens de lire. Retour à la vue live,
+    // qui dit honnêtement qu'on est hors ligne.
+    onOnlineChanged: if (!online) selectedHistoryId = ""
 
     implicitHeight: 26
     implicitWidth: chip.implicitWidth
@@ -301,19 +351,24 @@ Item {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             clip: true
-                            model: reasoningPanel.history
+                            model: historyModel
                             delegate: Rectangle {
-                                required property var modelData
+                                // Rôles du ListModel (et non `modelData` : le
+                                // modèle est diffé en place, pas remplacé).
+                                required property string sessionId
+                                required property string startedAt
+                                required property string durationLabel
+                                required property string sizeLabel
                                 width: ListView.view.width
                                 implicitHeight: 40
                                 radius: Theme.radiusSm
-                                color: reasoningPanel.selectedHistoryId === modelData.sessionId ? Theme.stateSelected
+                                color: reasoningPanel.selectedHistoryId === sessionId ? Theme.stateSelected
                                        : histHover.hovered ? Theme.stateHover : "transparent"
                                 HoverHandler { id: histHover }
                                 TapHandler {
                                     onTapped: {
-                                        reasoningPanel.selectedHistoryId = modelData.sessionId
-                                        reasoningPanel.historySelected(modelData.sessionId)
+                                        reasoningPanel.selectedHistoryId = sessionId
+                                        reasoningPanel.historySelected(sessionId)
                                     }
                                 }
                                 Column {
@@ -323,7 +378,7 @@ Item {
                                     // quand elle a commencé, combien de temps elle a
                                     // duré, et le poids du raisonnement capté.
                                     Text {
-                                        text: modelData.startedAt
+                                        text: startedAt
                                         color: Theme.textSecondary
                                         font.family: Theme.fontMono
                                         font.pixelSize: Theme.fsMonoSm
@@ -331,7 +386,7 @@ Item {
                                         width: parent.width
                                     }
                                     Text {
-                                        text: modelData.durationLabel + " · " + modelData.sizeLabel
+                                        text: durationLabel + " · " + sizeLabel
                                         color: Theme.textMuted
                                         font.family: Theme.fontMono
                                         font.pixelSize: Theme.fsCaption
@@ -382,12 +437,22 @@ Item {
                                 var isLive = reasoningPanel.selectedHistoryId === ""
                                 var entries = isLive ? reasoningPanel.live : reasoningPanel.selected
                                 if (entries.length === 0) {
+                                    // Hors ligne : on ne SAIT pas ce qui tourne. Le
+                                    // dire, plutôt qu'affirmer qu'il n'y a rien.
+                                    if (!reasoningPanel.online)
+                                        return "vibed est hors ligne — aucun raisonnement lisible."
                                     if (isLive) return "Aucune session autonome en cours."
+                                    // Un échec de lecture (déni de politique, limite
+                                    // de débit, erreur protocole) n'est PAS un constat
+                                    // sur la session : ne jamais le maquiller en
+                                    // « rien de capté ».
+                                    if (reasoningPanel.selectedError !== "")
+                                        return "Lecture impossible : " + reasoningPanel.selectedError
                                     if (reasoningPanel.selectedLoading)
                                         return "Chargement de la session…"
-                                    // La session existe (elle est dans la liste) mais
-                                    // son raisonnement est vide : capture coupée, ou
-                                    // rien de capté avant la fin.
+                                    // Seul cas restant : vibed a bien répondu, et la
+                                    // session n'a réellement rien capté (capture
+                                    // coupée, ou rien avant la fin).
                                     return "Aucun raisonnement capté pour cette session."
                                 }
                                 // TODO(Phase 2.5): un onglet par entrée de `live` si

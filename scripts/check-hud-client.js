@@ -66,7 +66,7 @@ if (qtRefs.length) {
 }
 
 const EXPORTS = [
-  "sessionsToHistory", "historyKey", "sessionsTruncationNote",
+  "sessionsToHistory", "sessionsTruncationNote",
   "formatStamp", "formatDuration", "formatBytes", "reasoningToLive",
   "toolsCallRequestId", "toolsCallRequest", "parseToolResult", "parseLine",
   "agentsListToRoster",
@@ -152,6 +152,21 @@ const noMtime = V.sessionsToHistory({
 check("an unreadable mtime does not produce a negative duration",
   noMtime[0].durationLabel === "durée inconnue", noMtime[0].durationLabel);
 
+group("an id-less row is dropped, never rendered as a ghost");
+// "" is the panel's sentinel for "live view". A row whose sessionId is "" would
+// render permanently selected and un-clickable. vibed guarantees non-empty ids,
+// but that is a CROSS-LANGUAGE guarantee — this side enforces it too.
+check("a session with no id is dropped",
+  V.sessionsToHistory({ sessions: [{}] }).length === 0);
+check("a session with an empty id is dropped",
+  V.sessionsToHistory({ sessions: [{ id: "" }] }).length === 0);
+check("a session with a non-string id is dropped",
+  V.sessionsToHistory({ sessions: [{ id: 42 }] }).length === 0);
+check("valid rows survive alongside a dropped one",
+  V.sessionsToHistory({ sessions: [{}, WIRE.sessions[0]] }).length === 1);
+check("no rendered row can ever carry the live sentinel",
+  V.sessionsToHistory(WIRE).every(h => h.sessionId !== ""));
+
 group("degenerate payloads degrade, never throw (a throw kills the QML binding)");
 for (const bad of [null, undefined, {}, { sessions: [] }, { sessions: [{}] },
                    { sessions: [{ id: "x" }] }]) {
@@ -228,20 +243,17 @@ for (const bad of [null, undefined, {}, { agents: [] }]) {
     threw === null, threw);
 }
 
-group("historyKey: only a REAL change may reset the ListView model");
-// Reassigning ListView.model destroys delegates and throws away the user's
-// scroll position. agent.sessions is polled every 5s, so an unconditional
-// republish would make the list unusable below the fold.
-check("identical payload -> identical key",
-  V.historyKey(V.sessionsToHistory(WIRE)) === V.historyKey(V.sessionsToHistory(WIRE)));
-check("reordered payload -> different key",
-  V.historyKey(V.sessionsToHistory({ sessions: WIRE.sessions.slice().reverse() }))
-    !== V.historyKey(V.sessionsToHistory(WIRE)));
-check("a new session -> different key",
-  V.historyKey(V.sessionsToHistory({
-    sessions: [{ id: "new", started_unix: 1, last_unix: 2, bytes: 3 }].concat(WIRE.sessions),
-  })) !== V.historyKey(V.sessionsToHistory(WIRE)));
-check("empty list -> empty key", V.historyKey([]) === "");
+// NOTE — there is deliberately NO `historyKey` group here any more. An earlier
+// version of this file guarded a content-key that shell.qml compared before
+// republishing the list, and every check in that group asserted the key CHANGED.
+// None asserted it STAYED THE SAME across a poll where only the live session's
+// size/mtime moved — which was the only reason the function existed. A
+// churn-maximal key (`JSON.stringify` of every row) passed all four checks, so
+// the group was theatre: it went green while the guard fired on 100% of polls
+// and reset the list every 5s. The key is gone; ReasoningPanel now diffs into a
+// ListModel and updates rows in place. Lesson kept on purpose: a check that only
+// asserts the easy direction of a property is worse than no check, because it
+// buys false confidence.
 
 group("sessionsTruncationNote: a capped view must admit it");
 check("silent when the view is complete",

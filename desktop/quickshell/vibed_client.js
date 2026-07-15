@@ -247,7 +247,16 @@ function formatBytes(n) {
 // vibed would have to read every session end to end on each poll to produce one.
 function sessionsToHistory(data) {
     if (!data || !data.sessions || data.sessions.length === 0) return [];
-    return data.sessions.map(function (s) {
+    return data.sessions.filter(function (s) {
+        // A row with no usable id is dropped, not rendered. "" is the panel's
+        // sentinel for "the live view", so an empty sessionId would render a row
+        // that looks permanently selected and un-clickable (tapping it emits
+        // historySelected("") = go live). vibed already guarantees non-empty ids
+        // (reasoning::safe_session_id, and list_sessions filters every candidate
+        // through it) — but that is a cross-language guarantee, and this side
+        // should not depend on it silently.
+        return s && typeof s.id === "string" && s.id !== "";
+    }).map(function (s) {
         var started = (typeof s.started_unix === "number") ? s.started_unix : null;
         var last = (typeof s.last_unix === "number") ? s.last_unix : null;
         var known = started !== null && last !== null && last >= started;
@@ -258,22 +267,6 @@ function sessionsToHistory(data) {
             sizeLabel: formatBytes((typeof s.bytes === "number") ? s.bytes : 0)
         };
     });
-}
-
-// A cheap identity of a rendered history list. Assigning a new array to a
-// ListView.model is a FULL model reset: delegates are destroyed and rebuilt from
-// index 0 and the scroll position jumps back to the top. agent.sessions is polled
-// every 5s and `sessionsToHistory` necessarily builds a fresh array each time, so
-// publishing it unconditionally would snap the list to the top every 5s — with up
-// to REASONING_MAX_SESSIONS rows, everything below the fold becomes unreachable.
-// Comparing this key first means the model is only replaced when the list really
-// changed. The labels are coarse on purpose (rounded duration/size), so a running
-// session does not churn the list on every poll.
-function historyKey(list) {
-    var k = "";
-    for (var i = 0; i < list.length; ++i)
-        k += list[i].sessionId + ":" + list[i].durationLabel + ":" + list[i].sizeLabel + "|";
-    return k;
 }
 
 // vibed caps the listing at 200 sessions and reports `total`/`truncated` so a
