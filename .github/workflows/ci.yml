@@ -30,6 +30,11 @@ on:
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
       - "os/rootfs/usr/lib/systemd/system-generators/**"
+      # Le Containerfile déclare la base Fedora : sans cette entrée, une PR qui
+      # ne toucherait QUE lui — donc précisément un changement de base — ne
+      # déclencherait pas ce workflow, et le contrôle EOL ci-dessous ne
+      # tournerait jamais sur le fichier qu'il surveille.
+      - "os/Containerfile"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -41,6 +46,11 @@ on:
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
       - "os/rootfs/usr/lib/systemd/system-generators/**"
+      # Le Containerfile déclare la base Fedora : sans cette entrée, une PR qui
+      # ne toucherait QUE lui — donc précisément un changement de base — ne
+      # déclencherait pas ce workflow, et le contrôle EOL ci-dessous ne
+      # tournerait jamais sur le fichier qu'il surveille.
+      - "os/Containerfile"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
