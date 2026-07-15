@@ -414,6 +414,7 @@ fn recheck_policy_canonical(
     let ctx = CallContext {
         path: Some(canonical),
         service: None,
+        domain: None,
     };
     match policy.evaluate(tool, tier, ctx) {
         Decision::Allow => Ok(()),

@@ -23,6 +23,7 @@ fn repo_policy_dir() -> PathBuf {
 const NO_CTX: CallContext<'_> = CallContext {
     path: None,
     service: None,
+    domain: None,
 };
 
 #[test]
@@ -127,8 +128,8 @@ fn shipped_default_policy_canonical_decisions() {
 fn shipped_policy_denies_restart_of_critical_units_before_approval() {
     let engine = PolicyEngine::load_dir(&repo_policy_dir()).expect("shipped policy must load");
     let svc = |unit: &'static str| CallContext {
-        path: None,
         service: Some(unit),
+        ..Default::default()
     };
 
     // Every unit whose restart would cut the operator's access, the audit trail,

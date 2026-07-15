@@ -37,7 +37,36 @@
 //!
 //! [rule.services]              # optional service constraints
 //! denied  = ["vibed.service"]
+//!
+//! [rule.domains]               # optional host scope (ADR-017), browser tools
+//! only = ["docs.rs", "*.github.com"]
 //! ```
+//!
+//! **`domains.only` scopes, it does not deny.** `paths.allowed`/`services.allowed`
+//! are verdicts: a target outside the list is denied on the spot. `domains.only`
+//! is a rule predicate: a host outside the list makes THIS rule inapplicable and
+//! evaluation moves to the next one — which is how "trusted domains are free,
+//! everything else asks a human" is expressed with plain first-match-wins:
+//!
+//! ```toml
+//! [[rule]]                     # 1. trusted hosts: T1, no human
+//! id = "browser-trusted"
+//! tools = ["browser.navigate"]
+//! tier = "T1"
+//! action = "allow"
+//! [rule.domains]
+//! only = ["docs.rs", "*.github.com"]
+//!
+//! [[rule]]                     # 2. everything else: falls here, T2, human
+//! id = "browser-untrusted"
+//! tools = ["browser.navigate"]
+//! tier = "T2"
+//! action = "allow"
+//! approval = "human"
+//! ```
+//!
+//! Order matters as always: put the scoped rule first, or the catch-all shadows
+//! it.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -49,6 +78,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tracing::{info, warn};
 
+use crate::domain::{domain_matches_any, is_valid_pattern};
 use crate::glob::glob_match;
 
 /// Capability tiers of the VibeOS tool model.
@@ -144,6 +174,36 @@ pub struct ServiceConstraints {
     pub denied: Vec<String>,
 }
 
+/// `[rule.domains]` sub-table: scopes a rule to a set of hosts (ADR-017).
+///
+/// # This is a PREDICATE, not a verdict — unlike `[rule.services]`
+///
+/// `services.allowed` is a **verdict**: a unit outside the list is DENIED, right
+/// there, before the tier floor (ADR-011 — an agent may read only the journals of
+/// listed units, full stop).
+///
+/// `domains.only` is a **predicate**: a host outside the list denies nothing. It
+/// makes the RULE not apply, and evaluation continues to the next rule. That is
+/// what ADR-017 decision 1 asks for — trusted domains browse freely, anything
+/// else falls through to a T2 rule and asks a human — and it needs no new engine
+/// concept, because first-match-wins already does the escalation.
+///
+/// The key is `only` and not `allowed` precisely so the two never read alike: if
+/// you see `allowed`, off-list is refused; if you see `only`, off-list is someone
+/// else's problem. Write `[rule.domains] allowed = […]` by muscle memory and the
+/// policy fails to LOAD (`deny_unknown_fields`) rather than silently scoping the
+/// rule to nothing — see below.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainConstraints {
+    /// When present, the rule applies ONLY to hosts matching one of these
+    /// patterns (`example.com` exact, `*.example.com` any subdomain — see
+    /// `domain::domain_match`). A non-matching host, or a call with no host at
+    /// all, makes the rule inapplicable rather than denied.
+    #[serde(default)]
+    pub only: Option<Vec<String>>,
+}
+
 /// One canonical policy rule. Unknown extra keys are ignored (informational
 /// fields like `description` are welcome in policy files), but the required
 /// fields and the T2/T3 approval floor are enforced at load time.
@@ -163,6 +223,8 @@ pub struct Rule {
     pub paths: Option<PathConstraints>,
     #[serde(default)]
     pub services: Option<ServiceConstraints>,
+    #[serde(default)]
+    pub domains: Option<DomainConstraints>,
 }
 
 /// On-disk shape of one policy file (see module docs for the full schema).
@@ -209,6 +271,15 @@ pub struct CallContext<'a> {
     pub path: Option<&'a str>,
     /// Target systemd unit, when the tool takes a `unit` argument.
     pub service: Option<&'a str>,
+    /// Target host, when the tool takes a `url` argument: the validated,
+    /// lowercase output of `domain::host_of`, never the raw URL.
+    ///
+    /// `None` means "no host could be established" — either the tool takes no
+    /// URL, or the URL was unparseable. It NEVER means "any host": a rule
+    /// carrying `[rule.domains]` does not apply when this is `None`, so an
+    /// unparseable URL falls through to the untrusted rule instead of
+    /// borrowing a trusted rule's tier. See `rule_domain_applies`.
+    pub domain: Option<&'a str>,
 }
 
 /// Immutable-after-load rule set. Rebuilt on daemon restart
@@ -303,7 +374,9 @@ impl PolicyEngine {
             return Decision::Deny;
         };
         for rule in &self.rules {
-            if rule.tools.iter().any(|pattern| glob_match(pattern, tool)) {
+            if rule.tools.iter().any(|pattern| glob_match(pattern, tool))
+                && rule_domain_applies(rule, ctx)
+            {
                 return apply_rule(rule, registry_tier, ctx);
             }
         }
@@ -337,6 +410,25 @@ fn fold_home_alias(s: &str) -> Cow<'_, str> {
 /// Used only for path constraints; service patterns are matched verbatim.
 fn path_glob_match(pattern: &str, path: &str) -> bool {
     glob_match(&fold_home_alias(pattern), &fold_home_alias(path))
+}
+
+/// Does this rule's `[rule.domains]` scope cover the call? Asked at MATCHING
+/// time, not verdict time: a `false` here means "try the next rule", never
+/// "deny" (see `DomainConstraints`).
+///
+/// Fail-closed in the case that matters: a rule scoped to trusted domains does
+/// NOT apply to a call with no host — an unparseable or non-http URL must never
+/// inherit a trusted rule's tier just because nothing could be extracted from
+/// it. It falls through to the untrusted rule and meets a human.
+fn rule_domain_applies(rule: &Rule, ctx: CallContext<'_>) -> bool {
+    let Some(only) = rule.domains.as_ref().and_then(|d| d.only.as_ref()) else {
+        // No domain scope: the rule applies to every host, as before.
+        return true;
+    };
+    let Some(host) = ctx.domain else {
+        return false;
+    };
+    domain_matches_any(only, host)
 }
 
 fn apply_rule(rule: &Rule, registry_tier: Tier, ctx: CallContext<'_>) -> Decision {
@@ -418,6 +510,27 @@ fn parse_and_validate(src: &str) -> Result<Vec<Rule>, FileError> {
                 rule.id, rule.tier
             )));
         }
+        // A malformed domain pattern matches nothing, which would silently scope
+        // the rule to zero hosts instead of the intended allow-list. Refuse to
+        // start: an allow-list that quietly grants nothing looks exactly like an
+        // allow-list that works.
+        if let Some(only) = rule.domains.as_ref().and_then(|d| d.only.as_ref()) {
+            if only.is_empty() {
+                return Err(FileError::Invalid(format!(
+                    "rule '{}': empty 'domains.only' — the rule could never \
+                     apply; remove the constraint or list a domain",
+                    rule.id
+                )));
+            }
+            if let Some(bad) = only.iter().find(|p| !is_valid_pattern(p)) {
+                return Err(FileError::Invalid(format!(
+                    "rule '{}': invalid domain pattern {bad:?} (expected \
+                     'example.com' or '*.example.com', lowercase ASCII; an IDN \
+                     must be punycoded)",
+                    rule.id
+                )));
+            }
+        }
     }
     Ok(file.rule)
 }
@@ -449,7 +562,201 @@ mod tests {
     const NO_CTX: CallContext<'_> = CallContext {
         path: None,
         service: None,
+        domain: None,
     };
+
+    fn host_ctx(host: &str) -> CallContext<'_> {
+        CallContext {
+            domain: Some(host),
+            ..Default::default()
+        }
+    }
+
+    /// The two-rule shape ADR-017 decision 1 asks for: trusted hosts browse at
+    /// T1, everything else falls through to a human at T2.
+    const BROWSER_POLICY: &str = r#"
+        schema_version = 1
+
+        [[rule]]
+        id = "browser-trusted"
+        tools = ["browser.*"]
+        tier = "T1"
+        action = "allow"
+        [rule.domains]
+        only = ["docs.rs", "*.github.com"]
+
+        [[rule]]
+        id = "browser-untrusted"
+        tools = ["browser.*"]
+        tier = "T2"
+        action = "allow"
+        approval = "human"
+    "#;
+
+    #[test]
+    fn trusted_domain_browses_without_a_human() {
+        let e = engine(BROWSER_POLICY);
+        // Both halves matter. If the allow-list silently matched nothing, every
+        // host would escalate and an "off-list escalates" test would still pass
+        // — so assert the list actually GRANTS on-list hosts too.
+        for host in ["docs.rs", "api.github.com", "raw.github.com"] {
+            assert_eq!(
+                e.evaluate("browser.navigate", Some(Tier::T1), host_ctx(host)),
+                Decision::Allow,
+                "{host} is allow-listed: it must browse at T1, no human"
+            );
+        }
+    }
+
+    #[test]
+    fn off_list_domain_escalates_to_a_human_rather_than_being_denied() {
+        let e = engine(BROWSER_POLICY);
+        for host in ["example.com", "github.com", "evil.tld"] {
+            assert_eq!(
+                e.evaluate("browser.navigate", Some(Tier::T1), host_ctx(host)),
+                Decision::RequireApproval,
+                "{host} is off-list: ADR-017 asks for approval, NOT a refusal \
+                 (that is what makes `domains.only` a predicate, not a verdict)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lookalike_host_cannot_borrow_the_trusted_rule() {
+        let e = engine(BROWSER_POLICY);
+        // Each of these would be waved through at T1 by a naive `ends_with`,
+        // which is the whole reason `domain_match` exists.
+        for host in [
+            "evil-github.com",
+            "api.github.com.evil.tld",
+            "docs.rs.evil.tld",
+            "notdocs.rs",
+        ] {
+            assert_eq!(
+                e.evaluate("browser.navigate", Some(Tier::T1), host_ctx(host)),
+                Decision::RequireApproval,
+                "{host} only LOOKS allow-listed: it must not inherit T1"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_with_no_host_never_inherits_the_trusted_rule() {
+        let e = engine(BROWSER_POLICY);
+        // `domain: None` = the URL could not be parsed (`host_of` failed) or the
+        // tool takes no URL. A rule scoped to trusted hosts must NOT apply: an
+        // unparseable URL falls through to the human, it does not get a free T1.
+        assert_eq!(
+            e.evaluate("browser.navigate", Some(Tier::T1), NO_CTX),
+            Decision::RequireApproval,
+            "no host established => the scoped rule must not apply"
+        );
+    }
+
+    #[test]
+    fn the_tier_floor_still_wins_over_a_trusted_domain() {
+        // An allow-listed domain buys a rule match, never a tier cut: a T2 tool
+        // stays T2 on docs.rs. The floor is not negotiable (invariant, ADR-004).
+        let e = engine(BROWSER_POLICY);
+        assert_eq!(
+            e.evaluate("browser.click", Some(Tier::T2), host_ctx("docs.rs")),
+            Decision::RequireApproval,
+            "the registry tier is a floor; an allow-listed host cannot lower it"
+        );
+    }
+
+    #[test]
+    fn a_domain_scope_leaves_other_rules_alone() {
+        // Regression guard: adding the predicate must not change evaluation for
+        // the ~all rules that carry no [rule.domains] at all.
+        let e = engine(
+            r#"
+            schema_version = 1
+            [[rule]]
+            id = "fs-read"
+            tools = ["fs.read"]
+            tier = "T0"
+            action = "allow"
+        "#,
+        );
+        assert_eq!(
+            e.evaluate("fs.read", Some(Tier::T0), NO_CTX),
+            Decision::Allow
+        );
+        // Even when a host happens to be in context, an unscoped rule applies.
+        assert_eq!(
+            e.evaluate("fs.read", Some(Tier::T0), host_ctx("evil.tld")),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn a_typo_in_a_domain_pattern_refuses_to_load() {
+        // A bad pattern matches nothing, so the rule would quietly scope to zero
+        // hosts and every call would escalate — an allow-list that grants
+        // nothing is indistinguishable from one that works. Fail at load.
+        for bad in ["GITHUB.COM", "github..com", "https://github.com", "*."] {
+            let msg = parse_err(&format!(
+                r#"
+                schema_version = 1
+                [[rule]]
+                id = "r"
+                tools = ["browser.*"]
+                tier = "T1"
+                action = "allow"
+                [rule.domains]
+                only = ["{bad}"]
+            "#
+            ));
+            assert!(
+                msg.contains("invalid domain pattern"),
+                "pattern {bad:?} must be rejected at load, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_domain_scope_refuses_to_load() {
+        let msg = parse_err(
+            r#"
+            schema_version = 1
+            [[rule]]
+            id = "r"
+            tools = ["browser.*"]
+            tier = "T1"
+            action = "allow"
+            [rule.domains]
+            only = []
+        "#,
+        );
+        assert!(msg.contains("empty 'domains.only'"), "got: {msg}");
+    }
+
+    #[test]
+    fn writing_allowed_instead_of_only_refuses_to_load() {
+        // The footgun this guards: `allowed` is the spelling used by
+        // [rule.paths] and [rule.services], so it WILL get typed here. Without
+        // deny_unknown_fields serde would ignore it, leaving `only = None` — a
+        // rule scoped to nothing, i.e. one that applies to EVERY host at T1.
+        // A silently-disabled allow-list is the worst outcome available, so the
+        // daemon refuses to start instead.
+        let msg = parse_err(
+            r#"
+            schema_version = 1
+            [[rule]]
+            id = "r"
+            tools = ["browser.*"]
+            tier = "T1"
+            action = "allow"
+            [rule.domains]
+            allowed = ["docs.rs"]
+        "#,
+        );
+        assert!(
+            msg.contains("allowed") || msg.contains("unknown field"),
+            "a misspelled key must be a load error, got: {msg}"
+        );
+    }
 
     #[test]
     fn rich_schema_parses_with_all_fields() {
@@ -605,7 +912,7 @@ mod tests {
         );
         let ctx = |p: &'static str| CallContext {
             path: Some(p),
-            service: None,
+            ..Default::default()
         };
         assert_eq!(
             e.evaluate("fs.write", Some(Tier::T1), ctx("/home/dev/notes.md")),
@@ -641,7 +948,7 @@ mod tests {
     fn home_var_home_alias_is_matched_in_both_spellings() {
         let ctx = |p: &'static str| CallContext {
             path: Some(p),
-            service: None,
+            ..Default::default()
         };
         // Deny authored with the `/home` spelling.
         let e_home = engine(
@@ -723,7 +1030,7 @@ mod tests {
         );
         let ctx = |p: &'static str| CallContext {
             path: Some(p),
-            service: None,
+            ..Default::default()
         };
         assert_eq!(
             e.evaluate("fs.read", Some(Tier::T0), ctx("/etc/os-release")),
@@ -758,8 +1065,8 @@ mod tests {
             "#,
         );
         let ctx = |s: &'static str| CallContext {
-            path: None,
             service: Some(s),
+            ..Default::default()
         };
         assert_eq!(
             e.evaluate("svc.restart", Some(Tier::T2), ctx("vibed.service")),
@@ -788,8 +1095,8 @@ mod tests {
             "#,
         );
         let ctx = |s: &'static str| CallContext {
-            path: None,
             service: Some(s),
+            ..Default::default()
         };
         // Allowlisted units: allowed (T0, no approval).
         assert_eq!(
