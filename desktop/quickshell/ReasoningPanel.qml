@@ -18,8 +18,9 @@
 //     text: "Let me check whether..." }   // grandit à mesure que les deltas arrivent
 //
 // Model shape — HISTORY (une entrée par session passée, plus récent d'abord) :
-//   { sessionId, provider, model, startedAt, durationLabel: "3h42",
-//     turnCount, byteSize }
+//   { sessionId, startedAt: "14 juil. 03:42", durationLabel: "3 h 42",
+//     sizeLabel: "128 Kio" }
+// Ni provider/model ni compteur de tours : voir la note DATA SOURCE ci-dessous.
 //
 // ---------------------------------------------------------------------------
 // DATA SOURCE — live-wired, honesty rule (identique à AgentStatus.qml)
@@ -27,11 +28,13 @@
 // Ce fichier ne ships avec AUCUNE donnée : `live`/`history` valent [] par
 // défaut, le panneau affiche son placeholder "aucune session". Rien n'est
 // mocké. `agent.sessions` + `agent.thinking` existent dans vibed/src/mcp.rs et
-// shell.qml câble `live` en direct : agent.sessions suit la session la plus
-// récente, agent.thinking tail son raisonnement (mappé par reasoningToLive).
-// `live` reste [] tant qu'aucune session n'existe ou que vibed est hors-ligne.
-// TODO(Phase 2.5): brancher `history` (sessions passées) — pas encore lié dans
-// shell.qml. Rendu visuel jamais validé sur un Plasma booté (machine-gated).
+// shell.qml câble `live` ET `history` en direct : agent.sessions rend la liste
+// des sessions avec leurs métadonnées (la plus récente d'abord) et suit `latest`,
+// agent.thinking tail le raisonnement (mappé par reasoningToLive). `live` et
+// `history` restent [] tant qu'aucune session n'existe ou que vibed est
+// hors-ligne. Sélectionner une session passée déclenche `historySelected` →
+// shell.qml va chercher son raisonnement (`selected`).
+// Rendu visuel jamais validé sur un Plasma booté (machine-gated).
 // ---------------------------------------------------------------------------
 
 import QtQuick
@@ -44,8 +47,21 @@ Item {
 
     // [{ sessionId, provider, model, raw, redacted, streaming, text }]
     property var live: []
-    // [{ sessionId, provider, model, startedAt, durationLabel, turnCount, byteSize }]
+    // Sessions passées, la plus récente d'abord — alimenté par agent.sessions
+    // (mappé par Vibed.sessionsToHistory). Pas de `provider`/`model` : le store
+    // de raisonnement ne les porte pas, et le panneau n'invente rien. Pas de
+    // compteur de tours non plus : vibed devrait relire chaque fichier en entier
+    // à chaque poll pour le produire.
+    // [{ sessionId, startedAt, durationLabel, sizeLabel }]
     property var history: []
+    // Raisonnement de la session d'historique sélectionnée — même forme que
+    // `live`, chargé à la demande par shell.qml via agent.thinking(session_id).
+    property var selected: []
+    property bool selectedLoading: false
+    // Émis quand l'utilisateur choisit une session passée : shell.qml va chercher
+    // son raisonnement. Le panneau reste un pur observateur, il n'ouvre aucun
+    // socket lui-même.
+    signal historySelected(string sessionId)
     property bool online: false           // vibed / superviseur d'agent joignable
     property bool captureEnabled: true    // reflète le toggle par session (ROADMAP Phase 2.5)
 
@@ -54,7 +70,15 @@ Item {
         return false
     }
 
-    property int selectedHistoryIndex: -1   // -1 = vue live, sinon index dans `history`
+    // Session d'historique affichée, par IDENTITÉ ("" = vue live). Surtout pas
+    // par index : `history` est retriée par activité et republiée à chaque poll,
+    // donc un index devient périmé en silence — la ligne surlignée désignerait
+    // une session pendant que le corps affiche le raisonnement d'une autre.
+    // Attribuer une pensée à la mauvaise session est précisément le mensonge que
+    // ce panneau existe pour empêcher.
+    property string selectedHistoryId: ""
+    // Rendu quand vibed a tronqué la liste ("" sinon) — une vue partielle le dit.
+    property string historyNote: ""
 
     implicitHeight: 26
     implicitWidth: chip.implicitWidth
@@ -255,15 +279,22 @@ Item {
                             Layout.fillWidth: true
                             implicitHeight: 28
                             radius: Theme.radiusSm
-                            color: reasoningPanel.selectedHistoryIndex === -1 ? Theme.stateSelected : "transparent"
+                            color: reasoningPanel.selectedHistoryId === "" ? Theme.stateSelected : "transparent"
                             Text {
                                 anchors.centerIn: parent
                                 text: "● en direct"
-                                color: reasoningPanel.selectedHistoryIndex === -1 ? Theme.textPrimary : Theme.textMuted
+                                color: reasoningPanel.selectedHistoryId === "" ? Theme.textPrimary : Theme.textMuted
                                 font.family: Theme.fontMono
                                 font.pixelSize: Theme.fsMonoSm
                             }
-                            TapHandler { onTapped: reasoningPanel.selectedHistoryIndex = -1 }
+                            TapHandler {
+                                onTapped: {
+                                    reasoningPanel.selectedHistoryId = ""
+                                    // Drop the selection so no past session keeps
+                                    // being tracked behind the live view.
+                                    reasoningPanel.historySelected("")
+                                }
+                            }
                         }
 
                         ListView {
@@ -273,19 +304,26 @@ Item {
                             model: reasoningPanel.history
                             delegate: Rectangle {
                                 required property var modelData
-                                required property int index
                                 width: ListView.view.width
                                 implicitHeight: 40
                                 radius: Theme.radiusSm
-                                color: reasoningPanel.selectedHistoryIndex === index ? Theme.stateSelected
+                                color: reasoningPanel.selectedHistoryId === modelData.sessionId ? Theme.stateSelected
                                        : histHover.hovered ? Theme.stateHover : "transparent"
                                 HoverHandler { id: histHover }
-                                TapHandler { onTapped: reasoningPanel.selectedHistoryIndex = index }
+                                TapHandler {
+                                    onTapped: {
+                                        reasoningPanel.selectedHistoryId = modelData.sessionId
+                                        reasoningPanel.historySelected(modelData.sessionId)
+                                    }
+                                }
                                 Column {
                                     anchors.fill: parent
                                     anchors.margins: Theme.space1
+                                    // Ce que le store sait réellement d'une session :
+                                    // quand elle a commencé, combien de temps elle a
+                                    // duré, et le poids du raisonnement capté.
                                     Text {
-                                        text: modelData.provider + " · " + modelData.durationLabel
+                                        text: modelData.startedAt
                                         color: Theme.textSecondary
                                         font.family: Theme.fontMono
                                         font.pixelSize: Theme.fsMonoSm
@@ -293,7 +331,7 @@ Item {
                                         width: parent.width
                                     }
                                     Text {
-                                        text: modelData.startedAt
+                                        text: modelData.durationLabel + " · " + modelData.sizeLabel
                                         color: Theme.textMuted
                                         font.family: Theme.fontMono
                                         font.pixelSize: Theme.fsCaption
@@ -302,6 +340,19 @@ Item {
                                     }
                                 }
                             }
+                        }
+
+                        // vibed plafonne la liste : quand elle est tronquée, on
+                        // le dit plutôt que de faire passer une fenêtre pour
+                        // l'historique complet.
+                        Text {
+                            Layout.fillWidth: true
+                            visible: reasoningPanel.historyNote !== ""
+                            text: reasoningPanel.historyNote
+                            color: Theme.textMuted
+                            font.family: Theme.fontMono
+                            font.pixelSize: Theme.fsCaption
+                            elide: Text.ElideRight
                         }
                     }
 
@@ -316,7 +367,7 @@ Item {
                         contentHeight: body.implicitHeight
                         // Reste collé en bas pendant le streaming — comme un tail -f.
                         onContentHeightChanged: {
-                            if (reasoningPanel.selectedHistoryIndex === -1 && reasoningPanel.anyStreaming)
+                            if (reasoningPanel.selectedHistoryId === "" && reasoningPanel.anyStreaming)
                                 contentY = Math.max(0, contentHeight - height)
                         }
 
@@ -328,20 +379,24 @@ Item {
                             font.pixelSize: Theme.fsMonoSm
                             color: Theme.textSecondary
                             text: {
-                                if (reasoningPanel.selectedHistoryIndex === -1) {
-                                    if (reasoningPanel.live.length === 0)
-                                        return "Aucune session autonome en cours."
-                                    // TODO(Phase 2.5): un onglet par entrée de `live` si
-                                    // plusieurs agents tournent en parallèle — squelette :
-                                    // on affiche la première ici.
-                                    var entry = reasoningPanel.live[0]
-                                    return entry.redacted
-                                        ? "Une partie du raisonnement a été chiffrée par les systèmes de sécurité du fournisseur — cela n'affecte pas la qualité de la réponse."
-                                        : (entry.text || "…")
+                                var isLive = reasoningPanel.selectedHistoryId === ""
+                                var entries = isLive ? reasoningPanel.live : reasoningPanel.selected
+                                if (entries.length === 0) {
+                                    if (isLive) return "Aucune session autonome en cours."
+                                    if (reasoningPanel.selectedLoading)
+                                        return "Chargement de la session…"
+                                    // La session existe (elle est dans la liste) mais
+                                    // son raisonnement est vide : capture coupée, ou
+                                    // rien de capté avant la fin.
+                                    return "Aucun raisonnement capté pour cette session."
                                 }
-                                // TODO(Phase 2.5): charger la session sélectionnée via
-                                // agent.thinking(session_id) — pas encore câblé ici.
-                                return "(chargement de la session sélectionnée — Phase 2.5)"
+                                // TODO(Phase 2.5): un onglet par entrée de `live` si
+                                // plusieurs agents tournent en parallèle — squelette :
+                                // on affiche la première ici.
+                                var entry = entries[0]
+                                return entry.redacted
+                                    ? "Une partie du raisonnement a été chiffrée par les systèmes de sécurité du fournisseur — cela n'affecte pas la qualité de la réponse."
+                                    : (entry.text || "…")
                             }
                         }
                     }

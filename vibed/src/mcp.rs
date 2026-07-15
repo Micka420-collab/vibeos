@@ -926,11 +926,15 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
         (
             "agent.sessions",
             Tier::T0,
-            "List the autonomous-session ids that have captured reasoning \
-             (/var/lib/vibeos/memory/reasoning/*.jsonl). Returns { sessions: [id...], \
-             count, latest } (lexical order; 'latest' is the last id). Read-only \
-             discovery so an observer (the HUD) can find a session to feed to \
-             agent.thinking. No arguments.",
+            "List the autonomous sessions that have captured reasoning \
+             (/var/lib/vibeos/memory/reasoning/*.jsonl). Returns { sessions: [{ id, \
+             started_unix (null if unknown), last_unix, bytes }...], count, total, \
+             truncated, latest }, newest activity first; 'latest' is the most \
+             recently appended session. Read-only discovery so an observer (the HUD) \
+             can find a session to feed to agent.thinking and render a history. \
+             Output is capped at 200 sessions ('total' reports how many exist). \
+             Carries no provider/model: the reasoning store does not hold them. \
+             No arguments.",
             json!({"type": "object", "properties": {}}),
         ),
         (
@@ -1104,15 +1108,35 @@ fn agent_thinking(args: &Value) -> Result<String, String> {
     serde_json::to_string(&out).map_err(|e| format!("agent.thinking: serialization failed: {e}"))
 }
 
-/// agent.sessions (T0): list the reasoning-session ids so an observer (the HUD)
-/// can discover a session to pass to `agent.thinking`. Read-only directory
-/// listing; no arguments, bounded output (one short id per captured session).
+/// agent.sessions (T0): list the captured reasoning sessions so an observer (the
+/// HUD) can both discover a session to pass to `agent.thinking` AND render a
+/// history without one `agent.thinking` call per session. Read-only; no
+/// arguments; output bounded by `REASONING_MAX_SESSIONS`, with `total` telling
+/// the caller how many exist so a truncated view can say so instead of implying
+/// it saw everything. Per-session cost is a stat plus a bounded first-line read
+/// (see `reasoning::list_sessions`) — never a full-file scan.
 fn agent_sessions() -> Result<String, String> {
-    let sessions = crate::reasoning::list_sessions(std::path::Path::new(MEMORY_DIR));
-    let latest = sessions.last().cloned();
+    let (sessions, total) = crate::reasoning::list_sessions(std::path::Path::new(MEMORY_DIR));
+    // Newest activity first, so the freshest session is the head of the list.
+    let latest = sessions.first().map(|s| s.id.clone());
+    let entries: Vec<Value> = sessions
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                // null when the start could not be read — an unknown start is
+                // reported as unknown, never back-filled from the mtime.
+                "started_unix": s.started_unix,
+                "last_unix": s.last_unix,
+                "bytes": s.bytes,
+            })
+        })
+        .collect();
     serde_json::to_string(&json!({
-        "sessions": sessions,
-        "count": sessions.len(),
+        "sessions": entries,
+        "count": entries.len(),
+        "total": total,
+        "truncated": total > entries.len(),
         "latest": latest,
     }))
     .map_err(|e| format!("agent.sessions: serialization failed: {e}"))
@@ -1751,11 +1775,39 @@ mod tests {
             "sessions must be an array: {out}"
         );
         assert!(out["count"].is_u64(), "count must be a number: {out}");
-        // 'latest' is null when empty, or the last id otherwise — both are valid.
+        assert!(out["total"].is_u64(), "total must be a number: {out}");
+        assert!(
+            out["truncated"].is_boolean(),
+            "truncated must be a bool: {out}"
+        );
+        // 'latest' is null when empty, or the newest id otherwise — both valid.
         assert!(
             out.get("latest").is_some(),
             "latest key must be present: {out}"
         );
+        // The listing never claims to have shown more than exists, and never
+        // hides that it truncated.
+        let (count, total) = (
+            out["count"].as_u64().unwrap(),
+            out["total"].as_u64().unwrap(),
+        );
+        assert!(count <= total, "count must never exceed total: {out}");
+        assert_eq!(
+            out["truncated"].as_bool().unwrap(),
+            count < total,
+            "truncated must agree with count vs total: {out}"
+        );
+        // Every entry carries the metadata the HUD history renders, so it never
+        // needs one agent.thinking call per session just to date it.
+        for entry in out["sessions"].as_array().unwrap() {
+            assert!(entry["id"].is_string(), "id must be a string: {entry}");
+            assert!(entry["last_unix"].is_u64(), "last_unix required: {entry}");
+            assert!(entry["bytes"].is_u64(), "bytes required: {entry}");
+            assert!(
+                entry["started_unix"].is_u64() || entry["started_unix"].is_null(),
+                "started_unix is a number or an honest null: {entry}"
+            );
+        }
         assert_eq!(tool_tier("agent.sessions"), Some(Tier::T0));
     }
 
