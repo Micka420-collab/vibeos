@@ -33,14 +33,37 @@ fn current_euid() -> Option<u32> {
 /// a `/proc/<pid>/status`. Fail-closed: returns `None` if the line or the field
 /// is absent — it never falls back to the real uid, so a privilege-dropped
 /// process (real=0, euid≠0) can never be read as root.
+///
+/// Requires EXACTLY ONE `Uid:` line, and fails closed on more. A real
+/// `/proc/<pid>/status` has one — but this parser reads the file as TEXT, and
+/// the first field of that file is `Name:`, taken from the process's `comm`,
+/// which is the basename of the executed file. Linux filenames may contain
+/// newlines (only `/` and NUL are forbidden), so `exec`ing a symlink named
+/// "\nUid:\t0\t0\t0" is a natural attempt at forging a *second* `Uid:` line that
+/// an earlier-wins parser would read first — and this parser gates
+/// `vibectl approve`, i.e. the human approval floor.
+///
+/// It does not work today: the kernel escapes `comm` when rendering status
+/// (`fs/proc/array.c` `proc_task_name(..., escape=true)` → `seq_escape_str(...,
+/// ESCAPE_SPACE|ESCAPE_SPECIAL, "\n\\")`), so a newline arrives as the two
+/// characters `\` `n` and no second line can exist. But that is an INCIDENTAL
+/// kernel guarantee this code has no business depending on silently. Demanding a
+/// single match removes the dependency: any forgery attempt yields two `Uid:`
+/// lines and we refuse.
+///
+/// Second, independent layer (unchanged): even a forged euid of 0 only passes
+/// `require_root`; `approval::approve` then reads a root-owned 0600 file and
+/// fails EACCES, minting nothing. `require_root` makes the boundary explicit —
+/// it is not what enforces it.
 fn parse_effective_uid(status: &str) -> Option<u32> {
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            // Uid: <real> <effective> <saved> <fs>
-            return rest.split_whitespace().nth(1).and_then(|s| s.parse().ok());
-        }
+    let mut hits = status.lines().filter_map(|l| l.strip_prefix("Uid:"));
+    let rest = hits.next()?;
+    if hits.next().is_some() {
+        // Two `Uid:` lines: a real status has one. Something is forging.
+        return None;
     }
-    None
+    // Uid: <real> <effective> <saved> <fs>
+    rest.split_whitespace().nth(1).and_then(|s| s.parse().ok())
 }
 
 fn now_epoch_secs() -> u64 {
@@ -53,6 +76,31 @@ fn now_epoch_secs() -> u64 {
 /// `vibectl approvals list` — pending human-approval requests.
 pub fn approvals_list() -> Value {
     json!({ "pending": approval::list_pending(Path::new(approval::APPROVAL_DIR)) })
+}
+
+/// Render an operator-facing value for a TERMINAL. SECURITY-RELEVANT: this is
+/// the single chokepoint through which attacker-controlled text reaches the human
+/// who decides an approval.
+///
+/// The pending record shows `{id, tool, target, tier, caller_uid}` and NOT the
+/// arguments, so this output is the ONLY basis for the decision — and `target`
+/// comes straight from the agent's own tool arguments. An agent that could smuggle
+/// a terminal escape in there would rewrite what the operator reads: `\r`
+/// overwrites the line, CSI erases it, `\n` forges a plausible extra row.
+/// Approving a request you did not actually read is the whole ballgame.
+///
+/// JSON encoding is what closes that: serde_json escapes all of 0x00–0x1F, so
+/// every control byte arrives as inert text. That was TRUE BEFORE THIS FUNCTION
+/// EXISTED, but only as a side effect of `to_string_pretty` being what the CLI
+/// happened to call — nothing named it, and nothing tested it. A later switch to
+/// a "nicer" table renderer would have reopened the whole class in silence.
+/// It now has a name, a reason, and a regression test
+/// (`attacker_controlled_fields_cannot_rewrite_the_operator_s_terminal`).
+///
+/// If you change how this renders: the invariant is NO RAW BYTE BELOW 0x20 may
+/// reach the terminal.
+pub fn render_for_operator(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
 /// Only the operator (root) may grant or deny approvals. The approval store is
@@ -781,6 +829,103 @@ mod tests {
         assert_eq!(parse_effective_uid("Uid:\t1000\n"), None);
         // No Uid line at all -> None.
         assert_eq!(parse_effective_uid("Gid:\t0\t0\t0\t0\n"), None);
+    }
+
+    #[test]
+    fn a_forged_second_uid_line_fails_closed_instead_of_winning() {
+        // `Name:` is the process's comm, i.e. the basename of the executed file,
+        // and Linux filenames may contain newlines. Exec'ing a symlink named
+        // "\nUid:\t0\t0\t0" is the natural attempt at forging a Uid: line that
+        // lands BEFORE the real one — and this parser gates `vibectl approve`.
+        //
+        // The kernel escapes comm when rendering status, so this shape cannot
+        // occur today. That is a kernel guarantee this code should not depend on
+        // silently: two Uid: lines means something is forging, so refuse.
+        let forged = "Name:\n\
+                      Uid:\t0\t0\t0\t0\n\
+                      Umask:\t0022\n\
+                      Uid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(
+            parse_effective_uid(forged),
+            None,
+            "a status with two Uid: lines must fail closed, not hand back root"
+        );
+        // ...including the reverse order: never trust EITHER match.
+        let forged_after = "Uid:\t1000\t1000\t1000\t1000\nUid:\t0\t0\t0\t0\n";
+        assert_eq!(parse_effective_uid(forged_after), None);
+        // A single, genuine line still works — the guard must not break the
+        // normal path.
+        assert_eq!(
+            parse_effective_uid("Name:\tvibectl\nUid:\t0\t0\t0\t0\n"),
+            Some(0)
+        );
+    }
+
+    /// The operator's approval decision is made from `approvals_list` output and
+    /// NOTHING else: the pending record carries {id, tool, target, tier,
+    /// caller_uid} and no arguments. `target` is fully attacker-controlled (it
+    /// comes from the agent's own tool arguments).
+    ///
+    /// So a hostile agent that could smuggle a terminal escape into `target`
+    /// could rewrite what the operator reads — `\r` overwrites the line, ANSI
+    /// erases it, `\n` forges an extra plausible row. Approving a request you did
+    /// not read is the whole ballgame.
+    ///
+    /// This is closed TODAY, but INCIDENTALLY: the rendering goes through
+    /// `serde_json::to_string_pretty`, whose escape table covers all of
+    /// 0x00–0x1F. Nothing in the code said so, and the day someone renders this
+    /// as a human-friendly table the entire class silently reopens. This test is
+    /// that missing statement.
+    ///
+    /// It deliberately exercises `render_for_operator` — the function the CLI
+    /// actually prints through — and NOT `to_string_pretty` directly. Asserting
+    /// on `to_string_pretty` would pin serde_json's behaviour, which nobody is
+    /// about to change, while the thing that WILL change (how vibectl renders)
+    /// walked free. That is how a test becomes theatre.
+    #[test]
+    fn attacker_controlled_fields_cannot_rewrite_the_operator_s_terminal() {
+        let hostile = json!({
+            "pending": [{
+                "id": "1-2-3",
+                "tool": "pkg.install",
+                // Every trick at once: CSI erase-line, carriage return, a forged
+                // second row, and a bell.
+                "target": "\u{1b}[2K\rpkg.install  vim\n  id: 9-9-9  target: vim\u{7}",
+                "tier": "T2",
+                "caller_uid": 1000,
+            }]
+        });
+        let rendered = render_for_operator(&hostile);
+
+        // No RAW control byte may reach the terminal. This is the invariant.
+        for (i, b) in rendered.bytes().enumerate() {
+            assert!(
+                b >= 0x20 || b == b'\n' || b == b'\t',
+                "raw control byte {b:#04x} at offset {i} would reach the operator's \
+                 terminal: {rendered}"
+            );
+        }
+        // Specifically: ESC and CR survive only as INERT text, and the forged
+        // row's newline cannot start a real line.
+        assert!(!rendered.contains('\u{1b}'), "raw ESC present");
+        assert!(!rendered.contains('\r'), "raw CR present");
+        assert!(!rendered.contains('\u{7}'), "raw BEL present");
+        assert!(
+            rendered.contains("\\u001b[2K\\rpkg.install"),
+            "the escape must be shown escaped, not executed: {rendered}"
+        );
+        // The forged row is one JSON string, not a line of its own: the only
+        // real newlines are the ones to_string_pretty itself emits, and none of
+        // them sits inside the target value.
+        let target_line = rendered
+            .lines()
+            .find(|l| l.contains("\"target\""))
+            .expect("target rendered on one line");
+        assert!(
+            target_line.contains("id: 9-9-9"),
+            "the forged row must stay INSIDE the target string, on its line: \
+             {target_line}"
+        );
     }
 
     // --- agent supervisor (ADR-012/013) ------------------------------------

@@ -244,9 +244,15 @@ fn main() -> ExitCode {
             }
         }
         ["approvals", "list"] => {
+            // render_for_operator, NOT a bare to_string_pretty: this output is
+            // the only basis for a human approval, and `target` in it comes
+            // straight from the agent's own arguments. See its doc comment —
+            // the JSON encoding is what stops a terminal escape from rewriting
+            // what the operator reads, and that is now a named, tested contract
+            // rather than a lucky side effect of the call site.
             println!(
                 "{}",
-                serde_json::to_string_pretty(&vibectl::approvals_list()).unwrap_or_default()
+                vibectl::render_for_operator(&vibectl::approvals_list())
             );
             ExitCode::SUCCESS
         }
