@@ -94,7 +94,10 @@ aucun chemin privilégié (invariant n°1 de `docs/ARCHITECTURE.md`).
    - `os.status` → uptime, loadavg, mémoire, montages ;
    - `memory.query` (`{"query": ""}`) → mémoire initialisée ? combien de fichiers ?
    - `agents.list` → roster confiné à l'uid appelant ;
-   - `agent.sessions` puis `agent.thinking` → raisonnement de la session courante.
+   - `agent.sessions` → liste datée des sessions (métadonnées : début, dernière
+     activité, poids) ; `agent.thinking` → raisonnement de la session courante.
+     Une session **passée** n'est lue qu'à la sélection de l'utilisateur, jamais
+     dans la boucle de poll.
 
 Le format exact des requêtes/réponses et le mappage du raisonnement vivent dans
 [`vibed_client.js`](vibed_client.js) — ils doivent rester alignés sur `vibed/src/mcp.rs`.
@@ -110,7 +113,8 @@ connecter. Sinon → état « hors ligne » (voir §5), jamais une erreur.
 | État du démon | ✅ **live** | connexion réelle au socket (`Quickshell.Io.Socket`), sonde de reconnexion périodique |
 | Statut système | ✅ **live** | `tools/call os.status` (T0) via le socket, poll 5 s |
 | État mémoire | ✅ **live** | `tools/call memory.query` (T0) via le socket |
-| Raisonnement des agents | ✅ **live** | `agent.sessions` (découverte de session) → `agent.thinking` (T0) via le socket ; `[]` tant qu'aucune session autonome n'a capté de raisonnement |
+| Raisonnement des agents | ✅ **live** | `agent.sessions` (découverte + métadonnées de session) → `agent.thinking` (T0) via le socket ; `[]` tant qu'aucune session autonome n'a capté de raisonnement |
+| Historique des sessions | ✅ **live** | `agent.sessions` (T0) : date de début, durée, poids par session, la plus récente d'abord ; sélectionner une session charge son raisonnement via `agent.thinking(session_id)`. Pas de fournisseur/modèle ni de compteur de tours — le store de raisonnement ne les porte pas (cf. ADR-012) |
 | Roster des agents + tiers | ✅ **live** | `agents.list` (T0, **confiné à l'uid appelant**, dérivé de l'audit, groupé par pid, soi-même exclu) via le socket ; `name` best-effort `/proc/<pid>/comm` |
 | Cadenas « approbation en attente » | ✅ **live** | `awaiting_approval` d'`agents.list` (une demande T2/T3 en attente pour l'uid) |
 | Jauge ollama / VRAM | ✅ **live** (probe local) | `GET 127.0.0.1:11434/api/ps` (modèle) + `nvidia-smi` via `Quickshell.Io.Process` (VRAM) — indépendant de vibed, `available:false` en cas d'échec |
@@ -142,9 +146,9 @@ est absent (c'est le cas nominal de la Phase 1) :
 | `shell.qml` | racine Quickshell : `PanelWindow` frosté (barre haute verre, ombre d'élévation, marque + état global + triptyque) qui compose les widgets, détient l'état et le point de branchement Phase 2 |
 | `AgentStatus.qml` | chips d'agents élevés : anneau-avatar signature (Mauve→Blue), nom, pastille de tier, élévation au survol, tooltip verre (activité/projet/durée) |
 | `PolicyTierIndicator.qml` | pastille de tier en dégradé + anneau conique T0–T3, glyphe cadenas dessiné et pulsation douce quand T2+ attend une approbation |
-| `ReasoningPanel.qml` | 3ᵉ pilier « pourquoi » : chip + popup verre du **raisonnement des agents** (live streaming + historique par session), toggle de capture, note de transparence (résumé fournisseur vs brut local). **`live` câblé** (règle d'honnêteté : ship avec `[]`, alimenté en direct par `agent.sessions`→`agent.thinking`, jamais le transcript CLI — `docs/DECISIONS.md` ADR-012) ; `history` (sessions passées) reste à brancher (Phase 2.5) |
+| `ReasoningPanel.qml` | 3ᵉ pilier « pourquoi » : chip + popup verre du **raisonnement des agents** (live streaming + historique par session), toggle de capture, note de transparence (résumé fournisseur vs brut local). **`live` et `history` câblés** (règle d'honnêteté : ship avec `[]`, alimentés en direct par `agent.sessions`→`agent.thinking`, jamais le transcript CLI — `docs/DECISIONS.md` ADR-012) ; sélectionner une session passée émet `historySelected` → `shell.qml` charge son raisonnement à la demande |
 | `OllamaGauge.qml` | anneau VRAM circulaire à dégradé (arc Canvas, cap arrondi) + modèle chargé + Gio, seuils Sky→Peach→Red, « — » honnête hors ligne |
-| `vibed_client.js` | formats JSON-RPC du socket MCP (alignés sur `vibed/src/mcp.rs`) : constructeurs de requêtes + parseurs (`os.status`, `memory.query`, `agents.list`, `agent.sessions`/`agent.thinking`) + mappeur de raisonnement `reasoningToLive` |
+| `vibed_client.js` | formats JSON-RPC du socket MCP (alignés sur `vibed/src/mcp.rs`) : constructeurs de requêtes + parseurs (`os.status`, `memory.query`, `agents.list`, `agent.sessions`/`agent.thinking`) + mappeurs `reasoningToLive` / `sessionsToHistory`. **`.pragma library`** → aucun accès à l'objet QML `Qt` : le formatage (dates/durées/octets) y est en ECMAScript pur, table des mois FR incluse, pour un rendu déterministe |
 
 > **Cohérence par les tokens.** `Theme.qml` transcrit `DESIGN-SYSTEM.md §12.2` et
 > l'étend (élévation, glows, dégradés, aides de tiers, drapeaux a11y). Cible image :

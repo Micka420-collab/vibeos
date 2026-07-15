@@ -98,14 +98,27 @@ function initializedNotification() {
 // tools/call for a named vibed tool. The HUD only ever calls T0 read-only
 // tools ("os.status", "memory.query"): it is strictly an observer.
 function toolsCallRequest(name, args) {
+    return toolsCallRequestId(name, args).line;
+}
+
+// Same request, but also hands back the JSON-RPC id. Needed when two calls to
+// the SAME tool are in flight with different arguments and must not be confused:
+// the poll tails the live session (agent.thinking, small tail) while a history
+// selection reads a chosen session (agent.thinking, larger tail). Routing those
+// on the tool name — or even on the session_id in the reply — makes the poll's
+// answer overwrite the selection's. The id is the only unambiguous correlation.
+function toolsCallRequestId(name, args) {
     var id = _nextId++;
     _pending[id] = name;
-    return JSON.stringify({
-        jsonrpc: "2.0",
+    return {
         id: id,
-        method: "tools/call",
-        params: { name: name, arguments: args || {} }
-    }) + "\n";
+        line: JSON.stringify({
+            jsonrpc: "2.0",
+            id: id,
+            method: "tools/call",
+            params: { name: name, arguments: args || {} }
+        }) + "\n"
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -124,35 +137,39 @@ function parseLine(line) {
 }
 
 // Unwraps a tools/call response into:
-//   { tool, ok: true,  data: <parsed payload object> }        on success
-//   { tool, ok: false, error: "<message>" }                    on tool error,
+//   { tool, id, ok: true,  data: <parsed payload object> }     on success
+//   { tool, id, ok: false, error: "<message>" }                 on tool error,
 //     policy denial, pending T2/T3 approval, or protocol error.
-// `tool` is recovered from the id -> name map filled by toolsCallRequest.
+// `tool` is recovered from the id -> name map filled by toolsCallRequest. `id`
+// is the JSON-RPC id echoed by the daemon, carried on EVERY shape (the error
+// shapes included — a caller waiting on a specific request must be able to stop
+// waiting when that request fails, not just when it succeeds).
 function parseToolResult(msg) {
+    var id = (msg && msg.id !== undefined) ? msg.id : -1;
     var tool = (msg && msg.id !== undefined) ? _pending[msg.id] : undefined;
     if (tool !== undefined)
         delete _pending[msg.id];
 
     if (!msg)
-        return { tool: tool, ok: false, error: "empty message" };
+        return { tool: tool, id: id, ok: false, error: "empty message" };
     if (msg.error)
-        return { tool: tool, ok: false,
+        return { tool: tool, id: id, ok: false,
                  error: msg.error.message || ("code " + msg.error.code) };
 
     var result = msg.result;
     if (!result || !result.content || result.content.length === 0)
-        return { tool: tool, ok: false, error: "malformed tool result" };
+        return { tool: tool, id: id, ok: false, error: "malformed tool result" };
 
     var text = result.content[0].text || "";
     if (result.isError === true)
-        return { tool: tool, ok: false, error: text };
+        return { tool: tool, id: id, ok: false, error: text };
 
     // The payload is a JSON string inside the MCP text block; some tools
     // could return plain text, so fall back to the raw string.
     try {
-        return { tool: tool, ok: true, data: JSON.parse(text) };
+        return { tool: tool, id: id, ok: true, data: JSON.parse(text) };
     } catch (e) {
-        return { tool: tool, ok: true, data: text };
+        return { tool: tool, id: id, ok: true, data: text };
     }
 }
 
@@ -184,6 +201,83 @@ function reasoningToLive(data) {
         streaming: lastKind === "thinking_delta",
         text: text
     }];
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers. This file is a `.pragma library`, so the QML `Qt` object
+// (Qt.formatDateTime) and Qt.locale are NOT reachable here — everything below is
+// plain ECMAScript. The month table keeps the rendering deterministic instead of
+// depending on the host locale, and matches the panel's French copy.
+// ---------------------------------------------------------------------------
+var MONTHS_FR = ["janv.", "févr.", "mars", "avr.", "mai", "juin",
+                 "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+
+function formatStamp(unix) {
+    var d = new Date(unix * 1000);
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    return d.getDate() + " " + MONTHS_FR[d.getMonth()] + " "
+         + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
+
+// Coarse, human duration: seconds under a minute, then minutes, then h+min.
+function formatDuration(seconds) {
+    if (seconds < 60) return Math.max(0, Math.round(seconds)) + " s";
+    if (seconds < 3600) return Math.round(seconds / 60) + " min";
+    var h = Math.floor(seconds / 3600);
+    var m = Math.round((seconds % 3600) / 60);
+    return m === 0 ? (h + " h") : (h + " h " + m);
+}
+
+function formatBytes(n) {
+    if (n < 1024) return n + " o";
+    if (n < 1024 * 1024) return Math.round(n / 1024) + " Kio";
+    return (n / (1024 * 1024)).toFixed(1) + " Mio";
+}
+
+// Map an agent.sessions payload ({ sessions:[{ id, started_unix, last_unix,
+// bytes }], count, total, truncated, latest }) into the ReasoningPanel `history`
+// shape ([{ sessionId, startedAt, durationLabel, sizeLabel }]).
+//
+// HONESTY: vibed sends `started_unix: null` when a session's first line could
+// not be read, so the label says so rather than substituting `last_unix` — an
+// unknown start must never render as a plausible one. `provider`/`model` are NOT
+// produced here: the reasoning store does not hold them (the supervisor writes
+// them to the memory journal as an `autonomous_session` record), so the panel
+// shows what the store actually knows. There is deliberately no turn count —
+// vibed would have to read every session end to end on each poll to produce one.
+function sessionsToHistory(data) {
+    if (!data || !data.sessions || data.sessions.length === 0) return [];
+    return data.sessions.filter(function (s) {
+        // A row with no usable id is dropped, not rendered. "" is the panel's
+        // sentinel for "the live view", so an empty sessionId would render a row
+        // that looks permanently selected and un-clickable (tapping it emits
+        // historySelected("") = go live). vibed already guarantees non-empty ids
+        // (reasoning::safe_session_id, and list_sessions filters every candidate
+        // through it) — but that is a cross-language guarantee, and this side
+        // should not depend on it silently.
+        return s && typeof s.id === "string" && s.id !== "";
+    }).map(function (s) {
+        var started = (typeof s.started_unix === "number") ? s.started_unix : null;
+        var last = (typeof s.last_unix === "number") ? s.last_unix : null;
+        var known = started !== null && last !== null && last >= started;
+        return {
+            sessionId: s.id || "",
+            startedAt: started !== null ? formatStamp(started) : "début inconnu",
+            durationLabel: known ? formatDuration(last - started) : "durée inconnue",
+            sizeLabel: formatBytes((typeof s.bytes === "number") ? s.bytes : 0)
+        };
+    });
+}
+
+// vibed caps the listing at 200 sessions and reports `total`/`truncated` so a
+// partial view can say so. Rendering 200 rows as if they were the whole history
+// would be exactly the kind of quiet lie the store-side code refuses to tell —
+// so turn that into a visible footer. "" when the view IS complete.
+function sessionsTruncationNote(data) {
+    if (!data || data.truncated !== true) return "";
+    var shown = (typeof data.count === "number") ? data.count : 0;
+    var total = (typeof data.total === "number") ? data.total : shown;
+    return shown + " sessions les plus récentes sur " + total;
 }
 
 // Map an agents.list payload ({ agents:[{ uid,pid,name,tier,activity,

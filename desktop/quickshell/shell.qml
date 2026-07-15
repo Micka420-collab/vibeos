@@ -62,6 +62,23 @@ ShellRoot {
     // agent.thinking). [] until a session exists; ReasoningPanel shows offline.
     property var reasoningLive: []
     property string reasoningSession: ""
+    // Past sessions (agent.sessions -> sessionsToHistory), newest first. [] while
+    // offline or before any session has been captured. Republished on every poll:
+    // ReasoningPanel diffs it into a ListModel in place, so a fresh array costs
+    // nothing and the user's scroll survives (see ReasoningPanel.applyHistory).
+    property var reasoningHistory: []
+    property string reasoningHistoryNote: ""
+    // Reasoning of the history entry the user picked, fetched on demand — the
+    // poll loop never tails a past session, only the live one.
+    property var reasoningSelected: []
+    property string reasoningSelectedId: ""
+    property bool reasoningSelectedPending: false
+    // Why the look-back failed ("" = no failure). Without it the panel would
+    // render a failure as "this session captured nothing" — a fabricated fact.
+    property string reasoningSelectedError: ""
+    // JSON-RPC id of the in-flight look-back. The poll also calls agent.thinking,
+    // so the reply is claimed by REQUEST id, never by tool name or session id.
+    property int reasoningSelectedReqId: -1
 
     // Derived global state (DESIGN-SYSTEM §11.4 "État global"):
     //   offline (gray) -> ready -> agents active (mauve) -> approval waiting (peach pulse).
@@ -91,9 +108,17 @@ ShellRoot {
                 root.pollVibed()
             } else {
                 // Lost the daemon: drop to the honest offline state, keep no
-                // stale "live" data around.
+                // stale "live" data around. The history goes too — it is a view
+                // of a store we can no longer read, not a local cache.
                 root.reasoningLive = []
                 root.reasoningSession = ""
+                root.reasoningHistory = []
+                root.reasoningHistoryNote = ""
+                root.reasoningSelected = []
+                root.reasoningSelectedId = ""
+                root.reasoningSelectedPending = false
+                root.reasoningSelectedError = ""
+                root.reasoningSelectedReqId = -1
             }
         }
     }
@@ -112,6 +137,32 @@ ShellRoot {
                 { session_id: root.reasoningSession, tail: 40 }))
     }
 
+    // Fetch one past session's reasoning, on user selection only. Deliberately
+    // NOT part of pollVibed: the history list is already fully rendered from
+    // agent.sessions metadata, so a session is read only when someone asks to
+    // read it. A larger tail than the live view — this is a look back, not a
+    // 5s-refresh — still bounded by vibed (REASONING_MAX_TAIL).
+    function requestSessionReasoning(sessionId) {
+        root.reasoningSelectedId = sessionId
+        root.reasoningSelected = []
+        root.reasoningSelectedReqId = -1
+        root.reasoningSelectedError = ""      // a new selection starts clean
+        root.reasoningSelectedPending = sessionId !== ""
+        if (!vibedSocket.connected || sessionId === "") {
+            // Nothing will ever answer, so do not leave the panel spinning.
+            root.reasoningSelectedPending = false
+            // Offline with a real selection: say so rather than let the panel
+            // conclude the session captured nothing.
+            if (sessionId !== "")
+                root.reasoningSelectedError = "vibed est hors ligne"
+            return
+        }
+        const req = Vibed.toolsCallRequestId("agent.thinking",
+            { session_id: sessionId, tail: 200 })
+        root.reasoningSelectedReqId = req.id
+        vibedSocket.write(req.line)
+    }
+
     Timer {   // steady poll while online
         interval: 5000; running: root.vibedOnline; repeat: true
         onTriggered: root.pollVibed()
@@ -126,7 +177,19 @@ ShellRoot {
     function handleVibedLine(line) {
         const msg = Vibed.parseLine(line); if (!msg) return
         const res = Vibed.parseToolResult(msg)
-        if (!res.ok) return
+        if (!res.ok) {
+            // A failed look-back (policy denial, rate limit, protocol error,
+            // malformed result) must stop the spinner — otherwise the panel
+            // claims to be loading forever. And it must RECORD WHY: without an
+            // error state the panel falls through to "this session captured
+            // nothing", which is a fabricated fact about the agent's history.
+            if (res.id === root.reasoningSelectedReqId) {
+                root.reasoningSelectedPending = false
+                root.reasoningSelectedReqId = -1
+                root.reasoningSelectedError = res.error || "erreur inconnue"
+            }
+            return
+        }
         if (res.tool === "os.status") {
             root.osStatus = res.data
         } else if (res.tool === "memory.query") {
@@ -140,8 +203,27 @@ ShellRoot {
                 root.reasoningSession = latest
                 if (latest === "") root.reasoningLive = []
             }
+            // The same payload already carries every session's metadata, so the
+            // history renders without one agent.thinking call per session.
+            // Republished unconditionally: ReasoningPanel diffs it into a
+            // ListModel and only touches the rows that moved, so the view is
+            // never reset and the user's scroll survives.
+            root.reasoningHistory = Vibed.sessionsToHistory(res.data)
+            root.reasoningHistoryNote = Vibed.sessionsTruncationNote(res.data)
         } else if (res.tool === "agent.thinking") {
-            root.reasoningLive = Vibed.reasoningToLive(res.data)
+            // Both the poll (live session, small tail) and a history look-back
+            // (chosen session, larger tail) land here on the same socket. Claim
+            // the reply by REQUEST id: routing on session_id would let the poll's
+            // 40-line answer overwrite the look-back's 200 lines whenever the
+            // user selects the session that happens to be live.
+            if (res.id === root.reasoningSelectedReqId) {
+                root.reasoningSelected = Vibed.reasoningToLive(res.data)
+                root.reasoningSelectedPending = false
+                root.reasoningSelectedError = ""   // it answered: no failure
+            }
+            const sid = (res.data && res.data.session_id) ? res.data.session_id : ""
+            if (sid !== "" && sid === root.reasoningSession)
+                root.reasoningLive = Vibed.reasoningToLive(res.data)
         }
     }
 
@@ -381,11 +463,20 @@ ShellRoot {
                 // socket (tapped from the CLI stream, never the CLI transcript —
                 // docs/DECISIONS.md ADR-012). `live` is [] until an autonomous
                 // session has captured reasoning; the chip then shows offline.
-                // `history` still awaits a listing mode of agent.thinking.
+                // HISTORY: the same agent.sessions payload carries each session's
+                // metadata; picking one fetches its reasoning on demand.
                 ReasoningPanel {
                     Layout.alignment: Qt.AlignVCenter
                     online: root.vibedOnline
                     live: root.reasoningLive
+                    history: root.reasoningHistory
+                    historyNote: root.reasoningHistoryNote
+                    selected: root.reasoningSelected
+                    selectedLoading: root.reasoningSelectedPending
+                    selectedError: root.reasoningSelectedError
+                    onHistorySelected: function (sessionId) {
+                        root.requestSessionReasoning(sessionId)
+                    }
                 }
 
                 // ---- hairline divider ----

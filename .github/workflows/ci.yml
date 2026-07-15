@@ -7,6 +7,11 @@
 #                 policy/parser mismatch fails this job.
 #   * audit       cargo audit (RustSec advisories) sur le Cargo.lock épinglé —
 #                 critère de sortie Phase 2 (ROADMAP.md §4).
+#   * hud-client  desktop/quickshell/vibed_client.js sous node (c'est une
+#                 `.pragma library` : de l'ECMAScript pur, donc exécutable sans
+#                 Qt). Seul contrôle automatisé de la couche qui traduit le
+#                 format de vibed en ce que l'utilisateur lit ; le RENDU QML
+#                 reste machine-gated (pas de Quickshell headless).
 #   * shellcheck  memory/genesis.sh (first-boot Genesis script) and
 #                 os/rootfs/usr/bin/vibeos-hud (HUD launcher)
 #   * policy      quick schema validation of security/policy.d/*.toml with
@@ -25,6 +30,7 @@ on:
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
       - "os/rootfs/usr/lib/systemd/system-generators/**"
+      - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
   pull_request:
@@ -35,6 +41,7 @@ on:
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
       - "os/rootfs/usr/lib/systemd/system-generators/**"
+      - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
 
@@ -127,6 +134,23 @@ jobs:
         run: cargo build --locked
       - name: Test (locked)
         run: cargo test --locked
+
+  hud-client:
+    name: HUD client (JS) — mappers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # desktop/quickshell/vibed_client.js is a QML `.pragma library`: plain
+      # ECMAScript, so it runs under the runner's preinstalled node without Qt.
+      # This is the ONLY automated check on the layer that turns vibed's wire
+      # format into what the user reads — the QML rendering itself stays
+      # machine-gated (no Quickshell headless). No new toolchain: node ships
+      # with ubuntu-latest.
+      - name: HUD client checks
+        run: node scripts/check-hud-client.js
 
   shellcheck:
     name: scripts shell — shellcheck

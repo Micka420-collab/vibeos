@@ -28,6 +28,12 @@ pub const REASONING_MAX_LINE_BYTES: usize = 64 * 1024;
 pub const REASONING_MAX_TAIL: usize = 500;
 /// Default tail when the caller does not specify one.
 pub const REASONING_DEFAULT_TAIL: usize = 100;
+/// Hard cap on how many sessions `list_sessions` ever returns. The store grows
+/// one file per autonomous run and is never purged automatically (retention is
+/// still open — ADR-012), so an uncapped listing would make a repeatable T0 call
+/// return an ever-growing response. Newest activity wins; the caller is told the
+/// true total so it can say "showing N of M" rather than pretend it saw all.
+pub const REASONING_MAX_SESSIONS: usize = 200;
 
 /// `O_NOFOLLOW` (Linux): refuse to open a final component that is a symlink.
 const O_NOFOLLOW: i32 = 0x20000;
@@ -188,22 +194,106 @@ fn read_tail_string(path: &Path, cap: u64) -> Option<(String, bool)> {
     Some((String::from_utf8_lossy(&bytes).into_owned(), true))
 }
 
-/// List the session ids that have a reasoning file (newest activity first is not
-/// guaranteed — sorted lexically). For a future `agent.thinking` listing mode.
-pub fn list_sessions(root: &Path) -> Vec<String> {
+/// What is known about one captured session WITHOUT reading its whole file.
+/// `bytes`/`last_unix` come from a stat; `started_unix` from a bounded read of
+/// the first line only. Deliberately carries no `provider`/`model`: the store
+/// does not hold them (the supervisor records those in the memory journal, as an
+/// `autonomous_session` record) and this listing never guesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    pub id: String,
+    /// `ts_unix` of the first captured block, or `None` when the first line is
+    /// absent, truncated past `READ_HEAD_CAP`, or unparsable — never guessed.
+    pub started_unix: Option<u64>,
+    /// Last append, taken from the file mtime rather than a block timestamp: the
+    /// store is strictly append-only, so mtime IS when the newest block landed,
+    /// and it costs a stat instead of a tail read.
+    pub last_unix: u64,
+    pub bytes: u64,
+}
+
+/// List captured reasoning sessions, newest activity first, capped at
+/// `REASONING_MAX_SESSIONS`. Returns `(sessions, total_present)`.
+///
+/// Cost is bounded BY CONSTRUCTION, because this backs a repeatable T0 tool that
+/// the HUD polls: every candidate is only stat'ed (cheap), the window is sorted
+/// and truncated FIRST, and only the surviving `REASONING_MAX_SESSIONS` files
+/// have their first line read. Counting lines exactly would mean reading every
+/// file end to end on every poll — a multi-MB-per-call amplification vector — so
+/// this exposes `bytes` (free, from the stat) and never a turn count.
+pub fn list_sessions(root: &Path) -> (Vec<SessionMeta>, usize) {
     let dir = root.join(REASONING_SUBDIR);
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    let mut ids: Vec<String> = entries
+    // Stat-only pass: (id, last_unix, bytes). No file content is read here.
+    let mut rows: Vec<(String, u64, u64)> = entries
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            name.strip_suffix(".jsonl").map(str::to_string)
+            let id = name.strip_suffix(".jsonl")?.to_string();
+            // The store is ours, but never hand back a filename that could not
+            // round-trip through `agent.thinking` — an id outside the safe
+            // charset is unusable to the caller, so it is not listed.
+            safe_session_id(&id)?;
+            let md = e.metadata().ok()?;
+            if !md.is_file() {
+                return None;
+            }
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            Some((id, mtime, md.len()))
         })
         .collect();
-    ids.sort();
-    ids
+
+    let total = rows.len();
+    // Newest activity first. The id breaks ties so the order stays deterministic
+    // when two files share an mtime second. This replaces an earlier lexical
+    // sort, which only looked chronological because ids happen to embed a
+    // fixed-width timestamp — any other id shape silently broke `latest`.
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    rows.truncate(REASONING_MAX_SESSIONS);
+
+    let sessions = rows
+        .into_iter()
+        .map(|(id, last_unix, bytes)| {
+            let started_unix = first_block_ts(&session_file(root, &id));
+            SessionMeta {
+                id,
+                started_unix,
+                last_unix,
+                bytes,
+            }
+        })
+        .collect();
+    (sessions, total)
+}
+
+/// Cap on how many bytes are read to recover a session's first line. A line is
+/// capped at `REASONING_MAX_LINE_BYTES` on write, so this window always holds a
+/// complete first line for a file we wrote — and bounds the work for one we did
+/// not.
+const READ_HEAD_CAP: u64 = REASONING_MAX_LINE_BYTES as u64;
+
+/// `ts_unix` of the first line of a session file, read within `READ_HEAD_CAP`.
+/// `None` when the file is empty, its first line overruns the cap, or it carries
+/// no `ts_unix` — the caller then reports an unknown start rather than a guess.
+fn first_block_ts(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(READ_HEAD_CAP).read_to_end(&mut bytes).ok()?;
+    let head = String::from_utf8_lossy(&bytes);
+    // A complete line always ends in '\n' (`append_thinking` appends one). If the
+    // cap cut the line short there is no terminator, so refuse to parse it.
+    let line = head.split_once('\n')?.0;
+    serde_json::from_str::<Value>(line)
+        .ok()?
+        .get("ts_unix")
+        .and_then(Value::as_u64)
 }
 
 #[cfg(test)]
@@ -318,12 +408,94 @@ mod tests {
     }
 
     #[test]
-    fn list_sessions_returns_ids() {
+    fn list_sessions_returns_metadata_newest_first() {
         let root = scratch("list");
-        append_thinking(&root, "alpha", &json!({}), 1).unwrap();
-        append_thinking(&root, "beta", &json!({}), 1).unwrap();
-        let ids = list_sessions(&root);
-        assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
+        append_thinking(&root, "alpha", &json!({}), 111).unwrap();
+        append_thinking(&root, "alpha", &json!({}), 222).unwrap();
+        append_thinking(&root, "beta", &json!({}), 333).unwrap();
+
+        let (sessions, total) = list_sessions(&root);
+        assert_eq!(total, 2);
+        assert_eq!(sessions.len(), 2);
+
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(&"alpha") && ids.contains(&"beta"),
+            "both sessions listed: {ids:?}"
+        );
+
+        let alpha = sessions.iter().find(|s| s.id == "alpha").unwrap();
+        // `started_unix` is the FIRST block's ts, not the last — the whole point
+        // of reading the head rather than the tail.
+        assert_eq!(alpha.started_unix, Some(111));
+        assert!(alpha.bytes > 0, "bytes comes from the stat: {alpha:?}");
+        // mtime is wall-clock, unrelated to the `ts_unix` we stamped.
+        assert!(alpha.last_unix > 0, "last_unix from mtime: {alpha:?}");
+
+        let beta = sessions.iter().find(|s| s.id == "beta").unwrap();
+        assert_eq!(beta.started_unix, Some(333));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_sessions_is_capped_but_reports_the_true_total() {
+        // NB: the scratch tag must be unique across this module — `scratch`
+        // wipes the directory, so a shared tag makes parallel tests race.
+        let root = scratch("listcap");
+        let over = REASONING_MAX_SESSIONS + 5;
+        for i in 0..over {
+            append_thinking(&root, &format!("s{i:04}"), &json!({}), i as u64).unwrap();
+        }
+        let (sessions, total) = list_sessions(&root);
+        // The listing is bounded, but never lies about how much exists: a caller
+        // can tell it is seeing a window.
+        assert_eq!(sessions.len(), REASONING_MAX_SESSIONS);
+        assert_eq!(total, over);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_sessions_reports_unknown_start_rather_than_guessing() {
+        let root = scratch("badhead");
+        append_thinking(&root, "good", &json!({}), 42).unwrap();
+        // A file in the store that we did not write cleanly: empty, and one whose
+        // first line is not JSON. Neither may fabricate a start timestamp.
+        let dir = root.join(REASONING_SUBDIR);
+        std::fs::write(dir.join("empty.jsonl"), b"").unwrap();
+        std::fs::write(dir.join("garbage.jsonl"), b"not json at all\n").unwrap();
+
+        let (sessions, total) = list_sessions(&root);
+        assert_eq!(total, 3);
+        let started = |id: &str| sessions.iter().find(|s| s.id == id).unwrap().started_unix;
+        assert_eq!(started("good"), Some(42));
+        assert_eq!(started("empty"), None, "empty file -> unknown start");
+        assert_eq!(started("garbage"), None, "unparsable head -> unknown start");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_sessions_skips_unusable_names() {
+        let root = scratch("names");
+        append_thinking(&root, "real", &json!({}), 1).unwrap();
+        let dir = root.join(REASONING_SUBDIR);
+        // Not a .jsonl -> not a session file at all.
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        // A .jsonl whose stem could never round-trip through `agent.thinking`
+        // (safe_session_id rejects "..") must not be handed to the caller.
+        std::fs::write(dir.join("a..b.jsonl"), b"{}\n").unwrap();
+
+        let (sessions, total) = list_sessions(&root);
+        assert_eq!(total, 1, "only the usable session counts: {sessions:?}");
+        assert_eq!(sessions[0].id, "real");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_sessions_on_missing_store_is_empty_not_error() {
+        let root = scratch("nostore");
+        let (sessions, total) = list_sessions(&root.join("never-created"));
+        assert!(sessions.is_empty());
+        assert_eq!(total, 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
