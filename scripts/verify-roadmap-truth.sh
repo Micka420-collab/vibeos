@@ -141,24 +141,60 @@ for f in glob.glob("vibed/**/*.rs", recursive=True):
     txt = pathlib.Path(f).read_text(encoding="utf-8")
     real_tests += len(re.findall(r"#\[(?:tokio::)?test\]", txt))
 
-# Annoncé = le plus GRAND « N tests » cité dans ROADMAP/STATUS (les entrées
-# datées passées sont légitimement plus basses ; la valeur courante devrait être
-# le maximum et devrait égaler le réel).
-claims = []
-CLAIM_RE = re.compile(r"(\d+)\s+tests?\b")
-for doc in ("ROADMAP.md", "STATUS.md"):
-    for i, line in lines(doc):
-        for m in CLAIM_RE.finditer(line):
-            claims.append((doc, i, int(m.group(1))))
-if claims and real_tests:
-    top = max(claims, key=lambda c: c[2])
-    if top[2] != real_tests:
-        warn.append(
-            f"compteur de tests : plus grand annoncé = {top[2]} "
-            f"({top[0]}:{top[1]}), réel #[test]+#[tokio::test] dans vibed/ = "
-            f"{real_tests}. Si {top[2]} se veut le total courant, il a dérivé "
-            f"(les entrées datées plus basses sont normales)."
-        )
+# Annoncé = tout « N tests » cité dans les documents d'ÉTAT COURANT.
+#
+# STATUS.md est délibérément EXCLU de ce check : c'est un JOURNAL
+# CHRONOLOGIQUE. Ses entrées datées (114 → 140 → 145 → 149 …) étaient correctes
+# à leur date et ne doivent JAMAIS être réécrites — les corriger serait réécrire
+# l'histoire. Or ce check comparait autrefois le plus GRAND compteur de STATUS au
+# réel : comme la dernière entrée datée est par construction en retard dès qu'un
+# test est ajouté, il criait au loup À CHAQUE FOIS, pour toujours, et sans jamais
+# regarder l'endroit où vit vraiment l'affirmation d'état courant (les README).
+# Un garde-fou qui avertit en permanence finit ignoré — c'est pire qu'aucun
+# garde-fou. (Corrigé le 2026-07-15, après l'avoir observé faire exactement ça.)
+#
+# ROADMAP.md est exclu pour la MÊME raison, moins évidente : son unique compteur
+# vit dans un RÉCIT daté (« faits ce soir, chacun vérifié (148 tests) », tableau
+# de dette F6) — de l'histoire, pas une affirmation d'état.
+#
+# Restent les README : la FACE du projet, le seul endroit qui affirme un total
+# COURANT. Les 4 sont vérifiés séparément contre le réel — pas de « plus grand
+# gagne » : une TRADUCTION qui a dérivé pendant que le français est juste est
+# précisément ce qu'on veut voir (c'est arrivé : #46 figeait 149 dans en/es/de).
+CURRENT_STATE_DOCS = ["README.md", "README.en.md", "README.es.md", "README.de.md"]
+# Le nombre et le mot « tests » ne se touchent pas dans toutes les langues :
+# « 175 tests verts » (fr) mais « 175 GREEN tests » (en), « 175 GRÜNE
+# `vibed`-Tests » (de), « 175 pruebas en verde » (es). Un `\s+tests` littéral ne
+# voyait donc QUE le français — et ratait les traductions, exactement là où la
+# dérive est le plus probable (vérifié : une dérive injectée en anglais passait
+# au travers). D'où le lookahead à fenêtre courte.
+CLAIM_RE = re.compile(
+    r"(\d+)(?=.{0,24}?\b(?:tests?|pruebas?)\b)", re.IGNORECASE
+)
+if real_tests:
+    for doc in CURRENT_STATE_DOCS:
+        if not (ROOT / doc).exists():
+            continue
+        for i, line in lines(doc):
+            # PAS de filtre FUTURE_MARKERS ici — contrairement au check B. Un
+            # compteur de tests parle du PRÉSENT, quoi que la ligne dise par
+            # ailleurs, et la phrase de statut des README énumère justement ce qui
+            # « reste à venir » dans la même phrase que le total actuel. Le filtre
+            # sautait donc la ligne 30 du README **français** (« Restent à venir »)
+            # tout en gardant l'anglaise (« Still to come ») : le check ne voyait
+            # pas la langue canonique du projet. Trouvé en injectant une dérive
+            # dans les 4 langues — FR passait au travers, les 3 autres non.
+            for m in CLAIM_RE.finditer(line):
+                claimed = int(m.group(1))
+                # Les décompositions (« dont 9 tests d'intégration ») sont des
+                # sous-ensembles légitimes : seul un compteur >= 100 se veut le
+                # total du crate (le plus petit décompte partiel est loin dessous).
+                if claimed >= 100 and claimed != real_tests:
+                    warn.append(
+                        f"compteur de tests : {doc}:{i} annonce {claimed}, réel "
+                        f"#[test]+#[tokio::test] dans vibed/ = {real_tests}. "
+                        f"(STATUS.md est un journal daté et n'est pas vérifié ici.)"
+                    )
 
 
 # --- Check D (WARNING) : PR citées « mergées » présentes dans l'historique ----
