@@ -368,10 +368,24 @@ RUN dnf -y config-manager addrepo --from-repofile=https://mise.jdx.dev/rpm/mise.
 # jemalloc / qt6-qtsvg : runtime dependencies of the quickshell binary built
 #           in the quickshell-builder stage (Requires: of the Fedora spec;
 #           qt6-qtsvg is already in the Kinoite base — kept explicit).
+# plymouth-plugin-script : REQUIRED by the VibeOS boot theme, which declares
+#           ModuleName=script (desktop/plymouth/vibeos/vibeos.plymouth) — that
+#           module lives in this subpackage, and Fedora's default boot theme does
+#           not use it, so nothing else pulls it in. Without it the theme copied
+#           at layer 8 could never render: the day Phase 5 flips the default,
+#           plymouth would fall back instead. Installing it does NOT activate
+#           anything (activation = plymouth-set-default-theme + initramfs
+#           regeneration, still Phase 5); it only removes a trap laid for that day.
+# plymouth-plugin-label : the theme's Image.Text() (LUKS prompt, boot messages)
+#           needs a label renderer. Fedora's default theme already pulls this in
+#           — kept explicit for the same reason as qt6-qtsvg: the boot splash must
+#           not depend on what the base image happens to ship today.
 RUN dnf -y install --setopt=install_weak_deps=False \
         kvantum \
         jemalloc \
         qt6-qtsvg \
+        plymouth-plugin-script \
+        plymouth-plugin-label \
     && dnf clean all
 
 # =============================================================================
@@ -576,7 +590,10 @@ COPY --chmod=0755 memory/genesis.sh /usr/libexec/vibeos/genesis.sh
 #                       out-of-box default (Global Theme defaults: [Wallpaper]
 #                       Image=VibeOS), "VibeOSVerou" is the lock-screen default
 #                       (kscreenlockerrc), Genesis/Void stay in the picker
-#   * SDDM/Plymouth  -> present; switched on at branding (Phase 5)
+#   * SDDM/Plymouth  -> present; switched on at branding (Phase 5). The Plymouth
+#                       theme's script/label modules ARE installed (layer 1g), so
+#                       "present" now means renderable — it used to mean "copied,
+#                       but its module was missing from the image".
 COPY desktop/theme/vibeos-dark.colors /usr/share/color-schemes/VibeOSDark.colors
 COPY desktop/look-and-feel/org.vibeos.dark /usr/share/plasma/look-and-feel/org.vibeos.dark
 COPY desktop/wallpapers/VibeOS /usr/share/wallpapers/VibeOS

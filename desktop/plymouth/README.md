@@ -53,7 +53,9 @@ VibeOS est immuable (bootc/OSTree) : **rien n'est écrit dans `/usr` à l'exécu
 desktop/plymouth/vibeos/*   →   /usr/share/plymouth/themes/vibeos/*
 ```
 
-La copie est effectuée par le **chantier os** (référencé en commentaire d'en-tête de chaque fichier — on n'édite pas `os/Containerfile` depuis ce dossier). Paquet requis : `plymouth-plugin-script`.
+La copie est effectuée par le **chantier os** (référencé en commentaire d'en-tête de chaque fichier — on n'édite pas `os/Containerfile` depuis ce dossier).
+
+**Paquets requis — installés (2026-07-15)** : `plymouth-plugin-script` (le thème déclare `ModuleName=script` ; ce module vit dans ce sous-paquet, et le thème de boot par défaut de Fedora ne l'utilise pas, donc **rien d'autre ne le tire**) et `plymouth-plugin-label` (rendu de `Image.Text()` : invite LUKS, messages de boot). Ils étaient **documentés ici mais absents de l'image** : le thème copié n'aurait donc pas pu se rendre le jour où la Phase 5 l'active — Plymouth serait retombé sur le thème par défaut. Les installer **n'active rien** (l'activation reste `plymouth-set-default-theme` + régénération de l'initramfs, ci-dessous).
 
 ---
 
