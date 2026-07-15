@@ -212,11 +212,30 @@ jobs:
           assert ev["type"] == "genesis" and ev["source"] == "genesis.sh"
           print("Genesis smoke test OK")
           PY
-          # Idempotency: a second run must change nothing.
+          # Idempotency, take 1 — the GUARD: with the sentinel present the script
+          # must exit immediately and touch nothing.
           before="$(find "$T/mem" -type f | sort | xargs sha256sum)"
           VIBEOS_MEMORY_DIR="$T/mem" bash memory/genesis.sh
           after="$(find "$T/mem" -type f | sort | xargs sha256sum)"
           test "$before" = "$after"  # no rewrite on second run
+
+          # Idempotency, take 2 — RE-ENTRANCY, which take 1 never reached.
+          # Removing the sentinel simulates the real crash case: power loss
+          # between the last step and the sentinel. The script then REPLAYS every
+          # step, which is the only path that actually exercises them. The
+          # header's crash-safety claim lives or dies here.
+          #
+          # The specific trap: the journal entry is an APPEND (the journal is
+          # append-only by contract, so it cannot overwrite like the other steps).
+          # Unguarded, a replay stamps a SECOND birth — two genesis events, with
+          # identity.toml contradicting journal line 1.
+          rm -f "$T/mem/.initialized"
+          VIBEOS_MEMORY_DIR="$T/mem" bash memory/genesis.sh
+          test -f "$T/mem/.initialized"   # the replay completes
+          births="$(grep -ho '"type":"genesis"' "$T"/mem/journal/*.jsonl | wc -l)"
+          test "$births" -eq 1 \
+            || { echo "FAIL: replayed partial run stamped $births births, expected 1"; exit 1; }
+          echo "Genesis re-entrancy OK (replay after a partial run: still one birth)"
           # Amnesic marker written by genesis event data.
           VIBEOS_MEMORY_DIR="$T/mem2" VIBEOS_MEMORY_MODE=amnesic bash memory/genesis.sh
           grep -q '^mode = "amnesic"' "$T/mem2/identity.toml"
