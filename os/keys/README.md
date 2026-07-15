@@ -67,6 +67,31 @@ curl -fsSLO https://download.vscodium.com/rpms/repodata/repomd.xml.asc
 gpg --homedir "$d" --verify repomd.xml.asc repomd.xml
 ```
 
+## ⚠️ Piège : `gpgkey=file://` + dépôt ACTIVÉ casse la construction de l'ISO
+
+Découvert le 2026-07-15, au tag `v0.2.0-dev` : les deux jobs ISO ont échoué sur
+
+```
+Curl error (37): Could not read a file:// file for
+file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mise
+error: cannot build manifest: cannot depsolve
+```
+
+**Pourquoi.** `bootc-image-builder` fait un *depsolve* en lisant les `.repo` de
+l'image — mais **depuis son propre conteneur**, où `/etc/pki/rpm-gpg/…` n'existe
+pas. La clé est bien dans l'image ; elle n'est pas là où dnf la cherche.
+
+**Correctif** (déjà appliqué) : les dépôts vendeurs sont écrits **`enabled=0`** et
+activés seulement pour leur transaction (`--enablerepo=`), exactement comme les
+COPR. Un dépôt désactivé n'est jamais résolu → le depsolve l'ignore → l'ISO se
+construit, et l'image déployée est **plus stricte** qu'avant. **Ne pas les
+réactiver.**
+
+**Pourquoi la CI ne l'a pas vu.** Sur une PR, `build-os` ne fait qu'un **build de
+vérification amd64** : le job ISO ne tourne **qu'en release** (tag `v*`). Une
+régression d'ISO passe donc la CI au vert et ne sort qu'au moment du tag. À garder
+en tête pour toute modification de `os/Containerfile` touchant les dépôts.
+
 ## Rotation
 
 Un éditeur qui tourne sa clé **casse le build, bruyamment** — c'est le

@@ -373,19 +373,36 @@ COPY os/keys/RPM-GPG-KEY-vscodium os/keys/RPM-GPG-KEY-mise /etc/pki/rpm-gpg/
 # upstream file: gpgkey points at the pinned key on disk, and repo_gpgcheck=1 is
 # enabled (upstream ships repomd.xml.asc but does not ask dnf to check it).
 # gpgcheck stays enforced end-to-end for future rebuilds.
+#
+# enabled=0 + --enablerepo pour l'install : MÊME discipline que les COPR
+# ci-dessus (« activé pour l'install, DÉSACTIVÉ avant la fin de la couche — un
+# système déployé ne fait jamais confiance à un dépôt tiers à l'exécution »).
+#
+# Ce n'est pas que de l'hygiène, c'est un BUG CORRIGÉ : laissé `enabled=1` avec
+# `gpgkey=file://`, ce dépôt CASSE LA CONSTRUCTION DE L'ISO. bootc-image-builder
+# fait un depsolve en lisant les .repo de l'image, mais depuis SON PROPRE
+# conteneur — où /etc/pki/rpm-gpg/… n'existe pas. dnf résout alors le file://
+# chez lui et meurt : « Curl error (37): Could not read a file:// file … cannot
+# depsolve ». Un dépôt DÉSACTIVÉ n'est jamais résolu : le problème disparaît, et
+# l'image déployée est plus stricte qu'avant.
+#
+# Piège à connaître : ce chemin n'est PAS couvert par les PR. Sur une PR,
+# build-os ne fait qu'un build de vérification amd64 — le job ISO ne tourne qu'en
+# release (tag v*). Une régression d'ISO passe donc la CI au vert et ne sort
+# qu'au tag (c'est exactement ce qui est arrivé le 2026-07-15).
 RUN set -eux \
     && rpmkeys --import /etc/pki/rpm-gpg/RPM-GPG-KEY-mise \
     && printf '%s\n' \
         '[mise-repo]' \
         'name=mise' \
         'baseurl=https://mise.jdx.dev/rpm' \
-        'enabled=1' \
+        'enabled=0' \
         'gpgcheck=1' \
         'repo_gpgcheck=1' \
         'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mise' \
         'metadata_expire=1h' \
         > /etc/yum.repos.d/mise.repo \
-    && dnf -y install --setopt=install_weak_deps=False mise \
+    && dnf -y --enablerepo=mise-repo install --setopt=install_weak_deps=False mise \
     && dnf clean all
 
 # --- 1g. Desktop chrome runtime (Phase 2 — HUD + Global Theme) ----------------
@@ -420,8 +437,12 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 #    LICENSING: official VS Code binaries are proprietary and NOT redistributable
 #    in an ISO (see docs/ECOSYSTEM.md). VSCodium is the MIT build of the same
 #    codebase, wired to the Open VSX marketplace (where Cline/Continue publish).
-#    Shipping the .repo file in /etc means `dnf update codium` also works inside
-#    future image rebuilds; gpgcheck stays enforced end-to-end.
+#    The .repo file still ships in /etc so a rebuild can update codium — but
+#    DISABLED, like the COPRs above: a deployed system never trusts a third-party
+#    repo at runtime, and `--enablerepo=vscodium` turns it on only for this
+#    transaction. gpgcheck stays enforced end-to-end.
+#    (An enabled repo with gpgkey=file:// also BREAKS the ISO build — see the
+#    long note on the mise repo above. Do not re-enable it.)
 #
 #    The signing key is imported from the PINNED copy on disk (see the COPY in
 #    §1e-bis and os/keys/README.md), and gpgkey= points at that local path. It
@@ -434,13 +455,13 @@ RUN set -eux \
         '[vscodium]' \
         'name=VSCodium' \
         'baseurl=https://download.vscodium.com/rpms/' \
-        'enabled=1' \
+        'enabled=0' \
         'gpgcheck=1' \
         'repo_gpgcheck=1' \
         'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-vscodium' \
         'metadata_expire=1h' \
         > /etc/yum.repos.d/vscodium.repo \
-    && dnf -y install codium \
+    && dnf -y --enablerepo=vscodium install codium \
     && dnf clean all
 
 # =============================================================================
