@@ -58,7 +58,11 @@ if [ -S "$socket" ]; then
 else
     echo "no socket at $socket — starting a scratch vibed (rootless)"
     have cargo || { echo "cargo needed to build vibed, or point VIBED_SOCKET at a running one"; exit 1; }
-    ( cd "$repo_root/vibed" && cargo build --release --locked )
+    # --features dev-overrides: the VIBED_SOCKET / VIBED_POLICY_DIR /
+    # VIBED_AUDIT_DIR overrides used just below are compiled OUT of the daemon by
+    # default, so the shipped image cannot be redirected by its environment. This
+    # harness is the one place that turns them on — a rootless scratch run.
+    ( cd "$repo_root/vibed" && cargo build --release --locked --features dev-overrides )
     run_dir="$(mktemp -d)"
     socket="$run_dir/mcp.sock"
     VIBED_SOCKET="$socket" \
