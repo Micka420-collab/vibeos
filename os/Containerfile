@@ -83,7 +83,7 @@ ARG QUICKSHELL_SHA256=337bab5d4badb92e51d01ac1cfbeaeb784478bad82f3c8297fd7be42a6
 # (rawhide, 0.2.1): rich deps (cmake()/pkgconfig()) let dnf resolve the right
 # Fedora 44 package names instead of hardcoding them.
 RUN dnf -y install --setopt=install_weak_deps=False \
-        cmake ninja-build gcc-c++ curl-minimal tar gzip \
+        cmake ninja-build gcc-c++ curl tar gzip \
         'cmake(Qt6Core)' 'cmake(Qt6Qml)' \
         'cmake(Qt6CorePrivate)' 'cmake(Qt6QuickPrivate)' \
         'cmake(Qt6ShaderTools)' 'cmake(Qt6WaylandClient)' \
@@ -135,7 +135,8 @@ RUN set -eu; \
 # WITH_ZED_AGENT=1 — the selector below keeps it out of the default graph.
 # -----------------------------------------------------------------------------
 FROM registry.fedoraproject.org/fedora:44 AS zed-agent-builder
-RUN dnf -y install nodejs npm && dnf clean all
+# Voir la note nodejs24 de la couche 1a : f44 n'a plus de metapaquet `nodejs`.
+RUN dnf -y install nodejs24 nodejs24-npm && dnf clean all
 WORKDIR /src/ext
 # Copy only the build inputs — never a pre-existing node_modules/ or dist/ from
 # the context (npm ci rebuilds from the lockfile; the bundle is regenerated).
@@ -184,6 +185,14 @@ ARG NVIDIA_ENABLED=1
 # =============================================================================
 
 # --- 1a. Core development toolchain ------------------------------------------
+# nodejs24 / nodejs24-npm, et NON `nodejs` / `npm` : f44 a retiré les
+# métapaquets non versionnés — il n'existe plus que des streams (nodejs20 /
+# nodejs22 / nodejs24), et `dnf install nodejs npm` échoue désormais.
+#
+# Stream 24 et non 22, délibérément : node 22 meurt (avril 2027) AVANT la base
+# f44 (juin 2027). Shipper un runtime qui meurt avant la distro qui le porte,
+# c'est refaire en petit le bug qui a motivé ce rebase.
+# Vérifié sur les dépôts f44 : nodejs24-24.13.1, nodejs24-npm-11.8.0.
 RUN dnf -y install --setopt=install_weak_deps=False \
         git \
         gcc \
@@ -191,8 +200,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         cmake \
         python3 \
         python3-pip \
-        nodejs \
-        npm \
+        nodejs24 \
+        nodejs24-npm \
     && dnf clean all
 
 # --- 1b. Terminal quality-of-life + plumbing ----------------------------------
@@ -276,7 +285,6 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         ngrep \
         tcpreplay \
         arp-scan \
-        nbtscan \
         dnsenum \
         bind-utils \
         whois \
@@ -296,7 +304,6 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         hcxtools \
         kismet \
         whatweb \
-        wfuzz \
         gobuster \
         ffuf \
         radare2 \
@@ -312,7 +319,6 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         python3-pwntools \
         sleuthkit \
         foremost \
-        scalpel \
         testdisk \
         chntpw \
         steghide \
