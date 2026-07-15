@@ -10,8 +10,17 @@
 
 ## 🔧 Session 2026-07-15 (jour, autonome) — le fil rouge : ce qui se dit fait sans l'être
 
-Neuf PR, toutes indépendantes sur `main`. **Aucune inventée** : chacune corrige un
+Onze PR, toutes indépendantes sur `main`. **Aucune inventée** : chacune corrige un
 écart entre ce que le dépôt *affirme* et ce qu'il *fait*.
+
+**La leçon de la journée, apprise deux fois à mes dépens : j'ai écrit deux tests
+qui ne testaient rien.** Le premier était **tautologique** (il passait déjà sans
+le correctif) ; le second n'assertait que **la direction facile** d'une propriété
+— ses 4 contrôles vérifiaient qu'une clé *change*, jamais qu'elle *reste stable*,
+qui était sa seule raison d'être ; c'est pour ça qu'un vrai bug est passé au vert.
+Un contrôle qui n'asserte que la direction facile est **pire que pas de contrôle :
+il achète de la fausse confiance**. Discipline désormais systématique : **rétablir
+le bug et vérifier que le test échoue** — appliqué à chaque correctif ci-dessous.
 
 **Un vrai bug de sécurité, trouvé en faisant relire ma propre PR.**
 [PR #49](https://github.com/Micka420-collab/vibeos/pull/49) : `target` n'est pas un
@@ -115,6 +124,40 @@ mécanique ne peut pas attraper ça — c'est du sens. Corrigé **un faux positi
 garde-fou** révélé par ce commit même : lister ses PR **ouvertes** est ce qu'un
 STATUS honnête doit faire, mais le déclencheur `pr` le lisait comme une réclamation
 de merge. *Un garde-fou qui punit l'honnêteté apprend à mentir.*
+
+**Le CLI opérateur — la seule zone jamais auditée, et c'est par là que la décision
+humaine entre.**
+[PR #56](https://github.com/Micka420-collab/vibeos/pull/56) : **aucun
+contournement du plancher** — usurpation d'euid, traversée par l'id (`safe_id` est
+même *plus* strict que `safe_session_id`), injection terminal, TOCTOU
+liste→approve : les quatre classes sont fermées. **Mais deux de ces défenses
+tenaient par accident.** (1) L'injection terminal est bloquée par **effet de bord**
+de l'encodage JSON (serde_json échappe tout 0x00–0x1F) — rien ne le disait,
+`approvals_list` n'avait **aucun test**, et un futur « beau tableau » rouvrait
+toute la classe en silence ; désormais un point de passage **nommé**
+(`render_for_operator`), l'invariant énoncé, et un test qui pousse CSI+CR+BEL à
+travers `target`. (2) `parse_effective_uid` retournait sur la **première** ligne
+`Uid:` — or `Name:` vaut le basename de l'exécutable et un nom de fichier Linux
+peut contenir un saut de ligne ; ça ne marche que parce que le **noyau** échappe
+`comm`, garantie dont ce code n'a pas à dépendre en silence. Exige désormais une
+seule correspondance.
+Et [#49](https://github.com/Micka420-collab/vibeos/pull/49) borne la cible **à la
+source** : elle n'était plafonnée qu'à 1 Mio × 16 demandes = ~16 Mio de texte
+déversés dans le terminal de l'opérateur, avec `target` s'affichant **avant**
+`tier`/`tool` (clés JSON alphabétiques) — l'action réelle poussée hors écran.
+**Rejeter, pas tronquer** : tronquer donnerait une primitive de tromperie qui
+n'existe pas (lire un préfixe, approuver la chaîne entière).
+
+**Mes propres correctifs relus — et deux étaient faux.**
+Un correctif est exactement l'endroit où se cache le bug suivant. Sur
+[#47](https://github.com/Micka420-collab/vibeos/pull/47) : mon garde anti-reset
+**ne gardait rien** (j'avais écrit que les libellés étaient « grossiers » — faux :
+précision à la seconde, à l'octet ; la session live est dans la liste, donc la clé
+changeait à **100 % des polls** dès qu'un agent écrivait — l'échec exact qu'il
+devait empêcher). Corrigé à la racine : le modèle n'est plus remplacé mais
+**diffé en place** (ListModel). Et un **échec de lecture devenait une
+affirmation** (« aucun raisonnement capté ») — un fait fabriqué, déclenchable par
+un simple redémarrage de vibed ; il se dit maintenant échec.
 
 **Reste ouvert (décision Micka, pas de l'agent)** : allumer le splash de boot ;
 `svc.restart` en allow-list ? ; quel outil T1 réel + son allowlist ; Phase 4 ;
