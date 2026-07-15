@@ -11,8 +11,14 @@
 #
 # The sentinel file .initialized is written LAST, which makes the sequence
 # crash-safe: an interrupted run leaves no sentinel and is replayed in full on
-# the next boot. Every step before the sentinel is an idempotent create or
-# overwrite.
+# the next boot. Every step before the sentinel is therefore an idempotent create
+# or overwrite — EXCEPT the first journal entry, which cannot be (the journal is
+# append-only by contract) and is GUARDED instead, so a replay never stamps a
+# second birth. See step 5.
+#
+# NB: `ConditionPathExists=!` + the sentinel check below test re-entrancy of the
+# GUARD, not of the SEQUENCE. Replaying a partial run (sentinel absent, some files
+# already written) is the case that actually exercises the steps — CI covers it.
 #
 # Environment:
 #   VIBEOS_MEMORY_DIR    target directory (default: /var/lib/vibeos/memory)
@@ -44,6 +50,25 @@ log "starting Genesis sequence (mode=${MEMORY_MODE}, target=${MEMORY_DIR})"
 # Everything born here is private to the machine and its human.
 umask 077
 
+# Fixed PATH — never the inherited one. This script runs as ROOT at first boot
+# and resolves every tool it uses (hostname, awk, nproc, lspci, nvidia-smi…) by
+# bare name. `vibed/src/tools/svc.rs` already holds this standard for a single
+# binary, and its reason applies verbatim here: a constant, never a PATH lookup,
+# "so a compromised environment can never redirect what vibed — running as root —
+# executes".
+#
+# What this actually removes: vibeos-genesis.service sets no Environment=PATH=,
+# so systemd's compiled default applies — and it puts /usr/local FIRST. On Fedora
+# bootc /usr/local is a symlink into /var/usrlocal (docs/SECURITY-ARCHITECTURE.md
+# §"OSTree layout"), i.e. MUTABLE state. Planting there needs root, so this is
+# defence in depth, not a live hole — but it matters most in AMNESIC mode, where
+# genesis re-runs on EVERY boot while the tmpfs covers only the memory store:
+# /var/usrlocal survives the wipe, which would otherwise hand a root attacker a
+# boot-guaranteed re-execution hook that outlives the very thing amnesic mode
+# exists to erase.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 # --- Helpers ------------------------------------------------------------------
 
 # capture CMD [ARGS...] — print CMD's stdout, or an explicit placeholder when
@@ -71,8 +96,30 @@ json_escape() {
 }
 
 # toml_escape STRING — escape STRING for a TOML basic (double-quoted) string.
+#
+# Strips the control characters TOML forbids raw in a basic string
+# (U+0000–U+0008, U+000A–U+001F, U+007F), for the SAME reason json_escape does
+# just above — the two escapers were asymmetric, and nothing said why.
+#
+# Why this is not cosmetic: `memory.query` does NOT parse identity.toml. There is
+# no `toml::from_str` on this file anywhere — vibed serves it to agents as a RAW
+# TEXT SNIPPET (tools/memory.rs). So a value carrying a newline does not produce a
+# clean "parse error" an agent would ignore: it produces extra LINES that read as
+# facts. `hostname = "evil\nmachine_id = \"forged\""` renders, in the snippet an
+# LLM is handed, as a machine_id assignment. That is A1 poisoning (THREAT-MODEL:
+# "altération = empoisonnement durable du comportement des agents"), and it is
+# PERMANENT: the .initialized sentinel is stamped right after, so the guard
+# prevents any repair on a later boot.
+#
+# Not reachable today — every input needs a RAW newline, and the kernel hostname
+# (CAP_SYS_ADMIN), systemd-hostnamed (`hostname_is_valid()`) and NetworkManager
+# all reject control characters, which closes the DHCP option-12 path. Quotes were
+# already escaped, so a clean forgery was never possible either. This closes the
+# gap at the escaper rather than relying on every future caller's input being
+# well-behaved.
 toml_escape() {
-    local s=$1
+    local s
+    s=$(printf '%s' "$1" | tr -d '\000-\010\012-\037\177')
     s=${s//\\/\\\\}
     s=${s//\"/\\\"}
     printf '%s' "$s"
@@ -266,14 +313,32 @@ write_placeholder reasoning \
 log "placeholders written"
 
 # --- 5. First journal entry --------------------------------------------------------
+# This is the ONE step that cannot be an overwrite like the others: the journal is
+# append-only BY CONTRACT ("Ne jamais réécrire une ligne existante" — the
+# placeholder written above says so). So it is GUARDED instead.
+#
+# Why it needs a guard at all: the sentinel is stamped just after, and a run
+# interrupted between the two (power loss) leaves no sentinel — so the next boot
+# replays everything. Every other step overwrites and lands where it started;
+# this one would stamp a SECOND birth. The machine would then carry two genesis
+# events, with identity.toml (overwritten, hence the newer birth) contradicting
+# journal line 1. For a store whose whole job is to be what the OS knows about
+# itself, two births is not a cosmetic duplicate.
+#
+# The guard globs EVERY journal file, not just today's: a replay the day after a
+# partial run would otherwise open a fresh file and miss yesterday's orphan.
 JOURNAL_FILE="${MEMORY_DIR}/journal/$(date -u +%Y-%m-%d).jsonl"
-printf '{"ts":"%s","type":"genesis","source":"genesis.sh","data":{"mode":"%s","hostname":"%s","schema":%s}}\n' \
-    "$(json_escape "${BIRTH_TS}")" \
-    "$(json_escape "${MEMORY_MODE}")" \
-    "$(json_escape "${HOSTNAME_VALUE}")" \
-    "${SCHEMA_VERSION}" \
-    >> "${JOURNAL_FILE}"
-log "first journal entry appended to ${JOURNAL_FILE}"
+if grep -qs '"type":"genesis"' "${MEMORY_DIR}"/journal/*.jsonl; then
+    log "a genesis event is already journalled; not stamping a second birth (replayed partial run)"
+else
+    printf '{"ts":"%s","type":"genesis","source":"genesis.sh","data":{"mode":"%s","hostname":"%s","schema":%s}}\n' \
+        "$(json_escape "${BIRTH_TS}")" \
+        "$(json_escape "${MEMORY_MODE}")" \
+        "$(json_escape "${HOSTNAME_VALUE}")" \
+        "${SCHEMA_VERSION}" \
+        >> "${JOURNAL_FILE}"
+    log "first journal entry appended to ${JOURNAL_FILE}"
+fi
 
 # --- 6. Sentinel — MUST stay the last write ------------------------------------------
 printf '%s\n' "${BIRTH_TS}" > "${MEMORY_DIR}/.initialized"
