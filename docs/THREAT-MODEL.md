@@ -109,9 +109,10 @@ Tout ce qui traverse la frontière `AGENT → VIBED` est traité comme une entr�
 **Mitigations :**
 1. **Images signées cosign** : signature en CI (keyless, OIDC GitHub Actions — livrée v0.1). La **vérification obligatoire côté client** avant staging d'un déploiement bootc (rejet de toute image non signée ou mal signée) est la cible **Phase 4** ([ROADMAP.md](../ROADMAP.md) fait foi).
 2. **Lockfiles et épinglage** (livré v0.1) : `Cargo.lock` commité (et imposé par `--locked` en CI), image de base référencée par digest (pas par tag), CLIs IA npm installés en versions épinglées, tarball ollama vérifié par somme de contrôle. `cargo audit` en CI : **livré** (job dédié) ; `cargo deny` : cible.
-3. **Provenance** (Phase 5) : attestations de build (SLSA) attachées à l'image — quel commit, quel workflow, quel runner ; vérifiables indépendamment de la signature.
-4. **Immuabilité + rollback** : une image compromise ne peut pas modifier les déploiements précédents ; le retour arrière est atomique.
-5. **Surface minimale** : l'image ne contient que le nécessaire ; chaque ajout de paquet est revu.
+3. **Clés de signature des dépôts tiers épinglées dans le dépôt** (livré 2026-07-15, `os/keys/`) : les clés VSCodium et mise sont **livrées par le dépôt et importées depuis le disque**, `gpgkey=` pointant un chemin local. Avant, le build faisait `rpm --import <url>` (VSCodium) et laissait `dnf -y` accepter la clé annoncée par un `.repo` amont (mise) : `gpgcheck=1` validait alors fidèlement **la clé de l'attaquant** si l'URL était compromise ou MITM — une vérification qui n'en était plus une. Désormais tout changement de clé est un **diff en revue humaine**, pas un fetch silencieux. `repo_gpgcheck=1` ajouté pour mise (l'amont sert `repomd.xml.asc` sans demander sa vérification). **Portée honnête** : c'est un TOFU capturé et figé — cela empêche une clé de *changer* sans qu'on le voie, cela ne *prouve pas* l'authenticité à la capture (aucune chaîne de confiance vers ces éditeurs n'existe). Empreintes, provenance et vérification effectuée (chaque clé confrontée à la signature réelle du `repomd.xml.asc` qu'elle est censée signer — VSCodium recoupé **entre deux hôtes distincts**, mise sur un **hôte unique**, donc plus faible) : `os/keys/README.md`.
+4. **Provenance** (Phase 5) : attestations de build (SLSA) attachées à l'image — quel commit, quel workflow, quel runner ; vérifiables indépendamment de la signature.
+5. **Immuabilité + rollback** : une image compromise ne peut pas modifier les déploiements précédents ; le retour arrière est atomique.
+6. **Surface minimale** : l'image ne contient que le nécessaire ; chaque ajout de paquet est revu.
 
 ### S4 — Empoisonnement de modèle local (M6)
 
