@@ -333,7 +333,38 @@ jobs:
       # filesystem type is declared in the image (00-vibeos.toml), so no --rootfs.
       # bootc-image-builder est épinglé par digest (supply chain : l'outil qui
       # fabrique l'artefact final livré aux utilisateurs ne flotte pas sur
-      # :latest). Mise à jour délibérée : re-résoudre le digest avec
+      # :latest).
+      #
+      # ⚠️ DETTE CONNUE (vérifié le 2026-07-16) — cet outil est GELÉ, comme
+      # l'était la base f42 : ça marche, mais plus rien n'arrive.
+      #
+      #   * github.com/osbuild/bootc-image-builder est ARCHIVÉ (dernier push
+      #     2026-06-18), fusionné dans github.com/osbuild/image-builder (actif) ;
+      #   * le digest épinglé ci-dessous EST celui de `:latest` sur quay.io, créé
+      #     le 2026-06-18 — le jour de l'archivage. L'image n'a pas bougé depuis
+      #     et ne recevra plus AUCUN correctif, CVE comprises ;
+      #   * le pipeline Konflux qui la publiait vivait dans le dépôt archivé et
+      #     n'a PAS été repris par le monorepo.
+      #
+      # Bonne nouvelle : parce qu'on épingle un digest, un `:latest` gelé ne peut
+      # pas dériver sous nos pieds. Rien ne casse aujourd'hui, et aucune date de
+      # fin n'est annoncée pour l'image communautaire (UNVERIFIED : personne n'en
+      # promet le maintien non plus).
+      #
+      # Migration, quand elle viendra — ce n'est PAS un remplacement direct :
+      #   * le registre change   : ghcr.io/osbuild/image-builder-cli (plus quay) ;
+      #   * la CLI change        : `--type iso --config X <img>` devient
+      #     `build --bootc-ref <img> --bootc-installer-payload-ref <img> bootc-installer` ;
+      #   * le VRAI cassant      : les types `iso`/`anaconda-iso` sont marqués
+      #     LEGACY en amont et destinés au retrait -> `bootc-installer` ;
+      #   * `output/bootiso/*.iso` survit (même export), donc l'étape d'upload ne
+      #     bouge pas.
+      # Le guide de migration officiel est un fichier VIDE (39 octets), et la doc
+      # Fedora pointe encore le dépôt archivé : migrer se fera sans carte. À faire
+      # comme une opération à part entière, avec son propre build vert — pas en
+      # passant.
+      #
+      # Mise à jour délibérée du digest (tant qu'on reste sur bib) :
       #   skopeo inspect --format '{{.Digest}}' docker://quay.io/centos-bootc/bootc-image-builder:latest
       - name: Run bootc-image-builder (--type iso)
         run: |
