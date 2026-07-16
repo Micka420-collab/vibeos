@@ -23,7 +23,6 @@ ngrep	network	T1	grep across live network traffic
 hping3	network	T2	Crafted TCP/IP packets, port scanning, path probing
 tcpreplay	network	T2	Replay captured traffic onto a network
 arp-scan	network	T2	Discover hosts via ARP on the local segment
-nbtscan	network	T2	Scan NetBIOS name information on a network
 macchanger	network	T1	View/change a local interface MAC address
 proxychains4	network	T1	Force any TCP tool through a proxy chain
 tor	network	T1	Anonymizing overlay network client
@@ -32,7 +31,6 @@ ettercap	network	T3	Man-in-the-middle framework (ARP poisoning, filters)
 #
 # --- Web application security ---
 whatweb	web	T2	Fingerprint web technologies of a target site
-wfuzz	web	T2	Web content/parameter fuzzer
 gobuster	web	T2	Directory/DNS/vhost brute-forcing
 ffuf	web	T2	Fast web fuzzer (content discovery, parameters)
 #
@@ -69,7 +67,6 @@ impacket-secretsdump	exploitation	T2	Impacket suite: SMB/AD network protocol too
 # --- Forensics & DFIR ---
 fls	forensics	T1	Sleuth Kit: list files in a disk image
 foremost	forensics	T1	File carving/recovery from images
-scalpel	forensics	T1	Fast file carver
 testdisk	forensics	T1	Partition recovery and repair
 chntpw	forensics	T1	Offline Windows registry / password editor
 steghide	forensics	T1	Hide/extract data in images and audio (steganography)
