@@ -52,7 +52,32 @@ Runtime d'agents hybride, préinstallé et épinglé dans l'image : **Claude Cod
 VibeOS est **security-first** : une trousse d'outils de pentest/DFIR professionnelle est embarquée dans l'image (≈ 60 RPM signés Fedora/RPM Fusion — `nmap`, `hashcat`, `radare2`, `aircrack-ng`, `impacket`, `sleuthkit`, `suricata`, `lynis`…), à la manière de Kali/Parrot/BlackArch. La différence : elle est **gouvernée** par le moteur de politiques. Un agent IA peut **découvrir** la trousse en lecture seule (outil MCP `sectools.list`, T0) mais **ne peut exécuter** aucun outil sans passer par le tiering — tout ce qui est **actif contre une cible est T2, le destructif T3**, avec **approbation humaine obligatoire**. Catalogue complet (état de l'art 2025-2026, dont la **sécurité IA/LLM** : garak, PyRIT, guardrails) et cadre d'usage autorisé : [docs/SECURITY-TOOLKIT.md](docs/SECURITY-TOOLKIT.md).
 
 ### 🧬 Multi-architecture — amd64 + arm64
-VibeOS cible **linux/amd64 et linux/arm64**. Depuis la release `v0.1.0-dev`, la CI construit les deux architectures sur **runners natifs**, publie le **manifest multi-arch signé cosign** (keyless, journal Rekor) sur ghcr.io et génère **une ISO par architecture** en artefacts de release. La couche pilote **NVIDIA** (akmod, RPM Fusion) est compilée au build de l'image, sur amd64 uniquement ; sa **validation sur le PC de référence** (RTX 3070 Ti) est un critère de sortie de la Phase 1, encore ouvert — voir [docs/HARDWARE.md](docs/HARDWARE.md).
+VibeOS cible **linux/amd64 et linux/arm64**. Depuis le tag `v0.1.0-dev`, la CI construit les deux architectures sur **runners natifs**, publie le **manifest multi-arch signé cosign** (keyless, journal Rekor) sur ghcr.io et génère **une ISO par architecture**, en artefacts du run de release (voir ci-dessous : ce sont des artefacts de *run*, pas des assets de *release* — le dépôt ne publie aucune GitHub Release à ce jour). La couche pilote **NVIDIA** (akmod, RPM Fusion) est compilée au build de l'image, sur amd64 uniquement ; sa **validation sur le PC de référence** (RTX 3070 Ti) est un critère de sortie de la Phase 1, encore ouvert — voir [docs/HARDWARE.md](docs/HARDWARE.md).
+
+## 💿 Télécharger une ISO
+
+> **Lis ce paragraphe avant de cliquer.** Il n'y a **aucune GitHub Release** : les ISO sont des **artefacts de run**, uploadés avec `retention-days: 14`. **Elles expirent 14 jours après leur build** et le lien meurt avec elles. C'est pour ça que ce README ne contient pas de lien en dur vers un run — il serait faux avant la fin du mois.
+
+**→ [Page des builds `build-os`](https://github.com/Micka420-collab/vibeos/actions/workflows/build-os.yml)** — ce lien-là ne pourrit pas.
+
+Ouvre le run le plus récent **déclenché par un tag `v*`** (les builds sur `main` et les PR ne produisent **pas** d'ISO : ils ne vérifient que l'image amd64), puis prends `vibeos-iso-amd64` ou `vibeos-iso-arm64` dans la section **Artifacts**, en bas de page. Il faut être connecté avec un compte ayant accès au dépôt.
+
+| | |
+|---|---|
+| **Taille** | ~7,4 Go (amd64) · ~6,7 Go (arm64) |
+| **Rétention** | **14 jours** après le build, sans exception |
+| **Prérequis VM/machine** | **UEFI** (pas de BIOS legacy), **Secure Boot désactivé** (la signature MOK des kmods est Phase 4), **≥ 60 Go** de disque (l'image seule pèse ~12 Go), **≥ 8 Go** de RAM. L'image est **Wayland uniquement** (`X11=OFF`) : en VM, préfère un GPU virtio |
+| **NVIDIA en VM** | Sans passthrough GPU, `nvidia-smi` échoue — c'est **attendu**, pas un défaut |
+
+**Après le boot**, une seule commande donne l'état réel du système (17 invariants : `vibed`, socket + permissions, politique fail-closed, denylist, chaîne d'audit, Genesis, racine en lecture seule) :
+
+```bash
+sudo /usr/libexec/vibeos/vibeos-selfcheck.sh      # chemin complet : il n'est PAS dans le PATH
+```
+
+Elle est **en lecture seule** et **tolérante aux versions** (`SKIP` ≠ `FAIL`). Note ce que tu observes dans [docs/BOOT-VALIDATION.md](docs/BOOT-VALIDATION.md) — le relevé est vide tant que personne n'a booté, et ça doit le rester.
+
+> ⚠️ **Aucune ISO n'a encore été bootée sur du vrai matériel.** Tout ce que ce dépôt affirme est prouvé par des tests et une CI — c'est-à-dire par du code qui juge du code. Le HUD, le splash et la session graphique n'ont **jamais été vus**. Tant que [docs/BOOT-VALIDATION.md](docs/BOOT-VALIDATION.md) est vide, considère ces ISO comme **non validées**.
 
 ### 🎨 Une expérience de bureau pensée pour le vibecoding
 Un bureau Plasma 6 organisé autour du triptyque **Agent / Contexte / Confiance**. La session s'ouvre en **Global Theme « VibeOS Dark »** (défaut système, moteur Kvantum inclus) avec le **HUD agents** (Quickshell, compilé dans l'image, auto-démarré — état des agents, tier de politique courant et jauges du modèle local ; **branché en live sur `vibed`** via `Quickshell.Io.Socket` : `os.status`, `memory.query`, raisonnement (`agent.sessions`→`agent.thinking`) et roster (`agents.list`, confiné à l'uid) sont réels, dégradation gracieuse hors ligne). Le terminal est prêt à l'emploi dès le premier boot : Ghostty + fish + Starship + Zellij avec le layout signature « agent + lazygit + audit », preset Neovim « VibeVim ». Cette sélection est le fruit d'une **curation de 113 projets open-source**, filtrée par licence redistribuable et cohérence — détaillée dans [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md) et [docs/DESKTOP.md](docs/DESKTOP.md).
