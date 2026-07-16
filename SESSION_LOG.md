@@ -8,6 +8,101 @@
 > **fermée**. Le travail passe désormais par des PR petites et indépendantes sur
 > `main`.)*
 
+## 💿 Session 2026-07-16 (matin, autonome) — la première ISO F44, et ce que le dépôt affirmait sans preuve
+
+**La première ISO Fedora 44 du projet existe**, construite en local et **vérifiée avant
+d'être annoncée** : `ISO 9660 … 'Fedora-S-dvd-x86_64-44' (bootable)`, `EFI/` présent,
+image conteneur de 6,9 Go embarquée, `image.title = VibeOS`, `base.name =
+fedora-kinoite:44@sha256:2d24c434…`. 7,9 Go, sha256 à côté. Aucun compte pré-cuit —
+Anaconda demande le compte à l'installation, comme une ISO de release.
+
+### `main` s'est cassé tout seul, sans que personne ne touche au dépôt
+
+À 01:00 UTC, Fedora a republié `fedora-kinoite:44` et **quay a purgé l'index qu'on
+épinglait**. Tous les builds sont morts sur `manifest unknown`, quelques heures après
+un build vert avec ce même digest.
+
+**Le pin tenait parce que la base était morte.** F42 était EOL — jamais reconstruite —
+donc digest stable pour toujours. Sortir de l'EOL vers une base **vivante** (rebâtie
+quasi quotidiennement) rend le pin fragile. C'est un prix que le rebase de la veille a
+introduit **sans que je l'anticipe**. Deux exigences se contredisent : la posture
+supply-chain veut un digest, l'amont purge ses vieux index. On ne repasse **pas** sur
+le tag flottant. Arbitrage écrit dans le fichier, laissé à Micka : bump manuel /
+Renovate / miroir ghcr.
+
+### Trois affirmations que rien n'assurait
+
+- **Le badge des 4 README annonçait « Fedora Kinoite 42 »** — une base morte, en haut
+  de la page d'accueil, dans 4 langues. Un badge est une **image** : aucun test ne le
+  lit, et il pointe vers `os/Containerfile` — un lien qui *donne l'air* d'être vérifié.
+  Corrigé + **check A2** dans `verify-roadmap-truth.sh`.
+- **Toute image poussée sous le tag `:0.2.1-dev` annonçait
+  `org.opencontainers.image.version="0.1.0-dev"`.** Le Containerfile le codait en dur,
+  le `version` du workflow ne servait qu'à *nommer* le tag, et `buildah-build`
+  n'injecte aucun label (`labels` = input optionnel sans défaut, lu dans son
+  `action.yml` au SHA épinglé). **Constaté ensuite dans l'ISO livrée**, pas seulement
+  déduit. Défaut choisi : `0.0.0-dev` et non `0.1.0-dev` — mieux vaut une version
+  *manifestement* fausse qu'un numéro *plausible* mais périmé ; c'est précisément
+  pour ça que personne ne l'avait vu.
+- **La trousse cybersécurité annonçait 3 outils qu'elle n'installe plus** (ma dérive :
+  le rebase les a retirés du Containerfile, pas des manifestes). Portée honnête :
+  `sectools.list` ne ment pas — il fait un `stat` réel et les rapporterait absents.
+
+### Le motif commun : « garder en synchro » n'est pas une synchro
+
+Trois fois le même défaut, à trois endroits : un **commentaire** demandait poliment une
+synchronisation manuelle, et elle a dérivé **la première fois que quelqu'un a touché
+la liste**. `os/Containerfile` disait *« Keep os/security-tools.txt in strict sync with
+this list »*. Le compteur de tests des README a dérivé **3 fois sur 3** (149→175,
+#59, 175→191) — dont une fois où quelqu'un avait déjà *réparé le garde-fou* et l'avait
+laissé en WARNING.
+
+Chaque correctif est donc **mécanique**, jamais seulement la valeur — et
+**mutation-testé**, y compris le cas « l'ancre est cassée » qui doit échouer **fermé**.
+
+### Ce que j'ai raté, et qui est plus instructif que ce que j'ai trouvé
+
+**`verify-roadmap-truth.sh` signalait la dérive du compteur depuis le début, à chaque
+run, en WARNING.** Je ne l'ai jamais vue : mes commandes filtraient sur
+`grep -E "^\[(OK|FAIL)\]"` et **jetaient les lignes WARN**. J'ai écrit « roadmap-truth
+✅ » dans une dizaine de PR sans lire ce que le script me disait. Son propre en-tête
+m'avait pourtant prévenu : *« Un garde-fou qui avertit en permanence finit ignoré —
+c'est pire qu'aucun garde-fou. »* Il décrivait exactement ce que j'allais faire.
+
+**Et mon correctif `ci.yml` de la nuit n'a jamais atterri** (`c74ca80`) : poussé après
+le merge de #65, comme le fix akmods — sauf que celui-là, je ne l'avais pas récupéré.
+Le garde-fou EOL est donc resté **aveugle sur un changement de base** pendant des
+heures. Troisième fois le même motif : *du travail vérifié resté en arrière du merge*.
+
+**Cinq fois un outil m'a menti**, et à chaque fois c'est un contre-test qui a sauvé le
+résultat : une sonde déclarant `git` absent de f44 (des CR Windows en fin de ligne) ;
+un `--build-arg` qui « ne marchait pas » (le cache podman) ; « Landlock absent » (le
+`securityfs` n'était pas monté — il est en réalité **ABI v7**) ; un décompte annonçant
+13 outils manquants (les listes comparaient des *paquets* à des *binaires*) ; un
+commentaire GitHub parti mutilé (bash interprétant mes backticks).
+
+### Résultats négatifs de valeur — ne pas re-auditer
+
+- **Couverture outils/politique : intacte.** Les 15 outils du registre (`tool_catalog`)
+  sont tous couverts par `security/policy.d/default.toml`, et aucune règle ne vise un
+  outil inexistant. Les deux ensembles sont **identiques**.
+- **Tiers : alignés.** Chaque outil déclare le même tier dans le registre et dans la
+  politique (`fs.write` T1=T1, `svc.restart` T2=T2, `pkg.install` T2=T2…), plus un
+  catch-all `*` = T3 `deny`. Aucune règle ne se lit plus permissive qu'elle n'agit.
+- **Migration Node 20→24 de GitHub Actions : non concernés.** Le 16 juin est passé,
+  les runners tournent déjà en Node24, et nos 3 actions `redhat-actions/*` (qui
+  déclarent `node20`) s'exécutent sans erreur depuis — prouvé par nos propres logs du
+  15/07. `ubuntu-24.04-arm` est de l'**arm64**, pas de l'ARM32.
+
+### Le navigateur reste interdit d'exécution
+
+Vérifié : `Landlock ABI v7` + `seccomp` + `systemd-run` sont **disponibles** — le bac à
+sable Phase 3 est donc développable. C'est lui qui bloque `browser.*`, et rien ne sera
+exécuté avant lui : un moteur de rendu qui parse du HTML hostile ne peut pas vivre
+**in-process dans le moteur de politiques**.
+
+---
+
 ## 🔴 Session 2026-07-15 (nuit, autonome) — l'OS tournait sur une base morte
 
 **Fedora Kinoite 42 est EOL depuis le 2026-05-27.** L'image livrée — y compris l'ISO
