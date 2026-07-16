@@ -163,13 +163,45 @@ FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 
 # Digest pin of quay.io/fedora/fedora-kinoite:44 (manifest list, amd64+arm64).
 # Tag kept as a comment for humans; bump the digest deliberately, never float.
-FROM quay.io/fedora/fedora-kinoite:44@sha256:a95907b4cf66856e3324d200f0f10a54ac0d4755121df31db9d83fe822c23e66
+#
+# ⚠️ CE PIN CASSE PÉRIODIQUEMENT, et c'est structurel — pas un accident.
+#
+# Constaté le 2026-07-16 : le digest précédent (a95907b4…) a cessé de résoudre
+# — « manifest unknown » — quelques heures après avoir servi à un build vert.
+# Fedora avait republié `:44` à 01:00 UTC, et quay a PURGÉ l'index précédent.
+# Tous les builds ont cassé d'un coup, y compris main.
+#
+# Pourquoi ça n'arrivait pas avant : la base était f42, EOL depuis le
+# 2026-05-27 — donc plus jamais reconstruite, donc un digest stable pour
+# toujours. Le pin « tenait » parce que l'amont était MORT. Passer sur une base
+# VIVANTE (f44, rebâtie quasi quotidiennement) rend le pin fragile : c'est le
+# prix, non anticipé, de la sortie de l'EOL.
+#
+# Deux exigences se contredisent ici, et il faut le dire plutôt que le subir :
+#   * la posture supply-chain veut un digest (reproductible, non falsifiable) ;
+#   * l'amont purge ses vieux index, donc tout digest a une durée de vie courte.
+#
+# Ce qu'on NE fait pas : repasser sur le tag `:44` flottant. Ça rendrait chaque
+# build non reproductible et laisserait entrer n'importe quel contenu republié
+# sans revue — exactement ce que le pin existe pour empêcher.
+#
+# Ce qu'il faudra décider (arbitrage opérateur, non tranché ici) :
+#   a) bumper le digest à la main quand ça casse — honnête, mais c'est une
+#      astreinte quasi quotidienne, et ça casse TOUJOURS au pire moment ;
+#   b) mettre à jour le digest automatiquement (Renovate/Dependabot) — la CI
+#      propose une PR, un humain la revoit : le pin reste, l'astreinte part ;
+#   c) MIROITER la base dans notre propre registre (ghcr) et épingler celui-ci —
+#      on maîtrise la rétention, personne ne purge sous nos pieds.
+#
+# Pour re-résoudre le digest courant :
+#   skopeo inspect --format '{{.Digest}}' docker://quay.io/fedora/fedora-kinoite:44
+FROM quay.io/fedora/fedora-kinoite:44@sha256:2d24c434d742aad54584c3b562d42b4e1f3fdc82357b4817df0e1d81c5bc71e4
 
 LABEL org.opencontainers.image.title="VibeOS" \
       org.opencontainers.image.description="AI-native, security-first, immutable Linux distribution for vibecoding" \
       org.opencontainers.image.version="0.1.0-dev" \
       org.opencontainers.image.source="https://github.com/Micka420-collab/vibeos" \
-      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:a95907b4cf66856e3324d200f0f10a54ac0d4755121df31db9d83fe822c23e66"
+      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:2d24c434d742aad54584c3b562d42b4e1f3fdc82357b4817df0e1d81c5bc71e4"
 
 # TARGETARCH is auto-populated by podman/buildah when building with --platform
 # (amd64 | arm64). Defaulted to amd64 for plain single-arch local builds.
