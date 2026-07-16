@@ -491,6 +491,12 @@ Claude natif + `vibed` démarré + client ACP/Zed), avant d'activer l'expéditio
 
 **Contexte.** [Zed](https://zed.dev) est un éditeur rapide dont le panneau agent
 parle **ACP** (Agent Client Protocol, `zed-industries/agent-client-protocol`).
+> **Note (2026-07-16)** : le paquet a été renommé en amont. La dépendance réelle
+> est **`@agentclientprotocol/claude-agent-acp`** (`package.json`, `^0.58.0`) ;
+> le nom `@zed-industries/claude-code-acp` et les ancres de ligne de cette ADR
+> reflètent le paquet **tel qu'analysé à la décision** (v0.58.1, 2026-07-13). Les
+> `canUseTool`/bypass ont bougé de fichier depuis ; la cartographie ci-dessous
+> reste vraie du raisonnement, pas des numéros de ligne courants.
 L'adaptateur **`@zed-industries/claude-code-acp`** (`zed-industries/claude-code-acp`,
 TypeScript/Node) fait tourner **Claude Code comme agent ACP** dans Zed : il expose
 les outils de Claude Code (Read/Write/Edit/Bash…) côté éditeur et gère les
