@@ -165,9 +165,24 @@ FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 # Tag kept as a comment for humans; bump the digest deliberately, never float.
 FROM quay.io/fedora/fedora-kinoite:44@sha256:a95907b4cf66856e3324d200f0f10a54ac0d4755121df31db9d83fe822c23e66
 
+# Version de l'image, injectée par la CI depuis le tag (`v0.2.1-dev` -> `0.2.1-dev`).
+#
+# Elle était CODÉE EN DUR à `0.1.0-dev`, et rien ne l'écrasait au build : l'action
+# buildah-build n'injecte aucun label OCI et le workflow ne lui passait pas
+# `labels:`. Résultat, l'image poussée sous le TAG `:0.2.1-dev` annonçait
+# `org.opencontainers.image.version="0.1.0-dev"` — un mensonge dans les
+# métadonnées livrées, que lisent les outils et les registres. Le `version` du
+# workflow ne servait qu'à nommer le tag, jamais à labelliser l'image.
+#
+# Défaut `0.0.0-dev` pour un build local, délibérément : mieux vaut une version
+# manifestement fausse qu'un numéro PLAUSIBLE mais périmé. C'est précisément ce
+# qui s'est produit — `0.1.0-dev` avait l'air juste, donc personne ne l'a
+# regardé pendant que les tags passaient à 0.2.x.
+ARG IMAGE_VERSION=0.0.0-dev
+
 LABEL org.opencontainers.image.title="VibeOS" \
       org.opencontainers.image.description="AI-native, security-first, immutable Linux distribution for vibecoding" \
-      org.opencontainers.image.version="0.1.0-dev" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.source="https://github.com/Micka420-collab/vibeos" \
       org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:a95907b4cf66856e3324d200f0f10a54ac0d4755121df31db9d83fe822c23e66"
 
