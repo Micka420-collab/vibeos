@@ -925,3 +925,159 @@ domaines qu'il a lui-même allowlistés.
 - **Le contenu d'une page lue est une ENTRÉE HOSTILE**, jamais une instruction :
   c'est le postulat central du modèle de menace, et il ne se négocie pas — quel
   que soit le tier des clics.
+
+## ADR-019 — Le bac à sable par outil vise la mauvaise frontière : séparation de privilèges, pas confinement de threads — *proposé (2026-07-16), à trancher*
+
+**Statut** : **PROPOSÉ**, non tranché. Corrige un plan inscrit dans la ROADMAP et le
+`THREAT-MODEL` depuis l'origine. Aucun code écrit. Découle d'ADR-017 : `browser.*` est
+la première charge qui rend le sujet urgent, mais le constat vaut pour **tous** les
+outils.
+
+### Le plan actuel, et pourquoi il ne peut pas marcher
+
+`THREAT-MODEL.md` : *« outils : in-process en v0.1 — sandbox seccomp/Landlock : Phase 3 »*.
+`ROADMAP.md` §Phase 4 : *« la sandbox par outil (seccomp/Landlock) est à zéro »*.
+
+Le plan implicite est : *les outils tournent dans `vibed` ; on ajoutera seccomp et
+Landlock autour de leur exécution.* Comme `vibed` est un daemon tokio, « autour de leur
+exécution » signifie **confiner un thread**. Trois raisons indépendantes le condamnent —
+et aucune ne se règle par une montée de version.
+
+**1. Un thread n'est pas une frontière de sécurité — dixit l'auteur de Landlock.**
+Mickaël Salaün (l0kod), auteur du LSM Landlock, [rust-landlock#37](https://github.com/landlock-lsm/rust-landlock/issues/37) :
+
+> *« A Linux thread is (mostly) a unit of scheduling, but **should not be considered a
+> security boundary**, unlike processes. […] Anyway, if a thread is considered
+> potentially malicious, **the whole process should be considered potentially
+> malicious**, and then the restrictions (e.g., Linux capabilities, DAC/UID/GID,
+> seccomp, Landlock) should be enforced **on this process**. »*
+
+Le rapporteur d'origine décrit l'attaque : *« all of the threads share an address space
+[so] if the attacker can execute arbitrary code they could just **hijack another
+unsandboxed thread** »*.
+
+**2. Un bac à sable filtre des appels système, pas la mémoire.** C'est le point qui
+tue, et il est propre à VibeOS : **`vibed` EST le moteur de politiques**. Une RCE dans
+le parseur d'un outil, sur un thread tokio parfaitement confiné par Landlock et seccomp,
+partage l'espace d'adressage du moteur. Elle réécrit le booléen qui décide d'un tier,
+ou la tête de la chaîne d'audit — **sans émettre un seul appel système**. Le bac à sable
+n'est pas sur le chemin. Il ne peut pas l'être.
+
+**3. Les filtres sont irrévocables, et l'ordonnanceur de tokio vole le travail.** Un
+filtre seccomp ne se retire pas (il n'existe aucune API de retrait ; c'est la prémisse
+même de `no_new_privs`). Confiner un worker tokio pour un appel d'outil le laisse
+**définitivement dégradé pour toutes les tâches futures** qu'on lui planifiera —
+handler JSON-RPC et écrivain de la chaîne d'audit compris. Il n'y a pas de
+« dé-confiner après l'appel ».
+
+### Ce que les alternatives naïves coûtent, vérifié
+
+**`fork()` depuis le runtime tokio, puis confiner l'enfant : non.** L'enfant n'hérite
+que du thread appelant, mais **tout l'espace d'adressage** — dont des mutex détenus par
+des threads qui n'existent plus, y compris les verrous internes de l'allocateur. La
+doc de `std` est explicite pour `pre_exec` : *« a very constrained environment where
+normal operations like `malloc` […] or acquiring a mutex are not guaranteed to work »*.
+On peut y déplacer des descripteurs et `exec`, rien de plus. **systemd a réécrit son
+chemin de spawn exactement pour ça** ([ARCHITECTURE](https://systemd.io/ARCHITECTURE/)) :
+`posix_spawn()` vers un binaire **`systemd-executor`** séparé, *« in order to avoid
+excessive processing after a fork() but before an exec() »*.
+
+**`systemd-run --scope` : ne peut rien confiner. Mesuré ici, pas supposé :**
+
+| Propriété | `--scope` | `--service` |
+|---|---|---|
+| `ProtectSystem=strict` | **REJETÉ** | accepté |
+| `NoNewPrivileges=yes` | **REJETÉ** | accepté |
+| `PrivateTmp=yes` | **REJETÉ** | accepté |
+| `SystemCallFilter=@system-service` | **REJETÉ** | accepté |
+| `IPAddressDeny=any` | accepté | accepté |
+
+La coupure suit exactement la frontière des pages de manuel : un **scope** n'accepte que
+les propriétés cgroup de `systemd.resource-control(5)` ; **toute** directive de
+confinement de `systemd.exec(5)` est refusée. C'est logique — un scope enregistre un
+processus déjà lancé, il n'y a pas d'`exec` que systemd puisse envelopper. **Donc :
+service transitoire, jamais `--scope`.**
+
+### Ce que Landlock ne peut PAS faire, et qui vise `browser.*`
+
+- **Aucun filtrage UDP** jusqu'à l'ABI 10 (non publiée). Un parseur HTML compromis
+  exfiltre en UDP/53, Landlock pleinement engagé. **Landlock ne bloque pas le DNS.**
+- **Aucun filtrage par IP** : les règles réseau sont **par port** (ABI 4+). TCP/443 vers
+  un attaquant et TCP/443 vers ton intranet sont la même règle.
+
+Landlock seul n'est donc **pas** une histoire de confinement pour un navigateur. Il faut
+`IPAddressDeny=any` (cgroup/BPF, qui couvre l'UDP) — c'est-à-dire un **service systemd**.
+
+### Le précédent est unanime
+
+Aucun système sérieux n'isole du parsing hostile par un mécanisme de thread :
+
+| Système | Frontière | Mécanisme |
+|---|---|---|
+| **OpenSSH** ≥9.8 | processus | `sshd` → **fork+exec** `sshd-session` → `sshd-auth`, qui *« will sandbox and/or chroot itself and drop privilege before processing any network traffic »* |
+| **systemd** ≥254 | processus | `posix_spawn` → `systemd-executor`, qui applique le sandbox **avant** d'exec |
+| **Firefox** | processus | ForkServer — sûr **parce qu'il est mono-thread par construction**, forké avant XPCOM |
+| **Chromium** | processus | zygote |
+
+Et l'argument le plus court est celui de Chromium, la
+[**Rule of 2**](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/security/rule-of-2.md) :
+
+> *« Pick no more than 2 of: untrustworthy inputs; unsafe implementation language; high privilege. »*
+
+`browser.*` **in-process, c'est 3 sur 3** : entrée hostile par construction (HTML), code
+non sûr (un moteur de rendu traîne de l'`unsafe` et des shims C — Rust n'achète pas
+cette jambe), privilège élevé (le moteur de politiques). La mitigation prescrite est
+exactement celle-ci : traiter la donnée risquée dans un **processus utilitaire de faible
+privilège** et repasser le résultat par IPC.
+
+**Anthropic répond pareil pour Claude Code** : bubblewrap, **au niveau processus**. Et
+leur doc note que `Read`/`Edit`/`WebFetch` *« run inside the Claude Code process and do
+not spawn arbitrary code. **Permission rules for path or domain gate them instead** »* —
+**c'est exactement le modèle actuel de `vibed`**, et leur réponse pour une vraie
+isolation fut de déplacer la frontière vers l'extérieur, pas de confiner en interne.
+
+### Options
+
+- **A — Séparation de privilèges** *(recommandé)*. `vibed` reste le **moniteur
+  privilégié** : JSON-RPC, politique, approbation, chaîne d'audit — et **ne parse jamais
+  d'entrée hostile**. L'exécution part dans un binaire `vibed-tool`, `posix_spawn`é par
+  appel, config passée par socketpair/memfd. Le helper **s'auto-confine au démarrage,
+  tant qu'il est encore mono-thread** (`no_new_privs` → seccomp → Landlock best-effort →
+  drop de privilèges) — le seul endroit où `restrict_self()` est sain. Enveloppé dans un
+  **service systemd transitoire** pour ce que Landlock ne sait pas faire
+  (`IPAddressDeny=any`, `DynamicUser=yes`, `ProtectSystem=strict`).
+  **Coût honnête** : un binaire de plus, une IPC à concevoir, et **~15–40 ms par appel**
+  (mesuré en WSL2 — à re-mesurer sur bootc). Négligeable pour `svc.restart` ou
+  `pkg.install` ; c'est le prix d'entrée pour `browser.*`.
+- **B — Statu quo assumé.** Les outils restent in-process ; on écrit que le bac à sable
+  n'existera pas ; **`browser.*` n'est jamais livré**. Cohérent, honnête, et ferme la
+  porte à ce que Micka a demandé.
+- **C — Confinement de threads** *(le plan actuel)*. **Rejeté** : voir les trois raisons
+  ci-dessus. Le retenir reviendrait à livrer un mécanisme qui ne traite pas la menace
+  documentée — et à l'appeler « bac à sable ».
+
+### Ce que ça change dans la roadmap
+
+Le plan actuel n'est pas *incomplet*, il vise **la mauvaise frontière**. Si l'option A
+est retenue, la Phase 3/4 change de nature : ce n'est plus « ajouter seccomp/Landlock »,
+c'est **découper `vibed` en deux**. C'est plus de travail, et ça doit être dit
+maintenant plutôt que découvert en écrivant le premier `restrict_self()`.
+
+**Séquencement** : `browser.*` est le forceur. Le découpage doit précéder `browser.*`,
+pas le suivre. Les outils existants (`fs.*` contraints par chemin, `svc.restart`,
+`log.read`) restent défendables in-process sur des entrées de confiance ; du HTML
+hostile dans l'espace d'adressage du moteur de politiques, non.
+
+### Résiduel connu
+
+- L'ABI Landlock **bouge sous nos pieds** : bootc met le noyau à jour, ABI 8 (noyau 7.0)
+  et 9 (7.1) sont sorties, la crate `landlock` plafonne à **V7** (PR ABI 8/9 ouvertes,
+  non mergées). Conséquence : négocier en **best-effort**, jamais épingler — et traiter
+  `RulesetStatus != FullyEnforced` comme un **événement de politique auditable**.
+- [**Sandlock**](https://github.com/multikernel/sandlock) (Rust, arXiv:2605.26298)
+  implémente déjà exactement l'option A pour MCP : *« Each `call_tool` invocation forks
+  a new process and confines it with Landlock and seccomp-bpf before executing the tool
+  function »*, ~5 ms annoncés. **Jeune (4 mois), petit** — à lire comme référence de
+  conception, pas comme dépendance.
+- Les latences ci-dessus sont **mesurées en WSL2**, pas sur Fedora bootc. À re-mesurer
+  avant de s'engager sur un budget.
