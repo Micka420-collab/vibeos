@@ -204,6 +204,16 @@ jobs:
           platforms: ${{ matrix.platform }}
           containerfiles: os/Containerfile
           context: .
+          # `org.opencontainers.image.version` était figé en dur dans le
+          # Containerfile : l'image poussée sous le tag `:0.2.1-dev` annonçait
+          # `version="0.1.0-dev"`. Le `version` calculé par `setup` ne servait
+          # qu'à NOMMER le tag, jamais à labelliser l'image — et buildah-build
+          # n'injecte aucun label OCI de lui-même (`labels` est un input
+          # optionnel sans défaut, vérifié dans son action.yml).
+          # Hors release, `setup.outputs.version` est vide -> on étiquette avec
+          # le sha, qui est vrai, plutôt qu'un numéro inventé.
+          build-args: |
+            IMAGE_VERSION=${{ needs.setup.outputs.version || format('0.0.0-dev+{0}', github.sha) }}
 
       - name: Push arch image to ghcr.io
         if: needs.setup.outputs.publish == 'true'
