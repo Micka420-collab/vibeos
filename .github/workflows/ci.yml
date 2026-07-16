@@ -30,6 +30,14 @@ on:
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
       - "os/rootfs/usr/lib/systemd/system-generators/**"
+      # Sans ces deux entrees, une PR qui ne toucherait QUE ces fichiers ne
+      # declencherait pas ce workflow — et les deux garde-fous ci-dessous ne
+      # tourneraient JAMAIS sur les fichiers qu'ils surveillent. C'est deja
+      # arrive : le correctif qui ajoutait `os/Containerfile` a ete pousse APRES
+      # le merge de sa PR et n'a jamais atterri, laissant le controle EOL
+      # aveugle sur un changement de base.
+      - "os/Containerfile"
+      - "os/security-tools.txt"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -41,6 +49,14 @@ on:
       - "os/rootfs/usr/bin/**"
       - "os/rootfs/usr/libexec/**"
       - "os/rootfs/usr/lib/systemd/system-generators/**"
+      # Sans ces deux entrees, une PR qui ne toucherait QUE ces fichiers ne
+      # declencherait pas ce workflow — et les deux garde-fous ci-dessous ne
+      # tourneraient JAMAIS sur les fichiers qu'ils surveillent. C'est deja
+      # arrive : le correctif qui ajoutait `os/Containerfile` a ete pousse APRES
+      # le merge de sa PR et n'a jamais atterri, laissant le controle EOL
+      # aveugle sur un changement de base.
+      - "os/Containerfile"
+      - "os/security-tools.txt"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -120,6 +136,17 @@ jobs:
       - name: Base Fedora supportée (pas EOL)
         working-directory: .
         run: bash scripts/check-base-eol.sh os/Containerfile
+
+      # `os/Containerfile` demandait poliment, en commentaire : « Keep
+      # os/security-tools.txt in strict sync with this list. » Une exigence
+      # MANUELLE que rien n'appliquait — et qui a dérivé la PREMIÈRE fois que
+      # quelqu'un a touché la liste : le rebase f42->f44 a retiré nbtscan,
+      # wfuzz et scalpel du Containerfile (Fedora les a retirés d'amont) sans
+      # toucher au manifeste, qui a continué d'annoncer 61 outils pour 58
+      # installés. Un commentaire qui demande une synchro n'est pas une synchro.
+      - name: Trousse cybersécurité — manifeste == couche installée
+        working-directory: .
+        run: python3 scripts/check-sectools-sync.py
 
   audit:
     name: vibed — cargo audit (RustSec)

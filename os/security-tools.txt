@@ -18,7 +18,6 @@ hping3
 ngrep
 tcpreplay
 arp-scan
-nbtscan
 dnsenum
 bind-utils
 whois
@@ -44,7 +43,6 @@ kismet
 
 # --- Web ---
 whatweb
-wfuzz
 gobuster
 ffuf
 
@@ -65,7 +63,6 @@ python3-impacket
 # --- Forensics & DFIR ---
 sleuthkit
 foremost
-scalpel
 testdisk
 chntpw
 steghide
