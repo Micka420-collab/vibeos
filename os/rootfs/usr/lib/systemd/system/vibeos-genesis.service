@@ -10,11 +10,13 @@
 #   * The memory is written IN CLEAR TEXT on /var. LUKS encryption of the
 #     backing volume is Phase 3, provided by crypttab + a systemd mount unit —
 #     never by genesis.sh, which performs no cryptsetup/mkfs/mount.
-#   * Amnesic mode is a Phase 3 target: a systemd generator will mount a tmpfs
-#     on /var/lib/vibeos/memory and inject VIBEOS_MEMORY_MODE=amnesic; the
-#     stamp then never persists, so Genesis re-runs at every boot
-#     (Tails-style). genesis.sh already reads VIBEOS_MEMORY_MODE (no CLI
-#     flag), but no generator ships in v0.1.
+#   * Amnesic mode: the systemd generator IS shipped
+#     (../system-generators/vibeos-amnesic-generator, shellcheck'd in CI). On
+#     `vibeos.amnesic=1` it mounts a tmpfs on /var/lib/vibeos/memory and injects
+#     VIBEOS_MEMORY_MODE=amnesic into this unit; the stamp then never persists,
+#     so Genesis re-runs at every boot (Tails-style). genesis.sh consumes
+#     VIBEOS_MEMORY_MODE (default persistent) — see docs/MEMORY.md §5. What
+#     remains Phase 3 is the VM VALIDATION of that path, not the code.
 
 [Unit]
 Description=VibeOS Genesis (first-boot machine memory creation)
