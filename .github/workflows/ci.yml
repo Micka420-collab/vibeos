@@ -137,6 +137,15 @@ jobs:
         working-directory: .
         run: bash scripts/check-base-eol.sh os/Containerfile
 
+      # Le garde-fou des garde-fous. Ce dépôt a accumulé 5 checks mécaniques,
+      # chacun câblé À LA MAIN — le motif « garder en synchro » qui a dérivé
+      # partout ailleurs. Ce méta-check refuse un `check-*`/`verify-*` non exécuté
+      # en CI : un garde-fou que la CI ne lance jamais ne garde rien (c'est
+      # arrivé à check-base-eol lui-même). Contrat : scripts/README.md.
+      - name: Garde-fous tous câblés en CI
+        working-directory: .
+        run: python3 scripts/check-guards-wired.py
+
       # `os/Containerfile` demandait poliment, en commentaire : « Keep
       # os/security-tools.txt in strict sync with this list. » Une exigence
       # MANUELLE que rien n'appliquait — et qui a dérivé la PREMIÈRE fois que
