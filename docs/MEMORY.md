@@ -80,6 +80,9 @@ c'est le mécanisme, pas un cas particulier.
 │   ├── README.md                # placeholder posé par Genesis
 │   ├── facts.jsonl              # (rempli au fil de l'eau) faits datés et sourcés
 │   └── embeddings/              # (futur) index vectoriel local (ollama)
+├── reasoning/                   # raisonnement des agents capté (ADR-012, Phase 2.5)
+│   ├── README.md                # placeholder posé par Genesis
+│   └── <session>.jsonl          # (rempli au fil de l'eau) un fichier par session
 └── .initialized                 # sentinelle — contient l'horodatage de naissance
 ```
 
@@ -255,7 +258,7 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
    (double sécurité en plus de la condition systemd).
 2. `umask 077` — tout ce qui naît ici est privé.
 3. Création du squelette : `user/`, `projects/`, `journal/`, `knowledge/`,
-   racine en `0700`.
+   `reasoning/`, racine en `0700`.
 4. Collecte matérielle → `hardware.json` (schema 2, champs structurés
    cœurs/RAM/GPU + blobs bruts) : `uname`, `lscpu`, `free`, `lsblk`,
    `df` — chaque outil avec repli gracieux s'il est absent ou en échec.
@@ -263,7 +266,7 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
    `birth = date -Is`, `mode` (persistent par défaut, amnesic si la variable
    d'environnement `VIBEOS_MEMORY_MODE=amnesic` est injectée — par le generator
    amnésique livré, cf. §5).
-6. Pose des `README.md` placeholders dans les quatre sous-répertoires.
+6. Pose des `README.md` placeholders dans les cinq sous-répertoires.
 7. Premier événement du journal : `type: "genesis"` dans le fichier du jour.
 8. **En dernier** : écriture de `.initialized` (contenu : horodatage de naissance).
 
