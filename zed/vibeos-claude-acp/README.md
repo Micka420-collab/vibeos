@@ -33,11 +33,22 @@ l'agent tourne dans l'éditeur. Cette extension apporte deux choses :
   délègue ses permissions à un moteur de politiques système.
 - **Fail-safe par construction.** Si `vibed` est injoignable, l'extension
   **prompte** (jamais d'auto-allow) — l'incertitude ne relâche jamais la garde.
-- **Plancher T2/T3 jamais levé, même côté éditeur.** Le mode auto ne saute le
-  prompt QUE pour ce que la politique classe déjà `Allow` ; il **ne touche jamais**
-  le store d'approbation (`approval.rs`) et ne décide jamais lui-même d'un T2/T3.
-  C'est un **indice** : `vibed` ré-applique la décision à l'exécution — même un
-  `policy.check` erroné ne peut laisser passer un T2/T3 sans humain.
+- **Plancher T2/T3 jamais levé — parce qu'il vit dans `vibed`, pas dans
+  l'éditeur.** Cette extension est une **couche 2 de confort** : elle affiche le
+  verdict de la politique dans Zed. Le mode auto ne saute le prompt éditeur QUE
+  pour ce que la politique classe déjà `Allow`, et l'extension ne touche jamais
+  le store d'approbation (`approval.rs`) ni ne décide elle-même d'un T2/T3.
+  ⚠️ **Précision honnête** : le prompt *éditeur* peut néanmoins être
+  court-circuité par le mode `bypassPermissions` de l'adaptateur amont — que ce
+  patch **ne neutralise pas** (il délègue à l'implémentation d'origine pour tout
+  ce qui n'est pas `Allow`). Mais cela ne saute que l'**indice**, jamais le
+  plancher : `vibed` ré-applique la décision **au socket** (`vibed/src/mcp.rs` —
+  un `RequireApproval`, ce que T2/T3 donne toujours, ne devient `Allow` **que**
+  si un grant humain est consommé via `vibectl approve`). Donc même
+  `bypassPermissions` **plus** un `policy.check` erroné ne peut faire exécuter un
+  T2/T3 sans humain. Neutraliser `bypassPermissions` côté éditeur (défense en
+  profondeur, pour que l'indice ne mente jamais non plus) reste une **décision
+  ouverte** — voir DECISIONS.md.
 - **Gouvernance unifiée** : la même politique `vibed` gouverne l'agent en terminal
   et dans l'éditeur.
 
@@ -84,6 +95,8 @@ n'est décrit comme fonctionnel en bout-en-bout tant que non validé sur Zed.
   `vibeos-claude-acp` avec `CLAUDE_CONFIG_DIR` pointant vers…
 - `os/rootfs/etc/skel/.config/vibeos/zed-claude/settings.json` : le
   `CLAUDE_CONFIG_DIR` **propre à Zed** — `permissions.deny: [Read, Write, Edit]`
-  (couche 1) + le serveur MCP `vibeos`.
+  (couche 1). Le serveur MCP `vibeos` est déclaré dans le fichier voisin
+  `.mcp.json` (nom `"vibeos"`, préfixe `mcp__vibeos__` attendu par le mapper),
+  pas dans `settings.json`.
 
 Variable d'env : `VIBED_MCP_SOCKET` (défaut `/run/vibed/mcp.sock`).
