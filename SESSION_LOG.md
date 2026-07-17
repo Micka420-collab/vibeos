@@ -8,6 +8,80 @@
 > **fermée**. Le travail passe désormais par des PR petites et indépendantes sur
 > `main`.)*
 
+## 🔍 Session 2026-07-16/17 (nuit, autonome) — le balayage de vérité, et fermer les motifs à la racine
+
+Une consigne : « améliore le projet ». La forme retenue : **balayer systématiquement
+chaque zone du dépôt pour y trouver ce qui *affirme* sans *faire* — puis, quand un
+même motif revient, le fermer à la racine plutôt que corriger sa énième instance.**
+
+**Toutes les zones balayées, verdict par zone.**
+
+- **`SECURITY.md`** — honnête sur tous les points testables (audit `seq`+`prev`
+  SHA-256, socket `root:vibeos-agents` 0660, `SO_PEERCRED`, `--ignore-scripts`,
+  COPR désactivés, aucun secret en clair dans skel). Mieux : la denylist du **code**
+  compte **27 motifs** (audit, PKI privé, Kerberos, NetworkManager, `/proc/*/mem`,
+  `/proc/kcore`…) là où la doc en cite trois en exemple. Le code protège **plus**
+  qu'il ne promet.
+- **`SECURITY-ARCHITECTURE.md`** — honnête. Un seul renvoi ajouté : §3.2 présentait
+  le sandbox par outil comme acquis, or ADR-019 vient d'en rouvrir la frontière.
+  Vérifié à la source l'affirmation la plus délicate — la non-exploitabilité de
+  l'angle mort OSTree `/root`→`/var/roothome` : `/var/roothome` est bien absent de
+  `SYSTEM_READ_PREFIXES`, donc `confine_read` le refuse. Claim VRAI.
+- **CI workflows** — exemplaires : pas de `pull_request_target`, **toutes** les
+  actions SHA-pinnées, `contents: read` par défaut, écriture accordée par job,
+  aucune injection `${{ }}`.
+- **`genesis.sh`** — le code est honnête (LUKS absent comme annoncé, sentinelle en
+  dernier). Deux dérives **doc** corrigées : l'unité systemd niait un générateur
+  amnésique **livré**, et `MEMORY.md` comptait « quatre » sous-répertoires là où le
+  code en crée cinq.
+- **Zed extension** — le cœur (gate/policy-client) est **fail-safe et sans
+  contournement**. Une surqualification de sécurité corrigée : le README affirmait
+  « plancher T2/T3 jamais levé, **même côté éditeur** » ; or `bypassPermissions` peut
+  sauter le prompt *éditeur*. **Mais le plancher tient au socket `vibed`** (vérifié :
+  un `RequireApproval` ne devient `Allow` que si un grant humain est consommé). Doc
+  corrigée pour localiser le plancher au bon endroit ; **code non touché** —
+  neutraliser `bypassPermissions` est une décision de sécurité laissée à Micka.
+- **Scripts livrés, registre/politique, tiers, ADR, systemd, chemin de politique,
+  `sha256.rs`, marqueurs de dette** — tous vérifiés, tous propres. `sha256.rs` a
+  déjà la couverture NIST complète (vide, `abc`, 448 bits, 10⁶ × `a`). Zéro `TODO`
+  dans le code de prod.
+
+**Ce que le balayage a corrigé (dérives réelles) :** le label de version de l'image
+livrée (`:0.2.1-dev` annonçait `version="0.1.0-dev"` — **constaté dans l'ISO montée**,
+pas seulement déduit) ; la trousse cybersécurité annonçant 3 outils retirés ; le badge
+« Kinoite 42 » dans 4 langues ; le compteur de tests dérivé de 16.
+
+**Ce qu'il a fermé à la racine — le vrai gain :**
+- les `paths:` de `ci.yml` et la liste shellcheck passent en **découverte** (`git
+  ls-files`), plus de liste à maintenir à la main ;
+- **le garde-fou des garde-fous** (`check-guards-wired.py`) : tout `check-*`/`verify-*`
+  non exécuté en CI fait rougir la CI. 5 garde-fous avaient été câblés à la main, un
+  par un — dont `check-base-eol` qui a tourné **par accident** des heures. Plus
+  `scripts/README.md` : le contrat écrit.
+
+**La leçon la plus dure, sur moi.** `verify-roadmap-truth.sh` signalait la dérive du
+compteur de tests **depuis le début, à chaque run, en WARNING** — et je filtrais les
+WARN (`grep -E "^\[(OK|FAIL)\]"`) dans une dizaine de PR. Le garde-fou marchait ; le
+lecteur était cassé. Son propre en-tête m'avait prévenu : *« un garde-fou qui avertit
+en permanence finit ignoré »*. Depuis, je lis les WARN.
+
+**Cinq fois un outil m'a menti**, à chaque fois rattrapé par un contre-test : une sonde
+disant `git` absent de f44 (CR Windows) ; un `--build-arg` « inopérant » (cache
+podman) ; « Landlock absent » (`securityfs` non monté — en fait **ABI v7**) ; un
+décompte de 13 outils manquants (paquets vs binaires) ; un commentaire GitHub parti
+mutilé (backticks bash). Le réflexe qui a tenu : **vérifier à la source avant de
+conclure**, surtout quand la conclusion arrange.
+
+**Une ADR de fond.** ADR-019 : le plan « seccomp/Landlock en Phase 3 » vise la mauvaise
+frontière — confiner un thread n'est pas une frontière de sécurité (dixit l'auteur de
+Landlock, lu à la source), et `vibed` étant le moteur de politiques, une RCE dans un
+parseur d'outil réécrit une décision de tier **sans un seul appel système**. La
+réponse est une **séparation de privilèges** (helper distinct), pas un bac à sable
+autour du thread. Proposée, **non tranchée** — c'est la décision qui gouverne
+`browser.*`.
+
+---
+
 ## 💿 Session 2026-07-16 (matin, autonome) — la première ISO F44, et ce que le dépôt affirmait sans preuve
 
 **La première ISO Fedora 44 du projet existe**, construite en local et **vérifiée avant
