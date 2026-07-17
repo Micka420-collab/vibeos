@@ -223,17 +223,35 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: shellcheck (scripts + systemd generator)
+      # DÉCOUVERTE, pas liste. Cette étape énumérait 9 scripts À LA MAIN. Deux y
+      # échappaient déjà — dont `scripts/check-base-eol.sh`, le garde-fou EOL,
+      # exécuté en CI mais jamais linté : le fichier qui protège la base n'était
+      # pas protégé lui-même. Une liste hardcodée est le motif « garder en
+      # synchro » qui a dérivé partout ailleurs ce mois-ci. On la remplace par la
+      # découverte : tout script shell suivi par git (shebang sh/bash, ou
+      # extension .sh, hors node_modules) est linté — un script ajouté demain
+      # l'est sans que personne y pense.
+      - name: shellcheck (tous les scripts shell du dépôt)
         run: |
-          shellcheck memory/genesis.sh \
-            os/rootfs/usr/bin/vibeos-hud \
-            os/rootfs/usr/libexec/vibeos/vibeos-agents-group.sh \
-            os/rootfs/usr/libexec/vibeos/vibeos-agent-egress.sh \
-            os/rootfs/usr/libexec/vibeos/vibeos-agent-run.sh \
-            os/rootfs/usr/libexec/vibeos/vibeos-agent-seal-token.sh \
-            os/rootfs/usr/libexec/vibeos/vibeos-selfcheck.sh \
-            os/rootfs/usr/lib/systemd/system-generators/vibeos-amnesic-generator \
-            scripts/verify-roadmap-truth.sh
+          mapfile -d '' files < <(
+            git ls-files -z -- \
+              'memory/**' 'os/**' 'scripts/**' 'zed/**' \
+            | while IFS= read -r -d '' f; do
+                case "$f" in
+                  */node_modules/*) continue ;;
+                esac
+                case "$f" in
+                  *.sh) printf '%s\0' "$f" ;;
+                  *) if head -c 2 -- "$f" 2>/dev/null | grep -q '#!' \
+                        && head -1 -- "$f" | grep -qE '#!.*(bash|/sh|env (bash|sh))'; then
+                       printf '%s\0' "$f"
+                     fi ;;
+                esac
+              done
+          )
+          printf 'shellcheck sur %d script(s) :\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          shellcheck "${files[@]}"
 
       # Non-regression smoke test of the Genesis sequence: run it into a throwaway
       # dir and assert the layout, the hardware.json schema-2 structured fields,
