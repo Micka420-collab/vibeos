@@ -108,6 +108,21 @@ Les actions T2 (paquets, services) qui exigent des privilèges ne seront **pas**
 
 ### 3.2 Sandbox par appel d'outil (Phase 3 — non livré en v0.1)
 
+> ⚠️ **La FRONTIÈRE de ce sandbox n'est pas tranchée — voir
+> [ADR-019](DECISIONS.md).** Cette section décrit le *mécanisme* visé
+> (`systemd-run`, seccomp, Landlock) tel qu'il figurait au plan d'origine. ADR-019
+> (proposée le 2026-07-16, en délibération) montre que « in-process + sandbox
+> autour » revient à **confiner un thread**, ce qui n'est pas une frontière de
+> sécurité : `vibed` étant le moteur de politiques, une RCE dans un parseur d'outil
+> partage son espace d'adressage et peut réécrire une décision de tier **sans
+> aucun appel système**. La cible correcte est une **séparation de privilèges**
+> (helper `vibed-tool` distinct, auto-confiné avant `exec`). Deux corrections
+> concrètes qu'ADR-019 apporte à la lettre de cette section : le sandbox exige un
+> `systemd-run --service` (le `--scope` **rejette** `ProtectSystem`/`SystemCallFilter`,
+> vérifié), et Landlock ne filtre **ni l'UDP/DNS ni par IP** — d'où `IPAddressDeny`
+> pour un outil réseau. Lire §3.2 comme la *direction*, ADR-019 comme le *choix de
+> frontière* en cours.
+
 En v0.1, les outils s'exécutent **in-process** dans `vibed` (cf. §3.1 et [ARCHITECTURE.md](ARCHITECTURE.md) §4.3). Cible Phase 3 : chaque exécution d'outil approuvée sera lancée comme unité transitoire (`systemd-run`) avec :
 
 - **systemd** : mêmes protections que ci-dessus plus `PrivateNetwork=yes` par défaut (le réseau est une capacité déclarée par l'outil, pas un acquis), `RuntimeMaxSec=` (timeout), `MemoryMax=`/`TasksMax=` (anti-DoS).
