@@ -1087,3 +1087,114 @@ hostile dans l'espace d'adressage du moteur de politiques, non.
   conception, pas comme dépendance.
 - Les latences ci-dessus sont **mesurées en WSL2**, pas sur Fedora bootc. À re-mesurer
   avant de s'engager sur un budget.
+
+## ADR-020 — Touseau SaaS + ecommerce gouverné : une deuxième trousse, même modèle que la cybersécurité — *décidé (2026-07-18, autonomie week-end)*
+
+**Statut** : **DÉCIDÉ le 2026-07-18**, en autonomie (Micka absent le week-end, m'a confié de trancher et justifier). Demande : *« ajouter dans l'OS tout ce qu'il faut pour faire des SaaS et les mettre en production, avec des outils d'analyse de performance — un touseau SaaS + ecommerce, et l'IA citoyenne qui développe de A à Z. »* Cadrage retenu par Micka : **les 4 stacks** (JS/TS, Python, full-stack agnostique, low-code self-hosted) + **les deux modes de prod** (cloud managé ET self-hosted).
+
+### L'ancrage : ce n'est pas une nouveauté d'architecture, c'est une seconde trousse
+
+VibeOS livre **déjà** une trousse d'outils gouvernée : la cybersécurité (`SECURITY-TOOLKIT.md`, ≈58 RPM signés). Son modèle est établi et éprouvé : les outils sont **disponibles dans le shell** de l'utilisateur ; un agent IA peut les **découvrir** (`sectools.list`, T0) mais leur **invocation par l'IA** est destinée à passer par le tiering (T2 actif-contre-cible, T3 destructif, approbation humaine). Le touseau SaaS est **la même chose, appliquée au développement** : un second catalogue, curé selon la **même doctrine** — *« on ne ship que ce qu'on a le droit de shipper, et tout marche offline ou est gated par un tier explicite. »*
+
+Cet ancrage tranche d'emblée la question « est-ce que ça ouvre une capacité d'exécution nouvelle ? » : **non**, pas plus que `nmap` ou `hashcat` déjà livrés. Shipper `postgresql` ou `oha`, c'est les rendre disponibles dans le shell, exactement comme `ghostty` ou `radare2`. La capacité *gouvernée* (un outil MCP `vibed` qui déploie en prod) est une brique distincte, tranchée plus bas.
+
+### La curation — la distinction qui a manqué : OUTILS ≠ SERVEURS
+
+Recherche menée avant toute décision (comme ADR-017), sur les dépôts F44 réels et les fichiers de licence amont. **aarch64 est une arche primaire Fedora** : la quasi-totalité des paquets `dnf` est multi-arch (sauf `ExcludeArch` rares) — les binaires non-Fedora exigent une vérif arm64 par outil.
+
+> **Correction issue de la revue adversariale (2026-07-18).** La première version de cet ADR embarquait `postgresql-server`, `valkey`, `caddy`/`nginx`, `node-exporter` dans l'image, en les assimilant à `nmap`. **C'était faux, et incohérent.** Un `nmap` est un outil passif : il tourne, sort, ne laisse rien. Un `postgresql-server` est un **service réseau persistant** — unité systemd, socket en écoute (`:5432`, `:6379`, `:80/:443`, `:9100`), uid dédié, état mutable sous `/var`. C'est exactement la surface (« persistance + service joignable ») que le `THREAT-MODEL` surveille, et la même charge `sysusers.d`/`tmpfiles.d`/hygiène-bootc que `SECURITY-TOOLKIT.md` documente déjà pour `clamav`/`suricata`/`tor`. Et c'était **incohérent** : cet ADR mettait Supabase (qui embarque postgres) en « tire le conteneur toi-même » tout en gravant un postgres nu dans `/usr`. **La bonne réponse bootc pour une base/cache/proxy, c'est un conteneur par projet** — que l'image sait déjà lancer (`podman` + `podman-compose` natifs). Donc les serveurs SORTENT de l'image ; il ne reste dans le seau « embarqué » que des outils passifs.
+
+**Seau A — EMBARQUÉ (OUTILS passifs uniquement — dnf-natif, permissif, offline, arm64, léger).** Vérifié présent dans F44 (versions du 2026-07-18, à re-vérifier avant intégration comme l'exige `ECOSYSTEM.md`) :
+
+| Domaine | Outils | Licence |
+|---|---|---|
+| **Clients bases de données** | `postgresql` (client `psql`), `sqlite` (lib + CLI), `valkey-compat-redis` fournit `redis-cli` | PostgreSQL / domaine public / BSD-3 |
+| **TLS local** | `mkcert` (CA locale, **100% offline**) | BSD-3 |
+| **Orchestration** | `podman-compose` (podman natif bootc) — c'est LUI qui lance les serveurs en conteneurs par projet | GPL-2.0 |
+| **Toolchain Python** | `uv`, `ruff`, `python3-mypy` | Apache/MIT |
+| **Perf & profiling** *(outils, pas démons)* | `httpd-tools` (`ab`), `perf`, `sysstat` (`sar`/`iostat`/`pidstat`), `bpftrace`, `bcc-tools` | Apache-2.0 / GPL |
+| **CLI git/forge** | `gh` (déjà pertinent au-delà du SaaS) | MIT |
+| *(runtimes déjà livrés)* | `nodejs24`, `python3` — les frameworks (Next.js, FastAPI, Prisma…) sont des dépendances **de projet**, jamais du système | — |
+
+**Le socle SERVEUR = conteneurs par projet, PAS des services système.** PostgreSQL, Valkey, un reverse-proxy, un exporter de métriques ne sont **pas** gravés dans `/usr`. VibeOS livre à la place des **modèles `compose` de référence** (dans `/usr/share/vibeos/saas/`, non-exécutés) que l'agent ou l'humain instancie par projet via `podman compose up`. Un seul reverse-proxy est retenu pour les modèles : **Caddy** (Apache-2.0, TLS auto, se marie proprement avec `mkcert` offline) — **pas `caddy` ET `nginx`**, la règle de non-redondance du projet (`ECOSYSTEM.md` : un seul terminal, une seule distro Neovim) vaut ici. Ces images tournent sous l'uid de l'utilisateur, avec état sous son `/home`, sans toucher l'immuabilité.
+
+**Seau A-bis — binaires épinglés, livrés À LA DEMANDE (révisé à l'implémentation, voir encadré sous la table)** (MIT/permissif statiques, pas dans Fedora — pin + sha256, arm64 **vérifié par asset de release**) :
+
+| Outil | Rôle | Licence | arm64 (asset vérifié) |
+|---|---|---|---|
+| `oha` v1.15 | testeur de charge HTTP (TUI) | MIT | `oha-linux-arm64` ✅ |
+| `vegeta` v12.13 | charge à débit constant (évite l'omission coordonnée) | MIT | `vegeta_..._linux_arm64.tar.gz` ✅ |
+| `flyctl` v0.4.71 | déploiement Fly.io (Go statique) | Apache-2.0 | `flyctl_..._Linux_arm64.tar.gz` ✅ |
+| `railway` v5.27 | déploiement Railway (Rust musl statique) | MIT | `railway-..-aarch64-unknown-linux-musl` ✅ |
+
+*(`bpftop` retiré : il ne publie **aucun binaire de release** — source-only, build cargo, et dépendant du BTF noyau. `bcc-tools`/`bpftrace` — RPM Fedora — couvrent déjà le traçage eBPF. La pré-vérification arm64 l'a attrapé avant l'implémentation.)*
+
+> **Révision d'implémentation (2026-07-18) — ces quatre binaires ne sont PAS gravés dans l'image.** Le plan initial (« modèle `ollama` : les mettre dans le `Containerfile` ») a été **abandonné après collecte des faits amont** (agent Fable 5) :
+> - **redondance** — l'image livre **déjà `ab`** (httpd-tools, RPM signé) pour le load-test ; graver `oha`/`vegeta` viole la non-redondance ;
+> - **churn + taille** — `flyctl` fait **~113 Mo** et publie une release **~quotidienne**, `railway` tous les 2-3 j : gravés, ils seraient presque toujours périmés et gonfleraient l'image de tous ;
+> - **la capacité déploiement est de toute façon gouvernée (T2/T3)** — graver le binaire n'aide pas, c'est l'usage réseau+credentials qui est encadré ;
+> - **chaîne d'appro.** — `oha`/`railway` ne publient **aucun fichier checksums** amont (seul le digest attesté GitHub existe), argument de plus contre une gravure dans une image signée.
+>
+> **À la place : un installeur à la demande** `/usr/libexec/vibeos/install-saas-tool <outil>` ([#100](https://github.com/Micka420-collab/vibeos/pull/100)) — pin + sha256 **fail-closed**, install sous `~/.local/bin`, rien ne touche `/usr`. Les pins restent réels ; seul le **vecteur** change (à la demande, pas gravé). C'est exactement le sens du Seau B : « binaire épinglé » comme *vecteur*, pas comme couche d'image.
+
+**Seau B — À LA DEMANDE** (runtime Node/Python lourd, ou binaires volumineux — installés par l'utilisateur via `npm`/`mise`/`distrobox`, jamais dans `/usr`) :
+- `pnpm`, `bun` (via `mise`) ; `vercel`, `wrangler`, `netlify-cli` (npm) ; `aws`/`gcloud`/`az` (installeurs lourds à interpréteur embarqué) ; `autocannon`, `lighthouse` (npm).
+- **Lighthouse** est **gaté sur la décision navigateur** (`browser-policy-domains`) : il exige un Chromium (`CHROME_PATH`). Si VibeOS livre un `chromium` système pour la capacité navigateur, Lighthouse le réutilise. Sinon il traîne son propre Chromium → à la demande. **Verdict repoussé au jour où la brique navigateur atterrit.**
+
+**Seau C — RÉFÉRENCE SEULEMENT** (stacks conteneurs lourdes ET/OU licences non redistribuables — documentées, l'utilisateur tire le conteneur lui-même) :
+- **Briques self-hosted** : Supabase, Appwrite, Medusa (ecommerce), Saleor, Umami. *Permissifs (Apache/BSD/MIT), donc « miroir possible » un jour ; mais stacks multi-conteneurs à état mutable lourd → jamais dans une image immuable.*
+- **Observabilité serveur** : Grafana, Loki, Tempo, Prometheus (serveur), Jaeger. **k6** aussi : AGPL **et** pas de RPM arm64 (dépôt vendor amd64 seulement) — un binaire vendoré déplacerait de plus l'obligation de source §6 sur VibeOS (voir pièges §6 ci-dessous). Pour tester la charge, `oha`/`vegeta` (seau A-bis, MIT) suffisent.
+
+### ⚠️ Les pièges de licence — le cœur de la valeur de cet ADR
+
+La curation existe pour ça. Faits vérifiés, chacun documenté :
+
+1. **Redis → Valkey.** Redis est passé en **SSPLv1/RSALv2** (mars 2024, non-OSI), puis a ajouté l'AGPLv3 (mai 2025). **Fedora a retiré Redis et le remplace par Valkey** (BSD-3, Linux Foundation). → **On ship Valkey, jamais Redis.** Déjà le bon chemin par construction.
+2. **MinIO — exclu, mais pas pour l'AGPL.** La raison propre est **serveur lourd à état + Community Edition archivée/EOL** (avril 2026, console amputée) → seau C de toute façon. L'AGPL n'est PAS le motif (voir §6) ; le mentionner comme drapeau contredirait la nuance ci-dessous. Si S3 local requis un jour : évaluer Garage/SeaweedFS (à vérifier).
+3. **n8n — Sustainable Use License.** Source-available, **non-OSI** : redistribution autorisée seulement gratuite/non-commerciale/interne, les fichiers `.ee.` exigent une licence entreprise. → **Référence seulement, aucun miroir sans revue juridique.**
+4. **Directus — MSCL** (depuis v12, mai 2026) : usage prod gratuit **seulement si l'entité fait < 5 M$/an**. Non-OSI, plafonné au CA. → **Référence seulement.**
+5. **Sentry (FSL) et WebPageTest (Polyform Shield)** — licences **non-compete** source-available. **Ce sont les VRAIS bloqueurs de redistribution**, pas l'AGPL. → **Référence / client SaaS uniquement.**
+6. **Nuance AGPL — la conclusion tient, mais l'obligation du DISTRIBUTEUR est réelle.** L'AGPL n'est **pas** un bloqueur pour livrer un binaire **non modifié** (la clause §13 réseau ne se déclenche que si on *modifie* et *sert* le programme). MAIS l'obligation qui lie un **distributeur** n'est pas §13, c'est **§6 (conveyance)** : livrer un binaire GPL/AGPL oblige à fournir la **source correspondante** (offre écrite de 3 ans, ou source au même endroit). Pour un composant **RPM**, c'est couvert d'office par l'infra SRPM de Fedora — aucune charge pour nous. Pour un binaire **vendoré non-RPM**, l'obligation §6 retombe **directement sur VibeOS**. C'est pourquoi **`k6` (AGPL) va en seau C** et non en binaire épinglé : cumul §6-sur-nous **+** pas de RPM arm64. `oha`/`vegeta` (MIT, seau A-bis) font le même travail sans aucune de ces charges. *(Note : l'exemple « Fedora ship Grafana » prouve seulement que la politique Fedora accepte l'AGPL — Grafana est un serveur, pas un CLI non modifié ; la conclusion tient par la politique Fedora, pas par cet exemple.)*
+
+### La gouvernance — comment l'IA citoyenne développe « de A à Z », et où est la limite
+
+C'est la vraie question VibeOS, distincte de « quels paquets ». Les actions d'un développement SaaS ne sont pas toutes de même danger :
+
+| Classe d'action | Exemples | Tier naturel | Aujourd'hui |
+|---|---|---|---|
+| **Dev local, lecture/écriture de fichiers, tests** | `ruff`, `mypy`, `npm test`, `psql` sur `localhost`, `oha` contre l'app locale | **T1** (modify-user) | Tourne dans le shell de l'agent. ⚠️ **NON gouverné par `vibed`** (écart `Bash` natif, invariant n°1). Le *fichier* est celui de l'utilisateur — mais « sa machine » **n'est pas** une zone sûre : le `THREAT-MODEL` pose l'agent comme *insider hostile sur cette machine même*, où vivent A1/A2/A4. |
+| **Installation de dépendances** | `npm install`, `pip install`, `uv add` | **T1 en apparence, M4 en réalité** | ⚠️ **C'est LE vecteur supply-chain.** Un hook `postinstall` npm/pip est du code arbitraire avec accès réseau. Déclenché par un agent injecté dans le shell **non gouverné** (et un `claude` lancé à la main n'est **pas** sous `IPAddressDeny=any`), il exfiltre. À ne PAS classer « T1 bénin ». |
+| **Déploiement en production** | `fly deploy`, `vercel --prod`, `railway up` | **T2/T3** — agir en prod, avec des **credentials cloud (A2)** | Brique **gouvernée future** : outil `vibed` `deploy.*` enveloppant le CLI, gated T2/T3 + **allowlist de cibles** (`[rule.deploy]`). |
+| **Dépense d'argent / effets externes** | `stripe` (webhooks live), ressources cloud facturées | **T2/T3** | `stripe listen` exige le réseau → **gaté**. |
+
+**Décision de gouvernance** : le socle de **dev local** (seaux A/A-bis) est livré tout de suite — mais l'ADR **ne prétend pas** que c'est sans risque. Il **importe** dans la zone `Bash` non gouvernée la surface `npm`/`pip` (menace M4, supply-chain), qui s'ajoute à un écart déjà ouvert. C'est **acceptable comme état intérimaire** — ces outils sont, de toute façon, installables à la main par l'utilisateur — **à condition de dire la vérité** : la vraie fermeture de cet écart est la décision `permissions.deny` en attente (invariant n°1) et, à terme, le routage du dev par des outils `vibed` gouvernés. La parité avec la trousse cybersécu est **partielle** : là-bas, l'exécution dangereuse est bloquée par l'**absence du chemin d'exécution** (`sectools.list` ne lance rien) ; ici, les outils sont lançables **aujourd'hui** via le `Bash` natif. On élargit un écart ouvert, on n'hérite pas d'un écart fermé.
+
+Le **déploiement gouverné** (`deploy.*`) est une **capacité d'exécution nouvelle** — non livrée. Il attend **trois** choses, pas deux :
+- (a) l'**allowlist de cibles** tranchée par Micka *(quels projets/environnements)* ;
+- (b) le **modèle helper-processus d'ADR-019** pour une exécution sûre *(le CLI parse des réponses réseau)* ;
+- (c) **l'isolation des credentials** : le token Fly/Vercel/Railway (A2) ne doit **jamais** être joignable par l'agent injecté — envelopper le CLI le met dans son environnement ; il faut un porteur de secret hors de portée de l'agent. **Problème ouvert, non résolu par l'allowlist.**
+
+⚠️ **Et la leçon d'ADR-017, reportée ici** : l'allowlist borne le *où*, **jamais le *quoi***. Un agent injecté qui déploie **du code malveillant sur une cible autorisée** est tout aussi catastrophique — exactement le résiduel qu'ADR-017 a accepté (destination allowlistée + action T1 = compromission possible). `[rule.deploy]` dira « tu peux déployer sur *ce* projet », jamais « ce que tu déploies est sain ». Le vrai garde-fou reste l'**approbation humaine T2/T3 sur le contenu**, pas la seule allowlist.
+
+### Ce qui est livré par cet ADR, et ce qui attend
+
+**Cadrage honnête de ce que cet ADR livre.** La demande était *« les mettre en production… de A à Z »*. Node/Python étaient déjà là ; `uv`/`ruff`/`psql` sont du **confort de dev**. La seule chose vraiment neuve demandée — *mettre en prod* — est précisément la partie **repoussée** (déploiement gouverné, dépend de trois verrous ci-dessus). Cet ADR livre donc un **socle de dev + une reconnaissance de dette** pour la feature phare. C'est assumé, dit tel quel.
+
+**Implémenté dès cet ADR** (PR sœurs, build vert — en autonomie week-end 2026-07-18, toutes **mergées** sauf mention) :
+- ✅ **[#95]** : le seau A (OUTILS passifs) dans le `Containerfile`, couche `1d-ter` sœur de la trousse cybersécu ;
+- ✅ **[#100]** : les **binaires épinglés** (seau A-bis) — `oha`, `vegeta`, `flyctl`, `railway` — mais via un **installeur à la demande** (`install-saas-tool`, pin+sha256 fail-closed, hors image), **pas** gravés (voir la révision d'implémentation plus haut) *(pas `bpftop` : source-only)* ;
+- ✅ **[#97]** : les **modèles `compose` de référence** (`/usr/share/vibeos/saas/`) pour postgres/valkey/caddy — serveurs comme conteneurs par projet ;
+- ✅ **[#95]** : un manifeste des outils SaaS (`os/saas-tools.txt`, sœur de `os/security-tools.txt`), gardé en synchro par `scripts/check-saas-sync.py` (mutation-testé, câblé CI) ;
+- ✅ **[#99]** : `ECOSYSTEM.md` — catalogue complet, 3 seaux, briques self-hosted en référence (licences re-vérifiées à la source par un fact-check Fable 5).
+
+**Ce que la revue adversariale a corrigé** (Fable 5, 2026-07-18) : la première version embarquait les serveurs comme s'ils étaient des CLIs passifs, classait `npm install` en T1 bénin, et laissait entendre que l'allowlist de déploiement suffisait. Les trois sont redressés ci-dessus. La revue a aussi confirmé la solidité de la curation de licences et de la discipline de report du déploiement.
+
+**Attend une décision de Micka ou une autre ADR** :
+- l'outil `vibed` `deploy.*` gouverné → **allowlist de cibles** (Micka) + **helper-processus** (ADR-019) ;
+- `lighthouse` → **décision navigateur/Chromium** ;
+- un éventuel **miroir ghcr** des briques self-hosted permissives (Supabase, Medusa…) pour tirage offline → décision opérateur (coût de rétention).
+
+### Résiduel accepté
+
+- Le dev local via le `Bash` natif de l'agent reste **hors gouvernance `vibed`** jusqu'à la fermeture de l'écart (invariant n°1, décision `permissions.deny` en attente). Pour du dev sur la machine de l'utilisateur, c'est le comportement attendu ; le danger réel (déploiement, dépense) est, lui, réservé aux tiers gouvernés à venir.
+- Les binaires épinglés (seau A-bis) exigent un **bump manuel** de version dans la table `spec` de `install-saas-tool`. **Pas d'alerte automatisée**, décidé délibérément : une cron de fraîcheur serait soit bruyante (`flyctl` sort chaque jour), soit muette (GitHub ne supprime pas les vieilles releases). Les pins sont des snapshots best-effort ; l'installeur **fail-close** si le hash ne correspond pas, donc un pin périmé n'installe jamais rien de faux — au pire il installe une version un peu ancienne.
