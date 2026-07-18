@@ -166,7 +166,8 @@ FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 #
 # ⚠️ CE PIN CASSE PÉRIODIQUEMENT, et c'est structurel — pas un accident.
 #
-# Constaté le 2026-07-16 : le digest précédent (a95907b4…) a cessé de résoudre
+# Constaté le 2026-07-16 PUIS le 2026-07-17 (deux purges quotidiennes CONSECUTIVES) :
+# le digest précédent (a95907b4…, puis 2d24c434…) a cessé de résoudre
 # — « manifest unknown » — quelques heures après avoir servi à un build vert.
 # Fedora avait republié `:44` à 01:00 UTC, et quay a PURGÉ l'index précédent.
 # Tous les builds ont cassé d'un coup, y compris main.
@@ -195,7 +196,7 @@ FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 #
 # Pour re-résoudre le digest courant :
 #   skopeo inspect --format '{{.Digest}}' docker://quay.io/fedora/fedora-kinoite:44
-FROM quay.io/fedora/fedora-kinoite:44@sha256:2d24c434d742aad54584c3b562d42b4e1f3fdc82357b4817df0e1d81c5bc71e4
+FROM quay.io/fedora/fedora-kinoite:44@sha256:7b70f8c641aa4e364f0464cc782b293ce7617bd218706e3dd4426c25477a980b
 
 # Version de l'image, injectée par la CI depuis le tag (`v0.2.1-dev` -> `0.2.1-dev`).
 #
@@ -216,7 +217,7 @@ LABEL org.opencontainers.image.title="VibeOS" \
       org.opencontainers.image.description="AI-native, security-first, immutable Linux distribution for vibecoding" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.source="https://github.com/Micka420-collab/vibeos" \
-      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:2d24c434d742aad54584c3b562d42b4e1f3fdc82357b4817df0e1d81c5bc71e4"
+      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:7b70f8c641aa4e364f0464cc782b293ce7617bd218706e3dd4426c25477a980b"
 
 # TARGETARCH is auto-populated by podman/buildah when building with --platform
 # (amd64 | arm64). Defaulted to amd64 for plain single-arch local builds.
