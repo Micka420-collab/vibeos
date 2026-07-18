@@ -82,3 +82,47 @@ dans le Containerfile (build vert obligatoire), revu par Fable 5 avant merge.
 - **Note process** : `git rebase` puis `origin/main` périmé m'ont coûté deux reprises (worktree Windows). Discipline adoptée : **cherry-pick, jamais rebase** ; **`git fetch` avant chaque branche**.
 
 **Décision que je te laisse** (notée pour ton retour) : l'outil `vibed` `deploy.*` gouverné a besoin de ton **allowlist de cibles** (quels projets/environnements l'IA peut déployer) — sœur du `[rule.domains]` du navigateur. Je ne le construis pas sans ça.
+
+### 2026-07-18 (suite) — revue Fable 5 intégrée, première brique du socle livrée
+
+- **Revue adversariale Fable 5 sur ADR-020 → 3 vraies failles corrigées** (commit `1ea89f8`, [PR #92](https://github.com/Micka420-collab/vibeos/pull/92)) :
+  1. **Serveur ≠ outil passif.** Postgres/valkey/caddy sont des services réseau persistants, pas des `nmap`. Et j'étais incohérent (Supabase en « conteneur toi-même » mais postgres nu gravé). → les serveurs **sortent de l'image**, deviennent des **conteneurs par projet** (podman-compose + modèles de référence). Le seau embarqué = **outils passifs seulement**.
+  2. **`npm install` n'est pas T1 bénin** — c'est le vecteur supply-chain M4 dans le shell non gouverné. Dit tel quel.
+  3. **Déploiement gouverné** : l'allowlist borne le *où*, jamais le *quoi* (leçon d'ADR-017) ; + isolation des credentials cloud = 3ᵉ verrou. Le vrai garde-fou = approbation humaine sur le **contenu**.
+- **[PR #95](https://github.com/Micka420-collab/vibeos/pull/95) — la couche 1d-ter livrée** : 14 outils dnf-natifs (client psql, sqlite, redis-cli, mkcert, podman-compose, uv, ruff, mypy, ab, perf, sysstat, bpftrace, bcc, gh). **Client postgresql, PAS le serveur** (vérifié). Manifeste `os/saas-tools.txt` + garde-fou `check-saas-sync.py` mutation-testé. Le méta-garde-fou (#87) compte maintenant **7** checks, tous câblés — il valide son propre nouvel usage.
+- **Discipline** : chaque PR de cette session est revue (Fable 5 sur le design, mutation-test sur les garde-fous) et attend un build vert avant merge.
+
+**Prochaines briques** (PR sœurs) : binaires épinglés (oha/vegeta/flyctl/railway, arm64 vérifié), modèles `compose` de référence (postgres/valkey/caddy par projet), MàJ `ECOSYSTEM.md`.
+
+### 2026-07-18 (suite) — modèles compose livrés (le socle serveur, hors image)
+
+- **[PR #97](https://github.com/Micka420-collab/vibeos/pull/97) — les modèles `compose` par projet.** C'est la conséquence directe de la faille #1 de la revue Fable 5 : les **serveurs** (postgres/valkey/caddy) sortent de l'image immuable et deviennent des conteneurs **par projet**. Livrés sous `/usr/share/vibeos/saas/` via `COPY os/rootfs/ /` — **zéro** changement de `Containerfile`, donc **indépendant de #95** (pas de conflit de couche).
+  - `postgres-valkey/` : PostgreSQL 18 + Valkey. Ports **loopback-only**, mot de passe Postgres **exigé** via `.env` (jamais en clair, jamais commité), healthchecks, volumes nommés (l'état vit dans le projet, pas dans l'image).
+  - `reverse-proxy/` : Caddy + TLS local via `mkcert` (déjà livré couche 1d-ter) → un `https://` de dev valide, 100 % offline.
+  - README qui explique *pourquoi conteneurs-pas-services*, l'usage, et le rappel de gouvernance (dev local = T1 ; prod = T2/T3 à venir).
+- **Cohérence vérifiée avant push** : YAML des deux `compose` valides, liens relatifs du README corrigés (6 niveaux jusqu'à la racine), `verify-roadmap-truth` vert.
+- **#95 (couche d'outils 1d-ter)** : build amd64 natif relancé (l'échec précédent était un *flake* CDN quay.io sur le pull de la base finale, pas ma couche). En cours.
+
+**Prochaines briques** : binaires épinglés (oha/vegeta/flyctl/railway) — **séquentielle**, elle touche le `Containerfile`, donc après #95 ; puis catalogue SaaS/ecommerce dans `ECOSYSTEM.md`.
+
+### 2026-07-18 (suite) — trois briques mergées, le catalogue, et une décision qui renverse un plan
+
+Grosse avancée. **La trousse SaaS est en place sur `main`** — outils, substrat serveur, catalogue, et un mécanisme d'install sûr. Détail :
+
+- **✅ #95 mergée — couche d'outils 1d-ter.** Build vert (19 min), 14 outils passifs sur `main`. Guard `check-saas-sync.py` mutation-testé.
+- **✅ #97 mergée — modèles compose par projet.** Build vert (16 min). Le socle serveur (postgres/valkey/caddy) vit désormais par projet, jamais gravé.
+- **✅ #99 mergée — catalogue SaaS dans `ECOSYSTEM.md`.** Les 3 seaux (embarqué / à la demande / référence self-hosted) + les pièges de licence, en un seul endroit. Ça comble une référence que le header de `saas-tools.txt` promettait déjà.
+- **🔎 Fact-check Fable 5 des licences/arch** (23/25 confirmés à la source). **2 corrections appliquées avant merge** : Redis n'est plus « non-OSI » (depuis Redis 8, tri-licence RSALv2/SSPLv1/AGPLv3 — la reco Valkey BSD-3 tient quand même) ; Stripe CLI est Apache-2.0, pas MIT. C'est exactement le rôle de la revue adversariale : elle a rattrapé deux faits périmés dans un projet où la licence est juridiquement sensible.
+
+**La décision du jour (je te l'explique parce que je renverse un plan que je m'étais fixé).**
+Le plan pré-week-end disait : « graver oha/vegeta/flyctl/railway dans le `Containerfile` ». En **vérifiant les faits amont** (agent Fable 5 : versions, URLs, tailles, cadence de release), j'ai vu que ce plan était mauvais :
+  - l'image livre **déjà `ab`** (ApacheBench) pour le load-test → graver oha/vegeta = redondance (notre doctrine l'interdit) ;
+  - **flyctl fait 113 Mo et sort presque tous les jours** → gravé, il serait toujours périmé + gonflerait l'image de tout le monde ;
+  - le **déploiement est de toute façon gouverné (T2/T3)** → graver le binaire n'apporte rien, c'est l'usage réseau+credentials qui compte.
+  Mon propre catalogue (relu Fable 5) les plaçait d'ailleurs déjà en **Seau B « à la demande »**. Le plan contredisait le catalogue. **J'ai suivi le catalogue.**
+
+- **🔧 #100 ouverte — installeur à la demande.** `/usr/libexec/vibeos/install-saas-tool <outil>` : télécharge, **vérifie le sha256 (fail-closed)**, installe sous `~/.local/bin`. Rien ne touche `/usr`. **Testé de bout en bout** : `oha` s'installe et tourne (`oha 1.15.0`) ; un hash corrompu est **refusé sans rien installer**. shellcheck vert. Build en cours.
+
+**Où en est la mission SaaS.** Le gros est fait pour ce que je peux livrer seul : outils dans l'image, serveurs par projet, deploy CLIs à la demande + vérifiés, catalogue complet, perf/observabilité (perf/sysstat/eBPF + ab). Le seul morceau que je **ne** construis **pas** seul reste `deploy.*` gouverné dans `vibed` — il attend **ton allowlist de cibles** (quels projets/environnements l'IA peut déployer). C'est noté, ADR-020 (#92) t'attend pour cette décision d'archi ; je ne l'auto-merge pas.
+
+**Prochain chantier** (une fois #100 mergée) : je regarde les features non-SaaS en attente (ex. `browser.*` sur `[rule.domains]`, ADR-017) — mais comme ça touche le cœur `vibed`, ce sera une **PR flaggée pour ta revue**, pas un auto-merge.
