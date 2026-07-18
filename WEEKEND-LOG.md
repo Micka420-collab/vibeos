@@ -71,3 +71,14 @@ ensuite, implémentation de la partie sûre enfin.**
 
 **Prochaine étape** : ADR-020 dès le 3ᵉ rapport, puis implémentation du socle « ship »
 dans le Containerfile (build vert obligatoire), revu par Fable 5 avant merge.
+
+### 2026-07-18 (suite) — ADR-020 écrite, en revue Fable 5
+
+- **3 rapports de recherche rendus** (dev toolchains, deploy CLIs + briques self-hosted, perf/observabilité). Faits vérifiés : licences amont, dispo dépôts F44 réels, arm64, offline.
+- **Socle « ship » vérifié présent dans F44** (versions réelles) : postgresql 18.3, valkey 9.0.4, sqlite 3.51, caddy 2.10, nginx 1.30, mkcert 1.4.4, podman-compose 1.6, uv 0.11, ruff 0.15, mypy 1.18, + gh 2.94, perf/sysstat/bpftrace/bcc/node-exporter.
+- **[ADR-020](docs/DECISIONS.md) ouverte en [PR #92](https://github.com/Micka420-collab/vibeos/pull/92)** : le touseau SaaS est une **seconde trousse gouvernée**, même modèle que la cybersécurité. 3 seaux (embarqué / à la demande / référence), pièges de licence documentés (Redis→Valkey, MinIO exclu, n8n/Directus/Sentry/WebPageTest en référence), dev local T1 / déploiement prod T2/T3 gouverné futur.
+- **Pré-vérification arm64 des binaires épinglés** : `oha`, `vegeta`, `flyctl`, `railway` confirmés arm64. **`bpftop` retiré** — il ne publie aucun binaire (source-only), et `bcc`/`bpftrace` (RPM Fedora) couvrent déjà le traçage eBPF. La vérif a fait son travail avant l'implémentation.
+- **Revue adversariale Fable 5 lancée** sur l'ADR. Je traite ses trouvailles **avant** de figer et d'implémenter.
+- **Note process** : `git rebase` puis `origin/main` périmé m'ont coûté deux reprises (worktree Windows). Discipline adoptée : **cherry-pick, jamais rebase** ; **`git fetch` avant chaque branche**.
+
+**Décision que je te laisse** (notée pour ton retour) : l'outil `vibed` `deploy.*` gouverné a besoin de ton **allowlist de cibles** (quels projets/environnements l'IA peut déployer) — sœur du `[rule.domains]` du navigateur. Je ne le construis pas sans ça.
