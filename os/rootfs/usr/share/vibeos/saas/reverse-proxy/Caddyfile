@@ -1,0 +1,16 @@
+# Caddyfile de dev — TLS local via les certs mkcert montés dans /certs.
+# Adaptez le nom d'hôte et le upstream (votre app Next.js/FastAPI…).
+
+monsaas.localhost {
+	tls /certs/local.pem /certs/local-key.pem
+
+	# Votre app tourne sur l'hôte : host.containers.internal pointe l'hôte
+	# depuis un conteneur podman. Adaptez le port à votre serveur de dev.
+	reverse_proxy host.containers.internal:3000
+
+	encode gzip zstd
+	log {
+		output stdout
+		format console
+	}
+}

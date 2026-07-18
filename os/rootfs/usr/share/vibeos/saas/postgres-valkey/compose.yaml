@@ -1,0 +1,51 @@
+# Socle SaaS — PostgreSQL + Valkey, en conteneurs par projet.
+# Modèle VibeOS (/usr/share/vibeos/saas/). Copiez-le dans votre projet, éditez
+# .env, puis : podman compose up -d
+#
+# Pourquoi ici et pas dans l'OS : un serveur de base de données est un service
+# réseau persistant à état — il n'a pas sa place dans une image immuable. Il
+# tourne par PROJET, sous votre uid, avec état dans des volumes du projet.
+#
+# Le CLIENT psql et redis-cli sont, eux, DANS l'image (couche 1d-ter) : de quoi
+# vous connecter à ces conteneurs (`psql -h localhost`, `redis-cli`).
+
+services:
+  db:
+    # PostgreSQL 18 = la même série majeure que le client psql livré dans l'OS.
+    # Épinglez par digest dans un vrai projet (reproductibilité supply-chain).
+    image: docker.io/library/postgres:18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definissez POSTGRES_PASSWORD dans .env}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    # N'exposez la base QUE sur la loopback : jamais 0.0.0.0 en dev.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  cache:
+    # Valkey = le fork BSD-3 de Redis (Redis est passé SSPL/RSALv2, non-OSI ;
+    # voir ADR-020). Compatible protocole Redis : votre code Redis marche tel quel.
+    image: docker.io/valkey/valkey:8
+    command: ["valkey-server", "--save", "60", "1"]
+    ports:
+      - "127.0.0.1:${VALKEY_PORT:-6379}:6379"
+    volumes:
+      - valkeydata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  valkeydata:
