@@ -104,3 +104,25 @@ dans le Containerfile (build vert obligatoire), revu par Fable 5 avant merge.
 - **#95 (couche d'outils 1d-ter)** : build amd64 natif relancé (l'échec précédent était un *flake* CDN quay.io sur le pull de la base finale, pas ma couche). En cours.
 
 **Prochaines briques** : binaires épinglés (oha/vegeta/flyctl/railway) — **séquentielle**, elle touche le `Containerfile`, donc après #95 ; puis catalogue SaaS/ecommerce dans `ECOSYSTEM.md`.
+
+### 2026-07-18 (suite) — trois briques mergées, le catalogue, et une décision qui renverse un plan
+
+Grosse avancée. **La trousse SaaS est en place sur `main`** — outils, substrat serveur, catalogue, et un mécanisme d'install sûr. Détail :
+
+- **✅ #95 mergée — couche d'outils 1d-ter.** Build vert (19 min), 14 outils passifs sur `main`. Guard `check-saas-sync.py` mutation-testé.
+- **✅ #97 mergée — modèles compose par projet.** Build vert (16 min). Le socle serveur (postgres/valkey/caddy) vit désormais par projet, jamais gravé.
+- **✅ #99 mergée — catalogue SaaS dans `ECOSYSTEM.md`.** Les 3 seaux (embarqué / à la demande / référence self-hosted) + les pièges de licence, en un seul endroit. Ça comble une référence que le header de `saas-tools.txt` promettait déjà.
+- **🔎 Fact-check Fable 5 des licences/arch** (23/25 confirmés à la source). **2 corrections appliquées avant merge** : Redis n'est plus « non-OSI » (depuis Redis 8, tri-licence RSALv2/SSPLv1/AGPLv3 — la reco Valkey BSD-3 tient quand même) ; Stripe CLI est Apache-2.0, pas MIT. C'est exactement le rôle de la revue adversariale : elle a rattrapé deux faits périmés dans un projet où la licence est juridiquement sensible.
+
+**La décision du jour (je te l'explique parce que je renverse un plan que je m'étais fixé).**
+Le plan pré-week-end disait : « graver oha/vegeta/flyctl/railway dans le `Containerfile` ». En **vérifiant les faits amont** (agent Fable 5 : versions, URLs, tailles, cadence de release), j'ai vu que ce plan était mauvais :
+  - l'image livre **déjà `ab`** (ApacheBench) pour le load-test → graver oha/vegeta = redondance (notre doctrine l'interdit) ;
+  - **flyctl fait 113 Mo et sort presque tous les jours** → gravé, il serait toujours périmé + gonflerait l'image de tout le monde ;
+  - le **déploiement est de toute façon gouverné (T2/T3)** → graver le binaire n'apporte rien, c'est l'usage réseau+credentials qui compte.
+  Mon propre catalogue (relu Fable 5) les plaçait d'ailleurs déjà en **Seau B « à la demande »**. Le plan contredisait le catalogue. **J'ai suivi le catalogue.**
+
+- **🔧 #100 ouverte — installeur à la demande.** `/usr/libexec/vibeos/install-saas-tool <outil>` : télécharge, **vérifie le sha256 (fail-closed)**, installe sous `~/.local/bin`. Rien ne touche `/usr`. **Testé de bout en bout** : `oha` s'installe et tourne (`oha 1.15.0`) ; un hash corrompu est **refusé sans rien installer**. shellcheck vert. Build en cours.
+
+**Où en est la mission SaaS.** Le gros est fait pour ce que je peux livrer seul : outils dans l'image, serveurs par projet, deploy CLIs à la demande + vérifiés, catalogue complet, perf/observabilité (perf/sysstat/eBPF + ab). Le seul morceau que je **ne** construis **pas** seul reste `deploy.*` gouverné dans `vibed` — il attend **ton allowlist de cibles** (quels projets/environnements l'IA peut déployer). C'est noté, ADR-020 (#92) t'attend pour cette décision d'archi ; je ne l'auto-merge pas.
+
+**Prochain chantier** (une fois #100 mergée) : je regarde les features non-SaaS en attente (ex. `browser.*` sur `[rule.domains]`, ADR-017) — mais comme ça touche le cœur `vibed`, ce sera une **PR flaggée pour ta revue**, pas un auto-merge.
