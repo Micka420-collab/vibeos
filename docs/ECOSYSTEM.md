@@ -109,6 +109,82 @@ On démarre sur un **Plasma 6 brandé** — fork Catppuccin « VibeOS Dark », p
 | Plymouth adi1090x | Non maintenu + provenance d'assets floue → thème Plymouth **original VibeOS** à créer |
 | kitty / Alacritty / zsh / television / Kilo Code / AstroNvim / NvChad / sidekick.nvim / Lapce | Règle de non-redondance (alternatives documentées) |
 
+## 🚀 Trousse SaaS + ecommerce — la seconde trousse gouvernée
+
+> Ajoutée le **2026-07-18** ([ADR-020](DECISIONS.md), [PR #92](https://github.com/Micka420-collab/vibeos/pull/92)). Même doctrine que la cybersécurité : une **trousse curée et gouvernée**, pas un fourre-tout. Trois seaux selon **où** vit l'outil, jamais **ce qu'il fait** (leçon d'ADR-017).
+>
+> **Le partage clé (revue Fable 5) : outils passifs vs serveurs.** Un CLIENT (`psql`, `redis-cli`) et un orchestrateur (`podman-compose`) sont des outils passifs → ils vont dans l'image. Un SERVEUR (PostgreSQL, Valkey, Caddy) est un **service réseau persistant à état** → il n'entre **jamais** dans une image immuable ; il tourne en **conteneur par projet**, sous l'uid de l'utilisateur, état dans des volumes du projet.
+
+### Seau A — Outils embarqués dans l'image (`ship_default`, couche 1d-ter)
+
+> Livrés par [PR #95](https://github.com/Micka420-collab/vibeos/pull/95) (couche `1d-ter` du `Containerfile`, manifeste `os/saas-tools.txt` gardé par `check-saas-sync.py`). **Clients et outils passifs uniquement.** Runtimes de dev déjà présents en couche `1a` : `git`, `python3`/`pip`, `nodejs24`/`npm`.
+
+| Outil | Paquet F44 | Licence | Rôle |
+|---|---|---|---|
+| client PostgreSQL (`psql`) | `postgresql` | PostgreSQL (BSD-like) | Parler à la base d'un projet (`psql -h localhost`) — **client, pas serveur** |
+| SQLite | `sqlite` | Domaine public | Base zéro-démon pour prototypes / edge |
+| `redis-cli` (compat) | `valkey-compat-redis` | BSD-3 | Client Redis/Valkey — **Valkey** est le fork BSD-3 ; Redis 8 est re-licencié tri-licence (RSALv2/SSPLv1/AGPLv3), Valkey évite les branches non-OSI et le copyleft AGPL |
+| mkcert | `mkcert` | BSD-3 | CA locale → `https://` de dev valide, 100 % offline |
+| podman-compose | `podman-compose` | GPL-2.0 | Orchestre les serveurs **par projet** (voir modèles compose) |
+| uv | `uv` | Apache-2.0/MIT | Gestionnaire Python ultra-rapide (installe/isole sans toucher `/usr`) |
+| ruff | `ruff` | MIT | Linter + formateur Python |
+| mypy | `python3-mypy` | MIT | Typage statique Python |
+| ApacheBench (`ab`) | `httpd-tools` | Apache-2.0 | Test de charge HTTP rapide livré nativement |
+| perf | `perf` | GPL-2.0 | Profiling CPU noyau/appli |
+| sysstat | `sysstat` | GPL-2.0 | `sar`/`iostat`/`pidstat` — métriques système dans le temps |
+| bpftrace | `bpftrace` | Apache-2.0 | Traçage eBPF haut niveau (latences, syscalls) |
+| bcc | `bcc-tools` | Apache-2.0 | Boîte à outils eBPF (profilage fin) |
+| gh | `gh` | MIT | CLI GitHub (forge, releases, CI) |
+
+**Modèles `compose` livrés** ([PR #97](https://github.com/Micka420-collab/vibeos/pull/97), sous `/usr/share/vibeos/saas/`, via `COPY os/rootfs/ /`) — le socle serveur **par projet**, jamais gravé :
+
+| Modèle | Donne | Notes de sécurité |
+|---|---|---|
+| `postgres-valkey/` | PostgreSQL 18 + Valkey | Ports **loopback-only**, mot de passe **exigé** via `.env`, healthchecks, volumes nommés |
+| `reverse-proxy/` | Caddy 2 + TLS local (mkcert) | `https://` de dev offline ; un seul reverse-proxy (non-redondance) |
+
+### Seau B — À la demande (`offer_optional`) — jamais dans l'image
+
+> Trop lourds (Node/Python), ou **exigent le réseau** (donc un tier de policy explicite), ou évoluent trop vite pour être figés dans une base immuable. Installés dans `$HOME` (`npm i -g` dans un préfixe utilisateur, `uv tool`, binaire épinglé).
+
+| Outil | Licence | Vecteur | Rôle | Gouvernance |
+|---|---|---|---|---|
+| flyctl | Apache-2.0 | binaire épinglé (arm64 ✅) | Déployer sur Fly.io | **Déploiement = T2/T3** (allowlist + approbation, à venir) |
+| railway | MIT | binaire épinglé (arm64 ✅) | Déployer sur Railway | idem |
+| vercel CLI | Apache-2.0 | npm | Déployer sur Vercel | idem |
+| wrangler | MIT/Apache-2.0 | npm | Cloudflare Workers/Pages | idem |
+| netlify CLI | MIT | npm | Déployer sur Netlify | idem |
+| oha | MIT | binaire épinglé (arm64 ✅) | Test de charge HTTP moderne (TUI, HTTP/2) | T1 (local) |
+| vegeta | MIT | binaire épinglé (arm64 ✅) | Test de charge à débit constant + rapports | T1 (local) |
+| aws / gcloud / az | Apache-2.0 / propriétaire | rpm/installeur | CLIs cloud lourds | réseau → tier explicite |
+| Stripe CLI | Apache-2.0 | binaire | Tester des webhooks paiement | **exige le réseau + clés** → gated |
+
+### Seau C — Référence seulement (`self_host_reference`) — stacks conteneurs
+
+> Des **stacks conteneurs à état**, jamais dans une image immuable. L'IA citoyenne les **instancie par projet** (podman/compose) en suivant la doc amont — VibeOS documente le choix et le piège, ne grave rien.
+
+| Brique | Licence | Rôle | Piège / raison référence |
+|---|---|---|---|
+| Supabase | Apache-2.0 (cœur) | Backend BaaS (Postgres + Auth + Storage + Realtime) | Stack multi-conteneurs → par projet, jamais gravé |
+| Medusa | MIT | Backend **ecommerce** headless (Node) | `npx create-medusa-app` + Postgres (modèle compose) |
+| Umami | MIT | Analytics web respectueux (self-host) | Stack conteneur → par projet |
+| Grafana + Prometheus | AGPL-3.0 / Apache-2.0 | Observabilité SaaS (dashboards + métriques) | Démons réseau → conteneurs par projet |
+
+### 🔴 Pièges de licence SaaS — écartés, avec raison
+
+> Le cœur de la doctrine : ne **jamais** graver un composant dont la licence interdit la redistribution, ou qui est mort. Ces choix protègent Micka juridiquement.
+
+| Écarté | Licence / état | Remplacé par |
+|---|---|---|
+| Redis | Tri-licence RSALv2/SSPLv1/AGPLv3 depuis Redis 8 (2025) : 2 branches non-OSI, la 3ᵉ (AGPL) est un copyleft réseau lourd pour une image | **Valkey** (BSD-3, fork Linux Foundation, compatible protocole) : zéro friction |
+| MinIO | AGPL-3.0 **+ dépôt archivé/EOL** | Garage / SeaweedFS (self-host), ou stockage S3-compatible du cloud |
+| n8n | Sustainable Use (non-OSI) | Windmill (roadmap) — déjà listé dans les Rejetés |
+| Directus | MSCL (source-available, non-OSI) | Referencé seulement si l'utilisateur l'assume ; pas gravé |
+| Sentry | FSL (Functional Source, clause « competing use ») | GlitchTip (self-host) ou tier réseau opt-in |
+| WebPageTest (agent) | Polyform Shield (non-compete) | Lighthouse CI (Apache-2.0) |
+
+**Note de portée.** Le **déploiement en production** (`deploy.*` dans `vibed`) est une **capacité gouvernée à concevoir**, pas un simple binaire : elle attend (a) l'allowlist de cibles de Micka, (b) le patron helper-process d'[ADR-019](DECISIONS.md), (c) l'isolation des credentials cloud. Le catalogue liste les *outils* ; la *capacité* reste T2/T3 derrière approbation humaine sur le contenu déployé.
+
 ## Intégration — plan d'action
 
 1. **Phase 1 (image)** : ✅ fait — VSCodium livré (paquet `codium`) ; couche « terminal vibecoding » (Ghostty, fish, Starship, Zellij, yazi, lazygit, atuin, zoxide, bat, eza, btop, mise, opencode, nvim) + `/etc/skel` (preset VibeVim, layouts Zellij, config fish/starship) livrées. **Exception : age/SOPS et sqlite-vec ne sont pas intégrés à l'image** — recalés en cible ultérieure (voir niveau 1-bis).
