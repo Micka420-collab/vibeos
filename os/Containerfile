@@ -388,6 +388,43 @@ RUN dnf -y install --setopt=install_weak_deps=False \
     # them at boot via their own tmpfiles.d.
     && rm -rf /run/suricata /run/tor
 
+# --- 1d-ter. Touseau SaaS + ecommerce (Fedora repos) — OUTILS, PAS SERVEURS --
+# Seconde trousse gouvernée, même modèle que la cybersécurité ci-dessus
+# (docs/DECISIONS.md ADR-020) : des OUTILS disponibles dans le shell, dont
+# l'invocation par l'IA passera par le tiering vibed (dev local = T1 ;
+# déploiement/dépense = T2/T3).
+#
+# CE QUI EST ICI vs CE QUI N'Y EST PAS — distinction décidée par ADR-020 après
+# revue adversariale : uniquement des OUTILS PASSIFS (ils tournent, sortent, ne
+# laissent rien). Les SERVEURS (postgresql-server, valkey-server, un
+# reverse-proxy, un exporter) ne sont PAS gravés dans /usr : ce sont des
+# conteneurs par PROJET, lancés via podman + podman-compose (déjà natifs), à
+# partir des modèles /usr/share/vibeos/saas/. D'où : le CLIENT `postgresql`
+# (psql), pas `postgresql-server` (vérifié : le client ne tire pas le serveur).
+#
+# GOUVERNANCE : `npm install`/`pip install` sont le vecteur supply-chain M4
+# (hooks postinstall = RCE réseau) et tournent aujourd'hui dans le shell NON
+# gouverné (écart Bash natif, invariant n°1). L'IA ne déploie PAS en prod sans
+# la couche gouvernée à venir (deploy.* + allowlist + isolation credentials).
+#
+# Keep os/saas-tools.txt in strict sync with this list.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        postgresql \
+        sqlite \
+        valkey-compat-redis \
+        mkcert \
+        podman-compose \
+        uv \
+        ruff \
+        python3-mypy \
+        httpd-tools \
+        perf \
+        sysstat \
+        bpftrace \
+        bcc-tools \
+        gh \
+    && dnf clean all
+
 # --- 1e. Vibecoding terminal stack (COPR) ------------------------------------
 # Tools not packaged in Fedora, from well-maintained COPRs. All five verified
 # to ship fedora-44 chroots for BOTH x86_64 and aarch64 (2026-07-15, before the

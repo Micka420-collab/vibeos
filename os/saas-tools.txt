@@ -1,0 +1,30 @@
+# os/saas-tools.txt — manifeste du touseau SaaS + ecommerce embarqué.
+#
+# Miroir de la couche 1d-ter d'os/Containerfile : uniquement des OUTILS PASSIFS,
+# RPM signés Fedora (chaîne d'approvisionnement propre pour un OS immuable).
+#
+# Ce qui N'EST PAS ici, par décision (docs/DECISIONS.md ADR-020, après revue
+# adversariale) : les SERVEURS (postgresql-server, valkey-server, reverse-proxy,
+# exporters). Un service réseau persistant ne se grave pas dans une image
+# immuable — il tourne en conteneur PAR PROJET via podman-compose, à partir des
+# modèles de /usr/share/vibeos/saas/. D'où le CLIENT postgresql (psql), jamais
+# le serveur.
+#
+# Le catalogue complet (3 seaux : embarqué / à la demande / référence, briques
+# self-hosted, pièges de licence) est dans docs/ECOSYSTEM.md et l'ADR-020.
+#
+# Gardé en synchro STRICTE avec la couche 1d-ter par scripts/check-saas-sync.py.
+postgresql
+sqlite
+valkey-compat-redis
+mkcert
+podman-compose
+uv
+ruff
+python3-mypy
+httpd-tools
+perf
+sysstat
+bpftrace
+bcc-tools
+gh
