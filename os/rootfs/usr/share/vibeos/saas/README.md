@@ -38,6 +38,25 @@ pas dans l'image. `podman compose down` arrête ; `down -v` efface tout.
 | `postgres-valkey/` | PostgreSQL 18 + Valkey (cache/broker) — le socle d'un SaaS |
 | `reverse-proxy/` | Caddy + TLS local via la CA `mkcert` (0 réseau, `https://` en dev) |
 
+## Outils à la demande (Seau B) — épinglés et vérifiés
+
+Certains outils SaaS/deploy ne sont **pas** dans l'image (churn amont, taille, ou
+capacité gouvernée) mais s'installent à la demande, **épinglés + sha256 vérifié**,
+sous votre `$HOME` — sans toucher `/usr` :
+
+```sh
+/usr/libexec/vibeos/install-saas-tool list      # oha vegeta flyctl railway
+/usr/libexec/vibeos/install-saas-tool oha        # → ~/.local/bin/oha (vérifié)
+```
+
+Le hash est contrôlé **avant** installation (fail-closed : hash faux ⇒ rien
+n'est installé). `oha`/`vegeta` = test de charge (dev local, T1) ; `flyctl`/
+`railway` = déploiement (capacité **gouvernée T2/T3**, cf. ci-dessous). Le
+catalogue complet des 3 seaux est dans `docs/ECOSYSTEM.md`.
+
+> Rappel : l'image livre déjà `ab` (ApacheBench) pour le test de charge basique.
+> `oha`/`vegeta` sont des montées en gamme optionnelles, d'où « à la demande ».
+
 ## Gouvernance (rappel)
 
 Lancer ces conteneurs en **dev local** est du **T1** (la machine de l'utilisateur).

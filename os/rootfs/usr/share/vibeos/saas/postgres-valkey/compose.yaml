@@ -31,8 +31,9 @@ services:
     restart: unless-stopped
 
   cache:
-    # Valkey = le fork BSD-3 de Redis (Redis est passé SSPL/RSALv2, non-OSI ;
-    # voir ADR-020). Compatible protocole Redis : votre code Redis marche tel quel.
+    # Valkey = le fork BSD-3 de Redis (Redis 8 est tri-licencié RSALv2/SSPLv1/
+    # AGPLv3 ; Valkey évite les branches non-OSI et le copyleft AGPL — voir
+    # ADR-020). Compatible protocole Redis : votre code Redis marche tel quel.
     image: docker.io/valkey/valkey:8
     command: ["valkey-server", "--save", "60", "1"]
     ports:

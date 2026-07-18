@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# install-saas-tool — installe un outil SaaS/deploy ÉPINGLÉ et VÉRIFIÉ dans ~/.local/bin.
+#
+# Seau B d'ADR-020 (voir docs/ECOSYSTEM.md § « Trousse SaaS + ecommerce »).
+# Ces outils ne sont volontairement PAS gravés dans l'image immuable :
+#   * churn amont — flyctl publie une release ~quotidienne, railway tous les
+#     2-3 jours ; un binaire gravé serait presque toujours périmé ;
+#   * taille — flyctl fait ~113 Mo décompressé ;
+#   * la capacité de DÉPLOIEMENT elle-même reste gouvernée (T2/T3) : graver le
+#     binaire n'aide pas, c'est l'usage réseau+credentials qui est encadré.
+# On les fournit donc À LA DEMANDE, épinglés (version + sha256), installés sous
+# le $HOME de l'utilisateur. Rien ne touche /usr — l'immuabilité est préservée.
+#
+# Chaîne d'approvisionnement : le sha256 est vérifié AVANT installation, et
+# l'échec est FERMÉ (fail-closed : hash faux => rien n'est installé). Pour vegeta
+# et flyctl, le hash provient du fichier checksums OFFICIEL de la release ; pour
+# oha et railway (aucun fichier checksums publié en amont), c'est le digest que
+# GitHub atteste pour l'asset — la seule source officielle disponible.
+#
+# Les versions épinglées ci-dessous vieillissent (surtout flyctl/railway). Pour
+# mettre à jour : récupérer le nouveau sha256 amont et éditer la table `spec`.
+set -euo pipefail
+
+readonly PREFIX="${VIBEOS_SAAS_BIN:-$HOME/.local/bin}"
+readonly TOOLS=(oha vegeta flyctl railway)
+
+msg() { printf '%s\n' "$*" >&2; }
+die() { printf 'install-saas-tool: %s\n' "$*" >&2; exit 1; }
+
+detect_arch() {
+	case "$(uname -m)" in
+		x86_64) echo amd64 ;;
+		aarch64 | arm64) echo arm64 ;;
+		*) die "architecture non supportée : $(uname -m)" ;;
+	esac
+}
+
+# spec <outil> <arch> -> "url<TAB>sha256<TAB>mode<TAB>membre"
+#   mode=raw : l'asset téléchargé EST le binaire (membre = nom final)
+#   mode=tar : l'asset est un .tar.gz          (membre = binaire à extraire)
+spec() {
+	case "$1:$2" in
+	oha:amd64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/hatoo/oha/releases/download/v1.15.0/oha-linux-amd64" \
+		"86ab7fa2c1df23b3bbc53b73561ffa44a7a38ca08f0e10351df9522a5c4c3c61" raw oha ;;
+	oha:arm64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/hatoo/oha/releases/download/v1.15.0/oha-linux-arm64" \
+		"72d5bf4575cede9f9277f93f097b904f893b0f0cd4d92f0869439b05e1403731" raw oha ;;
+	vegeta:amd64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/tsenart/vegeta/releases/download/v12.13.0/vegeta_12.13.0_linux_amd64.tar.gz" \
+		"e8759ce45c14e18374bdccd3ba6068197bc3a9f9b7e484db3837f701b9d12e61" tar vegeta ;;
+	vegeta:arm64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/tsenart/vegeta/releases/download/v12.13.0/vegeta_12.13.0_linux_arm64.tar.gz" \
+		"950381173a5575e25e8e086f36fc03bf65d61a2433329b48e41e1cb5e4133bba" tar vegeta ;;
+	flyctl:amd64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/superfly/flyctl/releases/download/v0.4.71/flyctl_0.4.71_Linux_x86_64.tar.gz" \
+		"a782dceed173d215c000ab94e2b08623c22267edff6d90ebe3010b3f9b671dc2" tar flyctl ;;
+	flyctl:arm64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/superfly/flyctl/releases/download/v0.4.71/flyctl_0.4.71_Linux_arm64.tar.gz" \
+		"2783083a7e2cb213ebe449ea527c0e6ffd7cbd835096668ba38be9c7aeadedba" tar flyctl ;;
+	railway:amd64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/railwayapp/cli/releases/download/v5.27.0/railway-v5.27.0-x86_64-unknown-linux-gnu.tar.gz" \
+		"4d11590a4ed4f7ab1c3672f389d788be288b9f0f4823f9e5e524858d2b9c1d7b" tar railway ;;
+	railway:arm64) printf '%s\t%s\t%s\t%s' \
+		"https://github.com/railwayapp/cli/releases/download/v5.27.0/railway-v5.27.0-aarch64-unknown-linux-musl.tar.gz" \
+		"7e4b75090317a75f1164cb5d413235cf1624db88bd871d85f3a2f6952aba8f12" tar railway ;;
+	*) return 1 ;;
+	esac
+}
+
+usage() {
+	cat >&2 <<EOF
+Usage : install-saas-tool <outil>
+Outils épinglés (Seau B, ADR-020) : ${TOOLS[*]}
+Installe dans : $PREFIX  (override via VIBEOS_SAAS_BIN)
+Le sha256 est vérifié avant installation (fail-closed).
+EOF
+}
+
+main() {
+	if [ $# -ne 1 ]; then
+		usage
+		exit 2
+	fi
+	case "$1" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	list)
+		printf '%s\n' "${TOOLS[@]}"
+		exit 0
+		;;
+	esac
+
+	local tool="$1" arch row url sha mode member
+	arch="$(detect_arch)"
+	row="$(spec "$tool" "$arch")" ||
+		die "outil inconnu : $tool  (liste : install-saas-tool list)"
+	IFS=$'\t' read -r url sha mode member <<<"$row"
+
+	command -v curl >/dev/null || die "curl est requis"
+	command -v sha256sum >/dev/null || die "sha256sum est requis"
+
+	local tmp
+	tmp="$(mktemp -d)"
+	# shellcheck disable=SC2064  # on veut l'expansion de $tmp maintenant
+	trap "rm -rf '$tmp'" EXIT
+
+	msg "→ téléchargement de $tool ($arch)…"
+	curl -fsSL -o "$tmp/dl" "$url" || die "téléchargement échoué : $url"
+
+	msg "→ vérification sha256…"
+	if ! printf '%s  %s\n' "$sha" "$tmp/dl" | sha256sum -c - >/dev/null 2>&1; then
+		die "SHA256 NE CORRESPOND PAS — installation refusée (chaîne d'appro.). Le pin est peut-être périmé : mettez à jour la table spec de ce script."
+	fi
+
+	mkdir -p "$PREFIX"
+	case "$mode" in
+	raw)
+		install -m 0755 "$tmp/dl" "$PREFIX/$member"
+		;;
+	tar)
+		tar -xzf "$tmp/dl" -C "$tmp"
+		local bin="$tmp/$member"
+		if [ ! -f "$bin" ]; then
+			bin="$(find "$tmp" -type f -name "$member" | head -n1)"
+		fi
+		if [ -z "$bin" ] || [ ! -f "$bin" ]; then
+			die "binaire '$member' introuvable dans l'archive"
+		fi
+		install -m 0755 "$bin" "$PREFIX/$member"
+		;;
+	*) die "mode interne inconnu : $mode" ;;
+	esac
+
+	msg "✓ $member installé dans $PREFIX"
+	case ":$PATH:" in
+	*":$PREFIX:"*) ;;
+	*) msg "  note : $PREFIX n'est pas dans votre PATH — ajoutez-le à votre shell." ;;
+	esac
+}
+
+main "$@"
