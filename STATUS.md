@@ -10,10 +10,9 @@
 > #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth).
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-15 (matin)** — passe de justesse : ce fichier
-> avait sauté la session du 14→15 (donc annonçait encore `log.read` « en attente
-> de revue » alors qu'il est mergé, et « plus rien en attente de merge » alors que
-> 5 PR sont ouvertes).
+> Dernière mise à jour : **2026-07-18 (week-end autonome)** — **trousse SaaS +
+> ecommerce livrée** (#95/#97/#99/#100 mergées ; ADR-020 #92 ouverte pour la
+> décision `deploy.*`). Journal détaillé du week-end : [WEEKEND-LOG.md](WEEKEND-LOG.md).
 
 ## Vue d'ensemble
 
@@ -122,6 +121,13 @@
   - **Le reste de l'audit : vérifié robuste, aucun bypass** — approval (portail T2/T3, grant one-shot atomique), allowlist policy, pipeline mcp (rate-limit→denylist→policy→approbation→exec), gouvernance Zed (fail-closed), chaîne d'audit SHA-256, Containerfile (supply-chain), glob.rs, memory.rs, sha256.rs (vecteurs NIST présents). **Ne pas refaire cet audit.**
   - **Assets du splash de boot** ([#35](https://github.com/Micka420-collab/vibeos/pull/35)) : générateur Pillow (`desktop/plymouth/generate-assets.py`) — spirale galactique mauve→blue, cœur qui respire, wordmark. **Œuvre originale, reproductible.** Le thème reste **non activé** (Phase 5).
   - **CI/tests/docs** : shellcheck étendu aux scripts sécurité agent (#44), test du garde anti-recul d'horloge du rate-limiter (#41), SECURITY-ARCHITECTURE §3.3 recalé (durcissements fs = **faits**, plus « à faire ») (#45), THREAT-MODEL (log.read + denylist).
+
+- **2026-07-18 (week-end autonome)** — **Trousse SaaS + ecommerce gouvernée livrée** ([ADR-020](docs/DECISIONS.md), même modèle que la trousse cybersécurité). Quatre briques **mergées sur `main`**, chacune build vert + revue/fact-check Fable 5 :
+  - **[#95] couche `1d-ter`** : 14 outils **passifs** dnf-natifs (client `psql`, `sqlite`, `redis-cli`, `mkcert`, `podman-compose`, `uv`, `ruff`, `mypy`, `ab`, `perf`, `sysstat`, `bpftrace`, `bcc`, `gh`). **Clients, pas serveurs.** Manifeste `os/saas-tools.txt` gardé par `scripts/check-saas-sync.py` (mutation-testé, câblé CI).
+  - **[#97] modèles `compose` par projet** (`/usr/share/vibeos/saas/`) : PostgreSQL 18 + Valkey, et Caddy + TLS local `mkcert`. Les **serveurs** vivent en conteneurs **par projet** (ports loopback-only, mdp exigé via `.env`, volumes nommés), jamais gravés dans l'image.
+  - **[#100] installeur à la demande** `/usr/libexec/vibeos/install-saas-tool` : `oha`/`vegeta`/`flyctl`/`railway` téléchargés **épinglés + sha256 fail-closed** vers `~/.local/bin`, hors `/usr`. Testé de bout en bout (install `oha` OK ; hash corrompu **refusé**). Décision : **pas gravés** (redondance avec `ab`, churn/taille de `flyctl`, déploiement gouverné de toute façon).
+  - **[#99] catalogue [ECOSYSTEM.md](docs/ECOSYSTEM.md)** : 3 seaux (embarqué / à la demande / référence self-hosted) + pièges de licence. **Fact-check Fable 5** des licences à la source (Redis tri-licence, Stripe Apache-2.0…).
+  - **Honnêteté (invariant projet)** : la seule chose *vraiment* neuve demandée — **déployer en prod** — n'est **PAS** livrée. `deploy.*` gouverné dans `vibed` est une **capacité d'exécution nouvelle** qui attend (a) l'**allowlist de cibles de Micka**, (b) le helper-process d'[ADR-019](docs/DECISIONS.md), (c) l'isolation des credentials cloud. **[ADR-020 / PR #92](https://github.com/Micka420-collab/vibeos/pull/92) reste OUVERTE** pour cette décision — non auto-mergée.
 
 ## 📋 Reste à faire (court terme)
 

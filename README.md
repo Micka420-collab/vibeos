@@ -19,7 +19,7 @@ VibeOS est une distribution Linux **AI-native, immuable et sécurisée par conce
 
 > 📊 **Où en est le projet ?** L'état d'avancement vivant (fait / en cours / reste à faire) est dans **[STATUS.md](STATUS.md)**.
 >
-> 🔴 **Travail autonome en cours (week-end 2026-07-18 → 20)** : le touseau **SaaS + ecommerce gouverné** est en construction. Suivi en direct dans **[WEEKEND-LOG.md](WEEKEND-LOG.md)**.
+> 🟢 **Travail autonome (week-end 2026-07-18 → 20)** : la trousse **SaaS + ecommerce gouvernée** est **livrée** (outils embarqués, serveurs en conteneurs par projet, installeur à la demande vérifié, catalogue) — voir la section dédiée plus bas. Reste ouvert : le déploiement **gouverné** (`deploy.*`), en attente d'une décision d'architecture. Suivi en direct dans **[WEEKEND-LOG.md](WEEKEND-LOG.md)**.
 
 ---
 
@@ -52,6 +52,9 @@ Runtime d'agents hybride, préinstallé et épinglé dans l'image : **Claude Cod
 
 ### 🛡️ Trousse cybersécurité gouvernée
 VibeOS est **security-first** : une trousse d'outils de pentest/DFIR professionnelle est embarquée dans l'image (≈ 60 RPM signés Fedora/RPM Fusion — `nmap`, `hashcat`, `radare2`, `aircrack-ng`, `impacket`, `sleuthkit`, `suricata`, `lynis`…), à la manière de Kali/Parrot/BlackArch. La différence : elle est **gouvernée** par le moteur de politiques. Un agent IA peut **découvrir** la trousse en lecture seule (outil MCP `sectools.list`, T0) mais **ne peut exécuter** aucun outil sans passer par le tiering — tout ce qui est **actif contre une cible est T2, le destructif T3**, avec **approbation humaine obligatoire**. Catalogue complet (état de l'art 2025-2026, dont la **sécurité IA/LLM** : garak, PyRIT, guardrails) et cadre d'usage autorisé : [docs/SECURITY-TOOLKIT.md](docs/SECURITY-TOOLKIT.md).
+
+### 🚀 Trousse SaaS + ecommerce gouvernée
+Même modèle, seconde trousse ([ADR-020](docs/DECISIONS.md)) : de quoi développer un SaaS ou une boutique **de A à Z**. L'image ne grave que les **outils passifs** — les **clients** et l'outillage de dev (`psql`, `sqlite`, `redis-cli`, `uv`/`ruff`/`mypy`, `podman-compose`, `mkcert`), la mesure de performance (`ab`, `perf`, `sysstat`, `bpftrace`, `bcc`) et `gh` — au-dessus des runtimes déjà présents (Node 24, Python 3.13, git). Les **serveurs** (PostgreSQL, Valkey, Caddy) ne sont **jamais** gravés : ils tournent en **conteneurs par projet** depuis les modèles `compose` fournis (`/usr/share/vibeos/saas/`), sous l'uid de l'utilisateur. Les CLIs de déploiement et de test de charge (`flyctl`, `railway`, `oha`, `vegeta`) s'installent **à la demande, épinglés + sha256 vérifié** (`/usr/libexec/vibeos/install-saas-tool`). Le **déploiement en production** reste une capacité **gouvernée** à concevoir (`deploy.*`, T2/T3 + allowlist de cibles). Catalogue complet (3 seaux + pièges de licence) : [docs/ECOSYSTEM.md](docs/ECOSYSTEM.md).
 
 ### 🧬 Multi-architecture — amd64 + arm64
 VibeOS cible **linux/amd64 et linux/arm64**. Depuis le tag `v0.1.0-dev`, la CI construit les deux architectures sur **runners natifs**, publie le **manifest multi-arch signé cosign** (keyless, journal Rekor) sur ghcr.io et génère **une ISO par architecture**, en artefacts du run de release (voir ci-dessous : ce sont des artefacts de *run*, pas des assets de *release* — le dépôt ne publie aucune GitHub Release à ce jour). La couche pilote **NVIDIA** (akmod, RPM Fusion) est compilée au build de l'image, sur amd64 uniquement ; sa **validation sur le PC de référence** (RTX 3070 Ti) est un critère de sortie de la Phase 1, encore ouvert — voir [docs/HARDWARE.md](docs/HARDWARE.md).
