@@ -82,3 +82,14 @@ dans le Containerfile (build vert obligatoire), revu par Fable 5 avant merge.
 - **Note process** : `git rebase` puis `origin/main` périmé m'ont coûté deux reprises (worktree Windows). Discipline adoptée : **cherry-pick, jamais rebase** ; **`git fetch` avant chaque branche**.
 
 **Décision que je te laisse** (notée pour ton retour) : l'outil `vibed` `deploy.*` gouverné a besoin de ton **allowlist de cibles** (quels projets/environnements l'IA peut déployer) — sœur du `[rule.domains]` du navigateur. Je ne le construis pas sans ça.
+
+### 2026-07-18 (suite) — revue Fable 5 intégrée, première brique du socle livrée
+
+- **Revue adversariale Fable 5 sur ADR-020 → 3 vraies failles corrigées** (commit `1ea89f8`, [PR #92](https://github.com/Micka420-collab/vibeos/pull/92)) :
+  1. **Serveur ≠ outil passif.** Postgres/valkey/caddy sont des services réseau persistants, pas des `nmap`. Et j'étais incohérent (Supabase en « conteneur toi-même » mais postgres nu gravé). → les serveurs **sortent de l'image**, deviennent des **conteneurs par projet** (podman-compose + modèles de référence). Le seau embarqué = **outils passifs seulement**.
+  2. **`npm install` n'est pas T1 bénin** — c'est le vecteur supply-chain M4 dans le shell non gouverné. Dit tel quel.
+  3. **Déploiement gouverné** : l'allowlist borne le *où*, jamais le *quoi* (leçon d'ADR-017) ; + isolation des credentials cloud = 3ᵉ verrou. Le vrai garde-fou = approbation humaine sur le **contenu**.
+- **[PR #95](https://github.com/Micka420-collab/vibeos/pull/95) — la couche 1d-ter livrée** : 14 outils dnf-natifs (client psql, sqlite, redis-cli, mkcert, podman-compose, uv, ruff, mypy, ab, perf, sysstat, bpftrace, bcc, gh). **Client postgresql, PAS le serveur** (vérifié). Manifeste `os/saas-tools.txt` + garde-fou `check-saas-sync.py` mutation-testé. Le méta-garde-fou (#87) compte maintenant **7** checks, tous câblés — il valide son propre nouvel usage.
+- **Discipline** : chaque PR de cette session est revue (Fable 5 sur le design, mutation-test sur les garde-fous) et attend un build vert avant merge.
+
+**Prochaines briques** (PR sœurs) : binaires épinglés (oha/vegeta/flyctl/railway, arm64 vérifié), modèles `compose` de référence (postgres/valkey/caddy par projet), MàJ `ECOSYSTEM.md`.
