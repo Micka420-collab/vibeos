@@ -1,0 +1,50 @@
+# base-digest-fresh.yml — le digest de base épinglé résout-il encore ?
+#
+# POURQUOI CE WORKFLOW EST PROGRAMMÉ ET PAS SUR PUSH
+#
+# La base f44 est VIVANTE (rebâtie ~chaque nuit) et quay PURGE les anciens index.
+# Le digest épinglé dans os/Containerfile cesse de résoudre au bout d'un ou deux
+# jours — « manifest unknown » — et tout build casse. Arrivé les 2026-07-16 ET
+# 2026-07-17, deux jours de suite.
+#
+# La purge se produit UPSTREAM, sans push. Un contrôle sur push n'attrape rien :
+# quand quelqu'un pousse enfin, le build échoue déjà. D'où un cron QUOTIDIEN,
+# indépendant des push, qui rend la dérive visible AVANT le prochain push.
+#
+# LECTURE SEULE. `contents: read` (lit le Containerfile) + une requête sur un
+# registre public. Il NOTIFIE (job rouge), il ne bumpe rien. L'auto-bump
+# exigerait des permissions d'écriture — décision opérateur, hors de ce workflow.
+name: base-digest-fresh
+
+on:
+  schedule:
+    # Tous les jours à 08:00 UTC — après la republication nocturne de Fedora
+    # (les digests observés étaient créés vers 00:30–01:00 UTC).
+    - cron: "0 8 * * *"
+  workflow_dispatch: {}
+  # Aussi sur PR/push touchant le pin lui-même, pour valider un bump avant merge.
+  pull_request:
+    paths:
+      - "os/Containerfile"
+      - "scripts/check-base-digest-fresh.sh"
+      - ".github/workflows/base-digest-fresh.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  digest-resolves:
+    name: Le digest de base épinglé résout encore
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Vérifier que le digest épinglé résout
+        run: bash scripts/check-base-digest-fresh.sh os/Containerfile

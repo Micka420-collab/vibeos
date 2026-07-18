@@ -41,6 +41,7 @@ silence. Un check qui devient aveugle et répond vert est le pire des deux monde
 | Script | Attrape | Motivé par |
 |---|---|---|
 | `check-base-eol.sh` | une base Fedora EOL, ou à < 30 j de l'être | l'OS a tourné 49 j sur Fedora 42 EOL, sans aucun signal |
+| `check-base-digest-fresh.sh` | le digest de base épinglé purgé par quay (base vivante) | le build a cassé 2 jours de suite, la purge arrive sans push |
 | `check-sectools-sync.py` | `security-tools.txt` ≠ couche sectools du Containerfile | 3 outils retirés du build, jamais du manifeste |
 | `check-log-hygiene.py` | un secret/contenu de fichier loggué en niveau `info` | critère de sortie Phase 2 (ROADMAP §4) |
 | `check-hud-client.js` | la couche JS du HUD qui traduit le format `vibed` | seule couche du HUD testable sans Qt |
