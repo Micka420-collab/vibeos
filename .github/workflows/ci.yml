@@ -38,6 +38,7 @@ on:
       # aveugle sur un changement de base.
       - "os/Containerfile"
       - "os/security-tools.txt"
+      - "os/saas-tools.txt"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -57,6 +58,7 @@ on:
       # aveugle sur un changement de base.
       - "os/Containerfile"
       - "os/security-tools.txt"
+      - "os/saas-tools.txt"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -156,6 +158,12 @@ jobs:
       - name: Trousse cybersécurité — manifeste == couche installée
         working-directory: .
         run: python3 scripts/check-sectools-sync.py
+
+      # Même exigence pour le touseau SaaS (couche 1d-ter / os/saas-tools.txt) :
+      # « garder en synchro » n'est une synchro que si un check l'applique.
+      - name: Touseau SaaS — manifeste == couche installée
+        working-directory: .
+        run: python3 scripts/check-saas-sync.py
 
   audit:
     name: vibed — cargo audit (RustSec)
