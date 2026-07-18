@@ -93,3 +93,14 @@ dans le Containerfile (build vert obligatoire), revu par Fable 5 avant merge.
 - **Discipline** : chaque PR de cette session est revue (Fable 5 sur le design, mutation-test sur les garde-fous) et attend un build vert avant merge.
 
 **Prochaines briques** (PR sœurs) : binaires épinglés (oha/vegeta/flyctl/railway, arm64 vérifié), modèles `compose` de référence (postgres/valkey/caddy par projet), MàJ `ECOSYSTEM.md`.
+
+### 2026-07-18 (suite) — modèles compose livrés (le socle serveur, hors image)
+
+- **[PR #97](https://github.com/Micka420-collab/vibeos/pull/97) — les modèles `compose` par projet.** C'est la conséquence directe de la faille #1 de la revue Fable 5 : les **serveurs** (postgres/valkey/caddy) sortent de l'image immuable et deviennent des conteneurs **par projet**. Livrés sous `/usr/share/vibeos/saas/` via `COPY os/rootfs/ /` — **zéro** changement de `Containerfile`, donc **indépendant de #95** (pas de conflit de couche).
+  - `postgres-valkey/` : PostgreSQL 18 + Valkey. Ports **loopback-only**, mot de passe Postgres **exigé** via `.env` (jamais en clair, jamais commité), healthchecks, volumes nommés (l'état vit dans le projet, pas dans l'image).
+  - `reverse-proxy/` : Caddy + TLS local via `mkcert` (déjà livré couche 1d-ter) → un `https://` de dev valide, 100 % offline.
+  - README qui explique *pourquoi conteneurs-pas-services*, l'usage, et le rappel de gouvernance (dev local = T1 ; prod = T2/T3 à venir).
+- **Cohérence vérifiée avant push** : YAML des deux `compose` valides, liens relatifs du README corrigés (6 niveaux jusqu'à la racine), `verify-roadmap-truth` vert.
+- **#95 (couche d'outils 1d-ter)** : build amd64 natif relancé (l'échec précédent était un *flake* CDN quay.io sur le pull de la base finale, pas ma couche). En cours.
+
+**Prochaines briques** : binaires épinglés (oha/vegeta/flyctl/railway) — **séquentielle**, elle touche le `Containerfile`, donc après #95 ; puis catalogue SaaS/ecommerce dans `ECOSYSTEM.md`.
