@@ -1118,7 +1118,7 @@ Recherche menée avant toute décision (comme ADR-017), sur les dépôts F44 ré
 
 **Le socle SERVEUR = conteneurs par projet, PAS des services système.** PostgreSQL, Valkey, un reverse-proxy, un exporter de métriques ne sont **pas** gravés dans `/usr`. VibeOS livre à la place des **modèles `compose` de référence** (dans `/usr/share/vibeos/saas/`, non-exécutés) que l'agent ou l'humain instancie par projet via `podman compose up`. Un seul reverse-proxy est retenu pour les modèles : **Caddy** (Apache-2.0, TLS auto, se marie proprement avec `mkcert` offline) — **pas `caddy` ET `nginx`**, la règle de non-redondance du projet (`ECOSYSTEM.md` : un seul terminal, une seule distro Neovim) vaut ici. Ces images tournent sous l'uid de l'utilisateur, avec état sous son `/home`, sans toucher l'immuabilité.
 
-**Seau A-bis — binaires épinglés** (MIT/permissif statiques, pas dans Fedora — modèle `ollama` : pin + sha256, arm64 **vérifié par asset de release**) :
+**Seau A-bis — binaires épinglés, livrés À LA DEMANDE (révisé à l'implémentation, voir encadré sous la table)** (MIT/permissif statiques, pas dans Fedora — pin + sha256, arm64 **vérifié par asset de release**) :
 
 | Outil | Rôle | Licence | arm64 (asset vérifié) |
 |---|---|---|---|
@@ -1128,6 +1128,14 @@ Recherche menée avant toute décision (comme ADR-017), sur les dépôts F44 ré
 | `railway` v5.27 | déploiement Railway (Rust musl statique) | MIT | `railway-..-aarch64-unknown-linux-musl` ✅ |
 
 *(`bpftop` retiré : il ne publie **aucun binaire de release** — source-only, build cargo, et dépendant du BTF noyau. `bcc-tools`/`bpftrace` — RPM Fedora — couvrent déjà le traçage eBPF. La pré-vérification arm64 l'a attrapé avant l'implémentation.)*
+
+> **Révision d'implémentation (2026-07-18) — ces quatre binaires ne sont PAS gravés dans l'image.** Le plan initial (« modèle `ollama` : les mettre dans le `Containerfile` ») a été **abandonné après collecte des faits amont** (agent Fable 5) :
+> - **redondance** — l'image livre **déjà `ab`** (httpd-tools, RPM signé) pour le load-test ; graver `oha`/`vegeta` viole la non-redondance ;
+> - **churn + taille** — `flyctl` fait **~113 Mo** et publie une release **~quotidienne**, `railway` tous les 2-3 j : gravés, ils seraient presque toujours périmés et gonfleraient l'image de tous ;
+> - **la capacité déploiement est de toute façon gouvernée (T2/T3)** — graver le binaire n'aide pas, c'est l'usage réseau+credentials qui est encadré ;
+> - **chaîne d'appro.** — `oha`/`railway` ne publient **aucun fichier checksums** amont (seul le digest attesté GitHub existe), argument de plus contre une gravure dans une image signée.
+>
+> **À la place : un installeur à la demande** `/usr/libexec/vibeos/install-saas-tool <outil>` ([#100](https://github.com/Micka420-collab/vibeos/pull/100)) — pin + sha256 **fail-closed**, install sous `~/.local/bin`, rien ne touche `/usr`. Les pins restent réels ; seul le **vecteur** change (à la demande, pas gravé). C'est exactement le sens du Seau B : « binaire épinglé » comme *vecteur*, pas comme couche d'image.
 
 **Seau B — À LA DEMANDE** (runtime Node/Python lourd, ou binaires volumineux — installés par l'utilisateur via `npm`/`mise`/`distrobox`, jamais dans `/usr`) :
 - `pnpm`, `bun` (via `mise`) ; `vercel`, `wrangler`, `netlify-cli` (npm) ; `aws`/`gcloud`/`az` (installeurs lourds à interpréteur embarqué) ; `autocannon`, `lighthouse` (npm).
@@ -1172,12 +1180,12 @@ Le **déploiement gouverné** (`deploy.*`) est une **capacité d'exécution nouv
 
 **Cadrage honnête de ce que cet ADR livre.** La demande était *« les mettre en production… de A à Z »*. Node/Python étaient déjà là ; `uv`/`ruff`/`psql` sont du **confort de dev**. La seule chose vraiment neuve demandée — *mettre en prod* — est précisément la partie **repoussée** (déploiement gouverné, dépend de trois verrous ci-dessus). Cet ADR livre donc un **socle de dev + une reconnaissance de dette** pour la feature phare. C'est assumé, dit tel quel.
 
-**À implémenter dès cet ADR** (PR sœurs, build vert obligatoire — en autonomie) :
-- **à ajouter** : le seau A (OUTILS passifs) dans le Containerfile, en couche dédiée sœur de la trousse cybersécu ;
-- **à ajouter** : les **binaires épinglés** (seau A-bis) selon le modèle `ollama` (sha256, arm64 vérifié) — `oha`, `vegeta`, `flyctl`, `railway` *(pas `bpftop` : source-only)* ;
-- **à créer** : des **modèles `compose` de référence** (`/usr/share/vibeos/saas/`) pour postgres/valkey/caddy — les serveurs comme conteneurs par projet, jamais des services système ;
-- **à créer** : un manifeste des outils SaaS (sœur de `os/security-tools.txt`), gardé en synchro par un futur contrôle de cohérence ;
-- **à mettre à jour** : `ECOSYSTEM.md` — catalogue complet, 3 seaux, briques self-hosted en référence.
+**Implémenté dès cet ADR** (PR sœurs, build vert — en autonomie week-end 2026-07-18, toutes **mergées** sauf mention) :
+- ✅ **[#95]** : le seau A (OUTILS passifs) dans le `Containerfile`, couche `1d-ter` sœur de la trousse cybersécu ;
+- ✅ **[#100]** : les **binaires épinglés** (seau A-bis) — `oha`, `vegeta`, `flyctl`, `railway` — mais via un **installeur à la demande** (`install-saas-tool`, pin+sha256 fail-closed, hors image), **pas** gravés (voir la révision d'implémentation plus haut) *(pas `bpftop` : source-only)* ;
+- ✅ **[#97]** : les **modèles `compose` de référence** (`/usr/share/vibeos/saas/`) pour postgres/valkey/caddy — serveurs comme conteneurs par projet ;
+- ✅ **[#95]** : un manifeste des outils SaaS (`os/saas-tools.txt`, sœur de `os/security-tools.txt`), gardé en synchro par `scripts/check-saas-sync.py` (mutation-testé, câblé CI) ;
+- ✅ **[#99]** : `ECOSYSTEM.md` — catalogue complet, 3 seaux, briques self-hosted en référence (licences re-vérifiées à la source par un fact-check Fable 5).
 
 **Ce que la revue adversariale a corrigé** (Fable 5, 2026-07-18) : la première version embarquait les serveurs comme s'ils étaient des CLIs passifs, classait `npm install` en T1 bénin, et laissait entendre que l'allowlist de déploiement suffisait. Les trois sont redressés ci-dessus. La revue a aussi confirmé la solidité de la curation de licences et de la discipline de report du déploiement.
 
@@ -1189,4 +1197,4 @@ Le **déploiement gouverné** (`deploy.*`) est une **capacité d'exécution nouv
 ### Résiduel accepté
 
 - Le dev local via le `Bash` natif de l'agent reste **hors gouvernance `vibed`** jusqu'à la fermeture de l'écart (invariant n°1, décision `permissions.deny` en attente). Pour du dev sur la machine de l'utilisateur, c'est le comportement attendu ; le danger réel (déploiement, dépense) est, lui, réservé aux tiers gouvernés à venir.
-- Les binaires épinglés (seau A-bis) exigent un **bump manuel** de version — même corvée que le digest de base, atténuée par le même type d'alerte si besoin.
+- Les binaires épinglés (seau A-bis) exigent un **bump manuel** de version dans la table `spec` de `install-saas-tool`. **Pas d'alerte automatisée**, décidé délibérément : une cron de fraîcheur serait soit bruyante (`flyctl` sort chaque jour), soit muette (GitHub ne supprime pas les vieilles releases). Les pins sont des snapshots best-effort ; l'installeur **fail-close** si le hash ne correspond pas, donc un pin périmé n'installe jamais rien de faux — au pire il installe une version un peu ancienne.
