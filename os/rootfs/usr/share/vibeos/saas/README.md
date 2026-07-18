@@ -3,6 +3,10 @@
 Ces modèles `compose` donnent à un projet SaaS/ecommerce son socle serveur —
 base de données, cache, reverse-proxy — **sans rien graver dans l'OS immuable**.
 
+> 🚀 **Vous voulez le parcours complet, du dossier vide au déploiement ?**
+> Voir **[QUICKSTART.md](QUICKSTART.md)** — le runbook A→Z avec les commandes
+> réelles à chaque étape.
+
 ## Pourquoi des conteneurs, pas des services système
 
 VibeOS est immuable et security-first. Un `postgresql-server` gravé dans `/usr`
