@@ -1,0 +1,45 @@
+# saas-compose-integration.yml — les modèles compose SaaS DÉMARRENT vraiment.
+#
+# POURQUOI un workflow à part (et pas dans ci.yml) : ce test monte de vrais
+# conteneurs (docker compose up), ce qui exige un runner avec docker — présent
+# sur ubuntu-latest, absent du job `rust` de ci.yml. check-saas-compose.py (le
+# garde STATIQUE loopback-only) vit, lui, dans ci.yml.
+#
+# Motivation : le 2026-07-19, postgres-valkey a été livré en crash-loop (postgres:18
+# refuse l'ancien chemin de volume) — invisible pour un contrôle statique, trouvé
+# seulement par un test d'intégration manuel. Ce workflow le rend automatique.
+name: saas-compose-integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "os/rootfs/usr/share/vibeos/saas/**"
+      - "scripts/check-saas-compose-runtime.sh"
+      - ".github/workflows/saas-compose-integration.yml"
+  pull_request:
+    paths:
+      - "os/rootfs/usr/share/vibeos/saas/**"
+      - "scripts/check-saas-compose-runtime.sh"
+      - ".github/workflows/saas-compose-integration.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: saas-compose-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Modèles compose SaaS — démarrent vraiment
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # docker + docker compose v2 sont préinstallés sur ubuntu-latest ; openssl
+      # (certs de test du reverse-proxy) aussi. Rien à installer.
+      - name: Monter chaque modèle et vérifier qu'il devient prêt
+        run: bash scripts/check-saas-compose-runtime.sh
