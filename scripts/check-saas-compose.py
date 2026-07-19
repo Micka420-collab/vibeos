@@ -23,6 +23,7 @@ Pour chaque `compose.yaml` sous os/rootfs/usr/share/vibeos/saas/ :
 USAGE : python3 scripts/check-saas-compose.py   (0 = conforme)
 """
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -69,9 +70,10 @@ def check_file(path):
             continue  # ligne entièrement commentée : ignorée
 
         if in_ports:
-            # On reste dans le bloc tant que c'est une entrée de liste plus
-            # indentée que la clé `ports:`.
-            if ind > ports_indent and stripped.startswith("-"):
+            # On reste dans le bloc tant que c'est une entrée de liste. En YAML
+            # une entrée de séquence peut être à la MÊME indentation que la clé
+            # (`ports:\n- "..."`) — d'où `>=`, pas `>` (sinon ce style passe).
+            if ind >= ports_indent and stripped.startswith("-"):
                 spec = port_spec(stripped)
                 if spec is None:
                     errors.append(
@@ -89,10 +91,22 @@ def check_file(path):
             else:
                 in_ports = False  # fin du bloc ports
 
-        # détection de l'ouverture d'un bloc `ports:`
-        if stripped == "ports:":
-            in_ports = True
-            ports_indent = ind
+        # Ouverture d'un bloc `ports:` (clé seule, éventuel commentaire en fin).
+        # Une forme INLINE (`ports: ["..."]`) ou un alias (`ports: *ancre`) n'est
+        # pas vérifiable ligne à ligne → on ÉCHOUE (fail-closed), on ne l'ignore
+        # pas : c'est exactement par là qu'un 0.0.0.0 passerait.
+        m = re.match(r"^ports\s*:(.*)$", stripped)
+        if m:
+            rest = m.group(1).split("#", 1)[0].strip()
+            if rest:
+                errors.append(
+                    "%s:%d — bloc `ports:` en forme inline/alias (`%s`) non "
+                    "vérifiable par ce garde ; utilisez la forme bloc "
+                    '(- "127.0.0.1:HOST:CONT").' % (rel, n, stripped)
+                )
+            else:
+                in_ports = True
+                ports_indent = ind
 
 
 compose_files = sorted(SAAS_DIR.glob("**/compose.yaml"))

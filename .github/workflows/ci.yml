@@ -39,6 +39,11 @@ on:
       - "os/Containerfile"
       - "os/security-tools.txt"
       - "os/saas-tools.txt"
+      # Sans cette entrée, une PR qui ne touche QUE les modèles compose ne
+      # déclenche pas ci.yml — et check-saas-compose.py (le garde loopback-only)
+      # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
+      # os/Containerfile plus haut.
+      - "os/rootfs/usr/share/vibeos/saas/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -59,6 +64,11 @@ on:
       - "os/Containerfile"
       - "os/security-tools.txt"
       - "os/saas-tools.txt"
+      # Sans cette entrée, une PR qui ne touche QUE les modèles compose ne
+      # déclenche pas ci.yml — et check-saas-compose.py (le garde loopback-only)
+      # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
+      # os/Containerfile plus haut.
+      - "os/rootfs/usr/share/vibeos/saas/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
