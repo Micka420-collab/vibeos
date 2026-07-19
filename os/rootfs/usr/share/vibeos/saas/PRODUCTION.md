@@ -46,27 +46,36 @@ Le §1 *déclare* une intention de pare-feu ; il ne **prouve** pas qu'elle tient
 VibeOS est security-first et livre une trousse cybersécu — sers-t'en **sur ta
 propre infra**, en défensif, avant d'exposer quoi que ce soit :
 
-- **Confirme la surface réseau depuis DEHORS.** `nmap` lancé *sur le serveur
-  lui-même* ment : le trafic loopback/local ne traverse pas firewalld comme un
-  paquet venu d'Internet. Scanne depuis une **autre machine** (un VPS, ton poste,
-  un shell cloud) :
+- **Confirme la surface réseau depuis DEHORS.** Scanner *depuis le serveur lui-même*
+  trompe : un paquet vers ta propre IP arrive par `lo` (que firewalld accepte
+  d'office) et ne voit **ni** le NAT **ni** les security groups de l'hébergeur.
+  Scanne depuis une **autre machine** (ton poste, un VPS) :
   ```sh
-  nmap -Pn -p- <IP-PUBLIQUE-DU-SERVEUR>     # depuis un AUTRE hôte, pas le serveur
-  # attendu : 22, 80, 443 open ; TOUT le reste closed/filtered.
-  # 5432/6379/7700 (base/cache/search), 3000 (Grafana) ou 9090 (cockpit) ouverts
-  # = STOP, reviens au §1 : ta base est publique.
+  nmap -Pn -p- --reason <IP-PUBLIQUE>      # depuis un AUTRE hôte, pas le serveur
+  nmap -6  -Pn -p- <IPv6-DU-SERVEUR>       # AUSSI en v6 si tu publies un AAAA (§2)
+  # attendu : 22/80/443 = open ; tout le reste = FILTERED (le pare-feu absorbe).
+  # un port `closed` n'est PAS un succès : le pare-feu a LAISSÉ PASSER le paquet
+  #   (RST renvoyé) — ta règle firewalld ne tient pas là, même si rien n'écoute
+  #   encore. Le jour où un service bind 0.0.0.0, il est public. → reviens au §1.
+  # 5432/6379/7700 (base/cache/search), 3000 (Grafana), 9090 (cockpit) en open = STOP.
   ```
+  Scan **TCP** (l'UDP `-sU` est lent et rarement utile ici). Vérifie aussi l'**AUP
+  de la machine d'où tu scannes** : un scan sortant depuis un shell cloud mutualisé
+  peut violer ses conditions, même vers ta propre IP.
 - **Audite le durcissement de l'hôte.** `lynis` note la config système (SSH,
   noyau, services, permissions) et liste des correctifs concrets :
   ```sh
   sudo lynis audit system            # index de durcissement + warnings/suggestions
   ```
-  Traite d'abord les `[WARNING]` ; les `[SUGGESTION]` selon ton modèle de menace.
+  Traite les `[WARNING]` d'abord. Sur un OS image (bootc), les correctifs vont dans
+  la **recette de l'image**, pas sur l'hôte : ignore les suggestions qui supposent
+  un système mutable classique (installer des paquets, repartitionner, écrire `/usr`).
 
-> ⚖️ **Gouvernance.** Ceci est de l'audit **défensif de TA PROPRE infra** —
-> légitime, non gouverné. La trousse contient aussi des outils *offensifs* : les
-> pointer sur une cible **tierce** est du **T2/T3** (autorisation requise), pas ce
-> dont il s'agit ici. Tu scannes/audites **ce que tu possèdes**.
+> ⚖️ **Gouvernance.** Audit **défensif de TA PROPRE infra** — légitime. La trousse
+> contient aussi des outils *offensifs* : les pointer sur une cible **tierce** est
+> du **T2/T3** (autorisation requise), pas ce dont il s'agit ici. Tu audites **ce
+> que tu possèdes** — et le scan externe valide le combiné hébergeur+hôte, garde
+> donc le `firewall-cmd --list-all` du §1 comme preuve côté hôte.
 
 ## 2. Vrai TLS : Caddy en frontal (un seul port public)
 
