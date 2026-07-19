@@ -165,6 +165,15 @@ jobs:
         working-directory: .
         run: python3 scripts/check-saas-sync.py
 
+      # Sécurité : chaque modèle compose de la trousse SaaS ne publie ses ports
+      # QUE sur la loopback (127.0.0.1). Un modèle qui exposerait une base (souvent
+      # sans mot de passe fort en dev) sur 0.0.0.0 la mettrait sur tout le réseau
+      # local. Laissée en convention de revue, la règle dérive au premier modèle
+      # ajouté ; ce garde la rend exécutable (et fail-closed).
+      - name: Modèles compose SaaS — ports loopback-only
+        working-directory: .
+        run: python3 scripts/check-saas-compose.py
+
   audit:
     name: vibed — cargo audit (RustSec)
     runs-on: ubuntu-latest
