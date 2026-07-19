@@ -29,20 +29,37 @@ command -v skopeo >/dev/null || {
 }
 
 # Digest épinglé actuellement dans le Containerfile (1re occurrence).
-pinned="$(grep -oE "fedora-kinoite:${TAG}@sha256:[0-9a-f]{64}" "$CF" | head -n1 | grep -oE 'sha256:[0-9a-f]{64}')"
-[ -n "$pinned" ] || {
+# `if !` : sous `set -e`, un `x="$(pipeline)"` qui échoue quitterait AVANT le
+# garde `[ -n ]` — le message d'erreur serait mort. On teste donc l'assignation.
+if ! pinned="$(grep -oE "fedora-kinoite:${TAG}@sha256:[0-9a-f]{64}" "$CF" | head -n1 | grep -oE 'sha256:[0-9a-f]{64}')" || [ -z "$pinned" ]; then
 	echo "erreur: aucun digest épinglé trouvé dans $CF" >&2
 	exit 3
-}
+fi
 
-# Digest courant de la manifest-list du tag.
-current="$(skopeo inspect --no-tags "docker://${REPO}:${TAG}" --format '{{.Digest}}')"
-[ -n "$current" ] || {
+# On ne bumpe QUE sur PURGE réelle. La base f44 est republiée chaque nuit (le tag
+# bouge tous les jours), mais l'ancien digest épinglé reste RÉSOLVABLE jusqu'à ce
+# que quay le purge. Bumper à chaque dérive de tag ouvrirait une PR + un build
+# COMPLET quotidiens pour rien. Donc : si le pin résout encore, on ne touche à rien.
+if skopeo inspect --raw "docker://${REPO}@${pinned}" >/dev/null 2>&1; then
+	echo "unchanged (${pinned} résout encore)"
+	exit 0
+fi
+
+# Le pin ne résout plus (purgé) → résoudre le digest courant du tag.
+if ! current="$(skopeo inspect --no-tags "docker://${REPO}:${TAG}" --format '{{.Digest}}')" || [ -z "$current" ]; then
 	echo "erreur: impossible de résoudre ${REPO}:${TAG}" >&2
 	exit 4
-}
+fi
+
+# Valider le format AVANT tout splice dans sed (anti-corruption : un sha512 ou une
+# valeur inattendue produirait un pin corrompu).
+if ! [[ "$current" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+	echo "erreur: digest courant au format inattendu: $current" >&2
+	exit 4
+fi
 
 if [ "$pinned" = "$current" ]; then
+	# Défensif : le pin ne résolvait pas mais le tag pointe le même digest.
 	echo "unchanged ($pinned)"
 	exit 0
 fi

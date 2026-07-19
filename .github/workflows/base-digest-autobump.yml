@@ -13,9 +13,17 @@
 # L'humain garde le dernier mot : ce workflow OUVRE une PR (jamais un merge) et
 # déclenche le build de vérification ; le merge reste manuel, après build vert.
 # C'est le même patron que Dependabot (déjà dans ce dépôt). Les permissions
-# d'écriture sont bornées à ce job : `contents: write` (pousser la branche de
-# bump) + `pull-requests: write` (ouvrir la PR).
+# d'écriture sont bornées à ce job : `contents: write` (pousser la branche),
+# `pull-requests: write` (ouvrir la PR), `actions: write` (dispatcher le build).
 #
+# ⚠️ PRÉREQUIS OPÉRATEUR (une seule fois) : activer, dans Settings → Actions →
+# General, « Allow GitHub Actions to create and approve pull requests » (OFF par
+# défaut). Sans ça, `gh pr create` échoue et le job devient rouge (loud, mais la
+# remédiation ne se fait pas). À valider par un `workflow_dispatch` à blanc après
+# activation (digest courant => "unchanged", aucune PR).
+#
+# Ne bumpe QUE sur PURGE réelle (pin qui ne résout plus), pas à chaque
+# republication nocturne de f44 — sinon PR + build COMPLET quotidiens pour rien.
 # Le helper bump-base-digest.sh refuse un digest qui ne serait pas une
 # manifest-list multi-arch (amd64+arm64) — un mono-arch casserait l'autre arch.
 name: base-digest-autobump
@@ -28,8 +36,9 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: write # pousser la branche de bump
+  pull-requests: write # ouvrir la PR
+  actions: write # `gh workflow run build-os.yml` (dispatch du build de vérif)
 
 concurrency:
   group: base-digest-autobump
@@ -73,14 +82,33 @@ jobs:
         run: |
           set -euo pipefail
           new="${{ steps.bump.outputs.new_digest }}"
+
+          # Anti-écrasement d'un correctif humain : si la branche de bump existe
+          # déjà et que son DERNIER commit n'est pas du bot (un humain a poussé un
+          # fix sur la PR pour la débloquer), on n'y touche pas. Le fetch explicite
+          # est requis : checkout ne récupère pas les autres branches distantes.
+          if git fetch origin "$BRANCH" 2>/dev/null; then
+            last_author="$(git log -1 --format='%an' FETCH_HEAD 2>/dev/null || true)"
+            if [ -n "$last_author" ] && [ "$last_author" != "vibeos-autobump[bot]" ]; then
+              echo "::warning::origin/$BRANCH a un dernier commit non-bot ($last_author) — je ne l'écrase pas ; résous la PR à la main."
+              exit 0
+            fi
+          fi
+
           git config user.name "vibeos-autobump[bot]"
           git config user.email "vibeos-autobump@users.noreply.github.com"
           git switch -C "$BRANCH"
           git add os/Containerfile
+          if git diff --cached --quiet; then
+            echo "Containerfile inchangé — rien à pousser."
+            exit 0
+          fi
           git commit \
             -m "fix(os): auto-bump digest de base F44 -> ${new}" \
             -m "Le digest épinglé a été purgé par quay (base f44 vivante). Digest courant résolu et vérifié multi-arch (amd64+arm64) par scripts/bump-base-digest.sh. Merge après build vert. Généré par base-digest-autobump.yml."
-          git push --force-with-lease origin "$BRANCH"
+          # --force est sûr ICI : on a vérifié au-dessus que la branche est absente
+          # ou finit sur un commit du bot (jamais de travail humain écrasé).
+          git push --force origin "$BRANCH"
 
           # Ouvre la PR si aucune n'est déjà ouverte pour cette branche.
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
@@ -91,7 +119,10 @@ jobs:
             echo "PR déjà ouverte pour $BRANCH — branche mise à jour."
           fi
 
-          # Déclenche le build de vérification sur la branche (le dispatch marche
-          # avec GITHUB_TOKEN, contrairement au trigger pull_request d'une PR ouverte
-          # par le token). Le merge reste manuel, après ce build vert.
-          gh workflow run build-os.yml --ref "$BRANCH" || echo "dispatch build-os non déclenché (à lancer à la main si besoin)"
+          # Déclenche le build de vérification (le dispatch marche avec
+          # GITHUB_TOKEN, contrairement au trigger pull_request d'une PR ouverte par
+          # le token — d'où actions: write dans les permissions). Un échec est une
+          # ALERTE VISIBLE, pas avalée : sans build vert, ne pas merger.
+          if ! gh workflow run build-os.yml --ref "$BRANCH"; then
+            echo "::warning::dispatch de build-os échoué — lance le build de vérification à la main (workflow_dispatch sur $BRANCH) AVANT de merger la PR."
+          fi
