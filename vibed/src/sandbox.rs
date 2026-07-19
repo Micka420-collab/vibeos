@@ -329,6 +329,14 @@ pub struct ToolOutput {
     pub stderr: String,
 }
 
+/// Cap on the RESULT channel (helper stdout) buffered in root `vibed`'s memory.
+/// `MemoryMax` bounds the helper's cgroup, NOT the bytes it writes to a pipe, so
+/// without this a hostile helper could flood stdout and OOM the root daemon
+/// (Fable 5). 8 MiB is far above any legitimate bounded result.
+const STDOUT_CAP: usize = 8 * 1024 * 1024;
+/// Cap on captured diagnostics (helper stderr + systemd-run chatter).
+const STDERR_CAP: usize = 256 * 1024;
+
 /// Spawn the hardened transient service and capture its outcome.
 ///
 /// `vibed` (root) exec's **`systemd-run`, not the tool**, with the cleared
@@ -336,24 +344,49 @@ pub struct ToolOutput {
 /// environment can never redirect what the root daemon launches. `systemd-run`
 /// then exec's the low-privilege helper under the compiled hardening profile.
 ///
-/// The `control_payload` (a compiled policy snapshot / request) is written to
-/// the service's stdin via `--pipe`, then stdin is **closed** before we read, so
-/// a bounded payload and a bounded result cannot deadlock on a full pipe. stdout
-/// (the result) and stderr (diagnostics) are captured on **separate** pipes.
+/// The `control_payload` is written to the service's stdin via `--pipe` on a
+/// dedicated thread while two reader threads drain stdout (the result) and
+/// stderr (diagnostics) on **separate**, **capped** buffers — deadlock-free for
+/// any size, and the capture can never OOM the root daemon. stdout must be valid
+/// UTF-8 (it is a JSON result channel; invalid bytes are a corruption/attack
+/// signal, so we fail closed rather than lossily patch them — Fable 5); stderr
+/// is lossy (free-form diagnostics). On an over-cap flood the child is killed
+/// and the call fails closed.
 ///
 /// Time-bounding is delegated to the profile's `RuntimeMaxSec` + `--wait` (the
-/// same reliance on the child's own bound that `svc.rs` documents for
-/// systemctl); `vibed` adds no wall-clock of its own here.
+/// same reliance on the child's own bound that `svc.rs` documents for systemctl).
 ///
 /// NOTE: the *systemd behaviour* this drives can only be validated on the target
-/// (a full-systemd Fedora host); here the caller side is exercised against a
-/// fake `systemd-run` exactly as `svc.rs` is exercised against a fake systemctl.
+/// (a full-systemd Fedora host); the caller side is exercised against a fake
+/// `systemd-run` exactly as `svc.rs` is exercised against a fake systemctl.
 pub fn spawn_transient(
     systemd_run_bin: &str,
     unit: &TransientUnit,
     helper_bin: &str,
     helper_args: &[String],
     control_payload: &[u8],
+) -> Result<ToolOutput, String> {
+    spawn_transient_capped(
+        systemd_run_bin,
+        unit,
+        helper_bin,
+        helper_args,
+        control_payload,
+        STDOUT_CAP,
+        STDERR_CAP,
+    )
+}
+
+/// Backend of [`spawn_transient`] with the output caps injected, so a test can
+/// drive the over-cap path with tiny limits instead of megabytes.
+fn spawn_transient_capped(
+    systemd_run_bin: &str,
+    unit: &TransientUnit,
+    helper_bin: &str,
+    helper_args: &[String],
+    control_payload: &[u8],
+    stdout_cap: usize,
+    stderr_cap: usize,
 ) -> Result<ToolOutput, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -368,38 +401,91 @@ pub fn spawn_transient(
         .spawn()
         .map_err(|e| format!("spawn_transient: cannot exec {}: {e}", argv[0]))?;
 
-    // Write the control payload on a SEPARATE thread, then close stdin (drop the
-    // handle => EOF). Writing on its own thread while the main thread drains
-    // stdout/stderr is deadlock-free for ANY payload/result size — writing fully
-    // before reading could wedge once both exceed the pipe buffer.
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "spawn_transient: no stdin pipe".to_string())?;
+    // Take all three pipes. Each `take` is infallible right after `Stdio::piped()`.
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+
+    // One thread writes the control payload (then drops stdin => EOF); two drain
+    // the output pipes with a hard cap. Writing and reading concurrently is
+    // deadlock-free for any size; the caps keep a hostile flood out of root
+    // vibed's heap. Readers ALWAYS drain to EOF (discarding past the cap) so the
+    // child never blocks on a full pipe.
     let payload = control_payload.to_vec();
     let writer = std::thread::spawn(move || stdin.write_all(&payload));
+    let out_reader = std::thread::spawn(move || read_capped(stdout, stdout_cap));
+    let err_reader = std::thread::spawn(move || read_capped(stderr, stderr_cap));
 
-    // Reads stdout and stderr concurrently to completion, then reaps the child.
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("spawn_transient: waiting for systemd-run: {e}"))?;
+    let out_joined = out_reader.join();
+    let err_joined = err_reader.join();
+    let _ = writer.join(); // best-effort; a write failure surfaces as a run failure
 
-    // Surface a control-payload write failure (e.g. helper died before reading),
-    // but only if the run did not itself already fail.
-    match writer.join() {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) if out.status.success() => {
-            return Err(format!("spawn_transient: writing control payload: {e}"));
+    let unwrap_reader = |joined: std::thread::Result<std::io::Result<(Vec<u8>, bool)>>,
+                         which: &str|
+     -> Result<(Vec<u8>, bool), String> {
+        match joined {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(format!("spawn_transient: reading {which}: {e}")),
+            Err(_) => Err(format!("spawn_transient: {which} reader panicked")),
         }
-        Ok(Err(_)) => {} // run failed anyway; its status/stderr is the real signal
-        Err(_) => return Err("spawn_transient: control-payload writer panicked".to_string()),
+    };
+    let out = unwrap_reader(out_joined, "stdout");
+    let err = unwrap_reader(err_joined, "stderr");
+
+    // On ANY problem (reader error or over-cap flood) kill before reaping so a
+    // long-lived root daemon never leaks a zombie (Fable 5); otherwise the
+    // readers already hit EOF, meaning the child has exited.
+    let overflow = matches!(&out, Ok((_, true))) || matches!(&err, Ok((_, true)));
+    if out.is_err() || err.is_err() || overflow {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("spawn_transient: reaping systemd-run: {e}"))?;
+
+    let (out_buf, _) = out?;
+    let (err_buf, _) = err?;
+    if overflow {
+        return Err(format!(
+            "spawn_transient: helper exceeded output cap (stdout {stdout_cap} / stderr {stderr_cap} bytes) — killed and refused"
+        ));
     }
 
+    // Result channel must be valid UTF-8 (JSON); diagnostics may be anything.
+    let stdout = String::from_utf8(out_buf).map_err(|_| {
+        "spawn_transient: helper stdout is not valid UTF-8 (result channel)".to_string()
+    })?;
+    let stderr = String::from_utf8_lossy(&err_buf).into_owned();
     Ok(ToolOutput {
-        status: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status: status.code(),
+        stdout,
+        stderr,
     })
+}
+
+/// Read `r` to EOF, keeping at most `cap` bytes; returns `(kept, overflowed)`.
+/// Keeps draining past the cap (discarding) so the writer never blocks on a full
+/// pipe — the cap bounds MEMORY, not whether we read to the end.
+fn read_capped<R: std::io::Read>(mut r: R, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    let mut overflowed = false;
+    loop {
+        let n = r.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        if kept.len() < cap {
+            let take = (cap - kept.len()).min(n);
+            kept.extend_from_slice(&chunk[..take]);
+            if take < n {
+                overflowed = true;
+            }
+        } else {
+            overflowed = true;
+        }
+    }
+    Ok((kept, overflowed))
 }
 
 // --------------------------------------------------------------------------
@@ -920,16 +1006,18 @@ mod tests {
 
     // ---- spawn (against a fake systemd-run, like svc.rs' fake systemctl) --
 
-    /// Write an executable fake `systemd-run` that records its argv and the
-    /// control payload it receives on stdin, echoes a canned result to stdout and
-    /// chatter to stderr, and exits with `exit`. Uses only shell builtins so it
-    /// runs under `env_clear()` (empty PATH — no `cat`/external binaries).
+    /// Write an executable fake `systemd-run` that records its argv, the control
+    /// payload it receives on stdin, and whether `$VIBED_CANARY` survived into
+    /// its environment; then writes `stdout_content` (via `printf %b`, so
+    /// `\0377` = a raw byte) to stdout and chatter to stderr, and exits with
+    /// `exit`. Shell builtins only, so it runs under `env_clear()` (empty PATH).
     #[cfg(unix)]
     fn fake_systemd_run(
         dir: &std::path::Path,
         argv_marker: &std::path::Path,
         payload_marker: &std::path::Path,
-        result: &str,
+        env_marker: &std::path::Path,
+        stdout_content: &str,
         exit: i32,
     ) -> String {
         use std::os::unix::fs::PermissionsExt;
@@ -937,14 +1025,16 @@ mod tests {
         let script = format!(
             "#!/bin/sh\n\
              echo \"$@\" > '{argv}'\n\
+             printf '%s' \"${{VIBED_CANARY:-absent}}\" > '{env}'\n\
              IFS= read -r payload\n\
              printf '%s' \"$payload\" > '{payload}'\n\
-             printf '%s\\n' '{result}'\n\
+             printf '%b' '{result}'\n\
              echo 'run-uXX.service: chatter to stderr' >&2\n\
              exit {exit}\n",
             argv = argv_marker.display(),
+            env = env_marker.display(),
             payload = payload_marker.display(),
-            result = result,
+            result = stdout_content,
             exit = exit,
         );
         std::fs::write(&path, script).expect("write fake systemd-run");
@@ -953,42 +1043,53 @@ mod tests {
     }
 
     /// Retry around the TEST-ONLY ETXTBSY race (a parallel test's fork() can
-    /// transiently hold our write fd to the just-written fake). Production only
-    /// ever execs the static `/usr/bin/systemd-run`.
+    /// transiently hold our write fd to the just-written fake), with the output
+    /// caps injected so a test can drive the over-cap path. Production only ever
+    /// execs the static `/usr/bin/systemd-run`.
     #[cfg(unix)]
     fn spawn_retry(
         bin: &str,
         unit: &TransientUnit,
-        helper: &str,
         args: &[String],
         payload: &[u8],
+        out_cap: usize,
+        err_cap: usize,
     ) -> Result<ToolOutput, String> {
+        let helper = "/usr/libexec/vibed-tool";
         for _ in 0..50 {
-            match spawn_transient(bin, unit, helper, args, payload) {
+            match spawn_transient_capped(bin, unit, helper, args, payload, out_cap, err_cap) {
                 Err(e) if e.contains("Text file busy") => {
                     std::thread::sleep(std::time::Duration::from_millis(20))
                 }
                 other => return other,
             }
         }
-        spawn_transient(bin, unit, helper, args, payload)
+        spawn_transient_capped(bin, unit, helper, args, payload, out_cap, err_cap)
+    }
+
+    /// A fresh, unique temp dir for a spawn test's fake + markers.
+    #[cfg(unix)]
+    fn spawn_tmp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vibed-spawn-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[cfg(unix)]
     #[test]
     fn spawn_transient_pipes_payload_and_keeps_channels_separate() {
-        let dir = std::env::temp_dir().join(format!("vibed-spawn-ok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let (argv_m, payload_m) = (dir.join("argv"), dir.join("payload"));
-        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, "BOUNDED-RESULT", 0);
+        let dir = spawn_tmp("ok");
+        let (argv_m, payload_m, env_m) = (dir.join("argv"), dir.join("payload"), dir.join("env"));
+        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, &env_m, "BOUNDED-RESULT", 0);
 
         let out = spawn_retry(
             &bin,
             &browser(),
-            "/usr/libexec/vibed-tool",
             &["probe".to_string()],
             b"control-snapshot-v1\n",
+            1 << 20,
+            1 << 20,
         )
         .expect("spawn succeeds");
 
@@ -1023,24 +1124,106 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_transient_propagates_a_nonzero_exit() {
-        let dir = std::env::temp_dir().join(format!("vibed-spawn-err-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let (argv_m, payload_m) = (dir.join("argv"), dir.join("payload"));
-        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, "", 64);
+        let dir = spawn_tmp("err");
+        let (argv_m, payload_m, env_m) = (dir.join("argv"), dir.join("payload"), dir.join("env"));
+        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, &env_m, "", 64);
 
         let out = spawn_retry(
             &bin,
             &browser(),
-            "/usr/libexec/vibed-tool",
             &["probe".to_string()],
             b"x\n",
+            1 << 20,
+            1 << 20,
         )
         .expect("spawn runs");
         assert_eq!(
             out.status,
             Some(64),
             "the helper's exit code must propagate"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `env_clear()` really happens: a canary set in vibed's own environment must
+    /// NOT reach the spawned systemd-run — otherwise a dropped `.env_clear()`
+    /// would pass every other test unnoticed (Fable 5).
+    #[cfg(unix)]
+    #[test]
+    fn spawn_transient_clears_the_environment() {
+        std::env::set_var("VIBED_CANARY", "leaked");
+        let dir = spawn_tmp("env");
+        let (argv_m, payload_m, env_m) = (dir.join("argv"), dir.join("payload"), dir.join("env"));
+        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, &env_m, "ok", 0);
+
+        let _ = spawn_retry(
+            &bin,
+            &browser(),
+            &["probe".to_string()],
+            b"x\n",
+            1 << 20,
+            1 << 20,
+        )
+        .expect("spawn runs");
+        assert_eq!(
+            std::fs::read_to_string(&env_m).unwrap(),
+            "absent",
+            "VIBED_CANARY must be cleared before exec (env_clear)"
+        );
+        std::env::remove_var("VIBED_CANARY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A helper that floods stdout past the cap is killed and refused, so a
+    /// hostile flood can never OOM root vibed (Fable 5 — the one blocking hole).
+    #[cfg(unix)]
+    #[test]
+    fn spawn_transient_refuses_an_over_cap_flood() {
+        let dir = spawn_tmp("flood");
+        let (argv_m, payload_m, env_m) = (dir.join("argv"), dir.join("payload"), dir.join("env"));
+        let bin = fake_systemd_run(
+            &dir,
+            &argv_m,
+            &payload_m,
+            &env_m,
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            0,
+        );
+
+        // 40 bytes of result under an 8-byte stdout cap => refused.
+        let err = spawn_retry(&bin, &browser(), &["probe".to_string()], b"x\n", 8, 1 << 20)
+            .expect_err("an over-cap flood must fail closed");
+        assert!(
+            err.contains("exceeded output cap"),
+            "must refuse the flood: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The result channel must be valid UTF-8: invalid bytes are a
+    /// corruption/attack signal, refused rather than lossily patched (Fable 5).
+    #[cfg(unix)]
+    #[test]
+    fn spawn_transient_rejects_non_utf8_result() {
+        let dir = spawn_tmp("utf8");
+        let (argv_m, payload_m, env_m) = (dir.join("argv"), dir.join("payload"), dir.join("env"));
+        // `\0377\0376` = bytes 0xFF 0xFE, never valid UTF-8.
+        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, &env_m, "\\0377\\0376", 0);
+
+        let err = spawn_retry(
+            &bin,
+            &browser(),
+            &["probe".to_string()],
+            b"x\n",
+            1 << 20,
+            1 << 20,
+        )
+        .expect_err("invalid UTF-8 on the result channel must fail closed");
+        assert!(
+            err.contains("not valid UTF-8"),
+            "must refuse non-UTF-8: {err}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
