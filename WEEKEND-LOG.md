@@ -134,3 +134,18 @@ Le plan pré-week-end disait : « graver oha/vegeta/flyctl/railway dans le `Cont
 - **STATUS.md + README recalés** : la trousse SaaS y figure désormais (entrée datée dans STATUS, section dédiée dans le README, en parallèle de la trousse cybersécu), avec l'honnêteté d'usage : *déployer en prod* n'est **pas** livré.
 - **Constat de fin** : le backlog restant est **de ton côté** (booter la VM, tester l'ISO, valider NVIDIA) ou du **durcissement TCB** (SELinux, `User=vibed`, sandbox par outil) qui exige un système démarré **et** ta revue — donc pas d'auto-merge. La surface de travail net **sûre et autonome** est, pour l'instant, épuisée avec la trousse SaaS. Je ne vais pas inventer du risque pour paraître occupé : s'il reste une vraie amélioration sûre non-TCB, je la pousse ; sinon je garde de la veille en fond et je te laisse un état net.
 - **Mémoire agent** : doctrine « graver vs à la demande » consignée pour les prochaines sessions (churn/taille/gouvernance/redondance → installeur vérifié).
+
+### 2026-07-19 (dimanche) — tu as mergé l'ADR, et tu m'as dit de continuer
+
+Tu es repassé, tu as **mergé ADR-020 (#92) toi-même** (direction de la trousse validée par toi 👍) et demandé de continuer jusqu'à 23h. Je repars sur du concret, **sur tes axes explicites** (« outils d'analyse des perfs du SaaS » + « ecommerce ») :
+
+- **[PR #104] — 3 modèles compose de plus** (faits vérifiés à la source, agent Fable 5 + WebFetch) :
+  - `observability/` : **Prometheus + Grafana** (datasource auto-branché) — l'analyse de perf applicative que tu demandais ;
+  - `object-storage/` : **SeaweedFS** (Apache-2.0, S3-compatible mono-conteneur) — uploads/images produit d'un ecommerce ; **MinIO écarté** (AGPL+archivé), **Garage écarté** (AGPL, même raison) ;
+  - `mailpit/` : catcher SMTP de dev (MIT) — teste les emails sans les envoyer.
+  Câblés dans README/QUICKSTART de la trousse + `ECOSYSTEM.md`.
+- **[PR #105] — garde CI « compose loopback-only »** (mergée) : `check-saas-compose.py` refuse tout modèle qui publierait un port hors `127.0.0.1` (une base exposée au réseau = fuite). Mutation-testé, méta-garde à **8**. Bonus : corrige un trou de `scripts/README.md` (`check-saas-sync` manquait de l'inventaire).
+- **[PR #106] — bump du digest de base** : quay a **re-purgé** le digest épinglé (`7b70f8c6…` → `manifest unknown`), ce qui cassait **tous** les builds (dont #104). Bumpé vers `892ab960…` (manifest-list multi-arch vérifiée). Le cron `base-digest-fresh` a bien **détecté+alerté** (run 09:50 = échec) — l'alerting marche.
+- **Décision que je te laisse [tâche #168]** : ce bump quasi-quotidien est une vraie friction (déjà 4×). Le vrai fix (miroir de la base sur ghcr, ou cron qui auto-ouvre la PR de bump) **change la posture supply-chain / les permissions du cron** — donc à **trancher par toi**, pas en autonomie. Options + compromis notés.
+
+**En vol** : #106 (build, débloque tout) puis #104 (à rebuild sur `main` corrigé). Je les mène au vert et je les merge.
