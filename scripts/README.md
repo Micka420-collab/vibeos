@@ -45,6 +45,7 @@ silence. Un check qui devient aveugle et répond vert est le pire des deux monde
 | `check-sectools-sync.py` | `security-tools.txt` ≠ couche sectools du Containerfile | 3 outils retirés du build, jamais du manifeste |
 | `check-saas-sync.py` | `saas-tools.txt` ≠ couche 1d-ter du Containerfile | même dérive que la trousse cybersécu, prévenue en amont |
 | `check-saas-compose.py` | un modèle compose SaaS publiant un port hors loopback (0.0.0.0) | une base exposée au réseau local (souvent sans mdp fort en dev) = fuite |
+| `check-saas-compose-runtime.sh` | un modèle compose SaaS qui ne DÉMARRE pas (crash-loop, healthcheck cassé) | postgres-valkey livré crash-loopant sur postgres:18 — invisible au contrôle statique |
 | `check-log-hygiene.py` | un secret/contenu de fichier loggué en niveau `info` | critère de sortie Phase 2 (ROADMAP §4) |
 | `check-hud-client.js` | la couche JS du HUD qui traduit le format `vibed` | seule couche du HUD testable sans Qt |
 | `check-guards-wired.py` | un `check-*`/`verify-*` non exécuté en CI | 5 garde-fous câblés à la main, un par un |
