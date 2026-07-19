@@ -4,9 +4,10 @@ Ces modèles `compose` donnent à un projet SaaS/ecommerce son socle serveur —
 base de données, cache, reverse-proxy — **sans rien graver dans l'OS immuable**.
 
 > 🚀 **Vous voulez le parcours complet, du dossier vide au déploiement ?**
-> Voir **[QUICKSTART.md](QUICKSTART.md)** — le runbook A→Z (dev local) ; et
-> **[PRODUCTION.md](PRODUCTION.md)** pour le self-hosted **en production** (vrai
-> TLS, secrets, systemd, sauvegardes, pare-feu).
+> Voir **[QUICKSTART.md](QUICKSTART.md)** — le runbook A→Z (dev local) ;
+> **[ECOMMERCE.md](ECOMMERCE.md)** — monter une **boutique Medusa** branchée sur le
+> substrat (base, images, recherche) ; et **[PRODUCTION.md](PRODUCTION.md)** pour le
+> self-hosted **en production** (vrai TLS, secrets, systemd, sauvegardes, pare-feu).
 
 ## Pourquoi des conteneurs, pas des services système
 

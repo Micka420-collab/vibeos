@@ -15,9 +15,12 @@ projet et votre `$HOME`.
 npm create next-app@latest monsaas    # ou: npm create vite@latest
 # …ou API Python
 uv init monapi && cd monapi && uv add fastapi uvicorn
-# …ou ecommerce
+# …ou ecommerce → runbook dédié : ECOMMERCE.md (Medusa branché sur le substrat)
 npx create-medusa-app@latest maboutique
 ```
+
+> 🛒 Pour une **boutique ecommerce complète** (Medusa + base + images S3 + recherche
+> Meilisearch, avec les pièges connus), suivez **[ECOMMERCE.md](ECOMMERCE.md)**.
 
 ## B — Le socle serveur (base + cache), en conteneurs par projet
 
