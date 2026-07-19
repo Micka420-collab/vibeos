@@ -11,8 +11,12 @@
 #
 # `server -s3` réunit master + volume + filer + passerelle S3 dans UN conteneur.
 # Creds : tant qu'aucun fichier de conf S3 n'est monté, la passerelle prend les
-# variables AWS_* comme identifiants admin (documenté). Pas de healthcheck
-# déclaré (client HTTP interne non garanti) : sondez /status sur 8333 à la main.
+# variables AWS_* comme identifiants admin (documenté). VÉRIFIÉ : avec ces creds,
+# une requête S3 ANONYME est bien refusée (HTTP 403) — pas d'accès public. ⚠️ ces
+# variables sont la source de PLUS BASSE priorité : si un jour une conf S3 est
+# écrite dans le filer (via `weed shell`/UI), elle les supplante silencieusement —
+# ne mélangez pas les deux. Pas de healthcheck déclaré (client HTTP interne non
+# garanti) : sondez /status sur 8333 à la main.
 
 services:
   s3:
