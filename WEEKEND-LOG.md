@@ -198,3 +198,12 @@ Tu m'as dit « continue » : j'ai avancé la **feature phare que ta demande init
 4. Toujours en attente : la décision **miroir de base** (#168) et le **boot/test ISO**.
 
 **État `main`** : propre, la trousse SaaS/ecommerce complète + relue Fable 5 + vérifiée E2E. La seule PR ouverte est #120 (ce design, flaggé pour toi). J'ai poussé tout ce qui était **sûr et autonome** ; ce qui reste est un petit ensemble de **décisions d'architecture qui te reviennent**, chacune posée concrètement, prête à exécuter dès ton feu vert.
+
+### 2026-07-19 (dimanche, nuit) — les DEUX features phares conçues ; tout converge sur ADR-019
+
+- **[ADR-022 / #124]** — runtime de `browser.*` conçu concrètement (le pendant de `deploy.*`), stacké sur #120. **Bonne nouvelle vérifiée** : l'arm64 n'est plus un blocage — Fedora 44 package `chromium-headless` pour x86_64 ET aarch64 (le showstopper qu'ADR-017 craignait tombe). Design : pilotage CDP par pipe (zéro port, zéro Node), isolation par le service transitoire d'ADR-019, egress par proxy CONNECT (correction d'ADR-017 : `IPAddressAllow` est par IP, pas par domaine).
+- **Revue Fable 5 → 5 trous fermés**, dont une **contradiction majeure** : ma v1 mettait le proxy + le parsing CDP **dans `vibed` root**, ce qui violait ADR-019 (parser du hostile dans le moteur de politiques). Corrigé : tout le parsing hostile va dans un **helper de faible privilège**. Bonus : trancher le profil **éphémère** (pas de login persistant) **neutralise** le scénario « agir en ton nom » qu'ADR-017 acceptait — le design en sort plus sûr.
+
+**La synthèse qui compte pour toi.** Les **deux** features phares gouvernées — `deploy.*` (#120) et `browser.*` (#124) — sont désormais **conçues concrètement, faits vérifiés, relues Fable 5**. Et elles **convergent sur une seule décision** : **ADR-019** (le service transitoire de séparation de privilège + le patron « helper de faible privilège »). C'est *la* décision qui débloque les deux d'un coup. Le reste (l'allowlist `[rule.deploy]`, tes cibles, `chromium-headless` dans l'image, un module SELinux) est mécanique une fois ADR-019 tranchée.
+
+**État `main`** : propre. PR ouvertes = #120 (deploy design) et #124 (browser design, stackée), toutes deux flaggées pour toi, aucune auto-mergée. Tout le reste de la trousse SaaS/ecommerce est livré, relu, vérifié E2E, avec test d'intégration automatisé en CI. J'ai poussé tout le sûr-et-autonome ; il ne reste que **ta décision ADR-019** comme prochain grand déblocage.
