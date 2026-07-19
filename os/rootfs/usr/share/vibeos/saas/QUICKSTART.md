@@ -32,6 +32,12 @@ psql -h localhost -U app -d app -c '\l'   # le CLIENT psql est dans l'image
 L'état vit dans des **volumes nommés** du projet. `podman compose down` arrête,
 `down -v` efface tout. Voir [README.md](README.md) pour le *pourquoi conteneurs*.
 
+> 🔑 **Générez de vrais secrets**, ne laissez pas les placeholders des `.env` :
+> `sed -i "s/change-me.*/$(openssl rand -hex 24)/" .env` (ou éditez à la main).
+> Les placeholders sont connus publiquement — un service en loopback avec des
+> creds connus reste une cible (DNS-rebinding). Idem pour `MEILI_MASTER_KEY`,
+> `S3_*` et `GRAFANA_ADMIN_PASSWORD` des autres modèles.
+
 ## C — Développer
 
 ```sh
