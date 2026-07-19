@@ -113,6 +113,9 @@ fly deploy
 > **contenu** déployé) est une capacité **à venir** — voir ADR-020. Tant qu'elle
 > n'est pas là, c'est à vous de garder la main sur *ce qui* part en prod.
 
+**Pour du self-hosted en production** (vrai TLS, secrets, systemd, sauvegardes,
+pare-feu) — un autre métier que le dev local : voir **[PRODUCTION.md](PRODUCTION.md)**.
+
 ## La carte complète
 
 Les 3 seaux (embarqué / à la demande / référence self-hosted), les briques
