@@ -145,6 +145,7 @@ On démarre sur un **Plasma 6 brandé** — fork Catppuccin « VibeOS Dark », p
 | `observability/` | Prometheus (Apache-2.0) + Grafana (AGPL) | Analyse de perf du SaaS ; datasource auto-provisionné, ports loopback-only, mdp Grafana exigé via `.env` |
 | `object-storage/` | SeaweedFS (Apache-2.0), S3-compatible | Uploads/images ecommerce ; MinIO écarté (AGPL+archivé) ; port S3 loopback-only, clés via `.env` |
 | `mailpit/` | Mailpit (MIT), catcher SMTP de dev | Teste les emails sans les envoyer (UI web) ; ports loopback-only |
+| `meilisearch/` | Meilisearch (MIT), recherche | Recherche produit ecommerce ; master key **exigée** en prod (`.env`), port loopback-only |
 
 ### Seau B — À la demande (`offer_optional`) — jamais dans l'image
 

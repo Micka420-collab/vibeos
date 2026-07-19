@@ -55,6 +55,11 @@ cp -r /usr/share/vibeos/saas/object-storage ~/monsaas/s3 && cd ~/monsaas/s3
 cp .env.example .env                            # éditez S3_ACCESS_KEY / S3_SECRET_KEY
 podman compose up -d                            # endpoint S3 : http://localhost:8333
 aws --endpoint-url http://localhost:8333 s3 mb s3://uploads
+
+# Recherche produit / plein-texte (ecommerce) — Meilisearch
+cp -r /usr/share/vibeos/saas/meilisearch ~/monsaas/search && cd ~/monsaas/search
+cp .env.example .env                            # éditez MEILI_MASTER_KEY (≥16 octets)
+podman compose up -d                            # API : http://localhost:7700 (Bearer <clé>)
 ```
 
 ## D — HTTPS local valide (offline)

@@ -1,0 +1,29 @@
+# Recherche produit / plein-texte — Meilisearch, en conteneur par projet.
+# Modèle VibeOS. Capstone ecommerce : recherche rapide et pertinente (Medusa la
+# recommande). MIT (Community Edition ; certaines features Enterprise sous
+# licence séparée — l'usage de base reste MIT).
+#
+#   cp -r /usr/share/vibeos/saas/meilisearch ~/monsaas/search && cd ~/monsaas/search
+#   cp .env.example .env       # éditez MEILI_MASTER_KEY (≥ 16 octets, un vrai secret)
+#   podman compose up -d
+#   # API : http://localhost:7700  (en-tête: Authorization: Bearer <MEILI_MASTER_KEY>)
+#   curl -H "Authorization: Bearer <clé>" http://localhost:7700/health
+#
+# MEILI_ENV=production EXIGE une master key et refuse les requêtes non
+# authentifiées (vérifié en réel : 401 sans clé, 200 avec). Pas de healthcheck
+# déclaré (client HTTP interne des images non garanti) : sondez /health à la main.
+
+services:
+  search:
+    image: docker.io/getmeili/meilisearch:v1.49.0
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?definissez MEILI_MASTER_KEY (>=16 octets) dans .env}
+      MEILI_ENV: ${MEILI_ENV:-production}
+    ports:
+      - "127.0.0.1:${MEILI_PORT:-7700}:7700"
+    volumes:
+      - meilidata:/meili_data
+    restart: unless-stopped
+
+volumes:
+  meilidata:
