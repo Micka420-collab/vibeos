@@ -1,0 +1,45 @@
+# Observabilité SaaS — Prometheus + Grafana, en conteneurs par projet.
+# Modèle VibeOS (/usr/share/vibeos/saas/). Répond à « outils d'analyse des
+# performances du SaaS » : métriques applicatives + dashboards.
+#
+#   cp -r /usr/share/vibeos/saas/observability ~/monsaas/obs && cd ~/monsaas/obs
+#   cp .env.example .env      # éditez GRAFANA_ADMIN_PASSWORD
+#   podman compose up -d      # Grafana : http://localhost:3000 (Prometheus déjà branché)
+#
+# Faites scraper VOTRE app en éditant prometheus/prometheus.yml (job commenté).
+# Pas de healthcheck déclaré : ces images ne garantissent pas de client HTTP
+# interne (wget/curl) ; sondez à la main /-/healthy (Prometheus) et /api/health
+# (Grafana) si besoin.
+
+services:
+  prometheus:
+    # v3.13 = ligne LTS (support jusqu'au 2027-07-31). Apache-2.0.
+    image: docker.io/prom/prometheus:v3.13.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - promdata:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    # Édition OSS (AGPL-3.0). Le datasource Prometheus est auto-provisionné.
+    image: docker.io/grafana/grafana:13.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?definissez GRAFANA_ADMIN_PASSWORD dans .env}
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro,Z
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  promdata:
+  grafanadata:

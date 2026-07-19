@@ -41,6 +41,9 @@ pas dans l'image. `podman compose down` arrête ; `down -v` efface tout.
 |---|---|
 | `postgres-valkey/` | PostgreSQL 18 + Valkey (cache/broker) — le socle d'un SaaS |
 | `reverse-proxy/` | Caddy + TLS local via la CA `mkcert` (0 réseau, `https://` en dev) |
+| `observability/` | Prometheus + Grafana — l'**analyse de performance** du SaaS (dashboards + métriques, datasource déjà branché) |
+| `object-storage/` | SeaweedFS (S3-compatible, Apache-2.0) — uploads / images produit d'un ecommerce ; MinIO écarté (AGPL+archivé) |
+| `mailpit/` | Catcher SMTP de dev — teste les emails (inscription, reset) sans les envoyer, avec UI web |
 
 ## Outils à la demande (Seau B) — épinglés et vérifiés
 

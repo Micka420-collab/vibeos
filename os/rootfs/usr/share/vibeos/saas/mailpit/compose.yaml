@@ -1,0 +1,28 @@
+# Catcher SMTP de dev — Mailpit, en conteneur par projet.
+# Modèle VibeOS. Capture les emails que votre app envoie (inscription, reset
+# de mot de passe, notifications) SANS les envoyer pour de vrai, avec une UI web.
+# MIT, mono-conteneur.
+#
+#   cp -r /usr/share/vibeos/saas/mailpit ~/monsaas/mail && cd ~/monsaas/mail
+#   podman compose up -d
+#   # UI : http://localhost:8025
+#   # Pointez le SMTP de votre app sur localhost:1025 (sans TLS, sans auth).
+#
+# Éphémère par défaut : les mails de test n'ont pas à survivre à un redémarrage.
+# Pour les persister, décommentez `environment:` + `volumes:` (et le volume nommé
+# en bas). Pas de healthcheck déclaré (client HTTP interne non garanti).
+
+services:
+  mailpit:
+    image: docker.io/axllent/mailpit:v1.30.4
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"    # UI web
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"  # SMTP — votre app envoie ici
+    # Persistance optionnelle des mails capturés :
+    # environment:
+    #   MP_DATABASE: /data/mailpit.db
+    # volumes:
+    #   - mailpitdata:/data
+    restart: unless-stopped
+# volumes:
+#   mailpitdata:

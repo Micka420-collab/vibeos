@@ -43,6 +43,20 @@ ruff check .       # lint Python ; mypy . pour le typage
 Migrations : au choix de la stack (Prisma/Drizzle via `npm`, Alembic via `uv`) —
 installés dans le projet, jamais dans `/usr`.
 
+## C-bis — Services annexes (au besoin)
+
+```sh
+# Tester les emails (inscription, reset) sans en envoyer — UI web sur :8025
+cp -r /usr/share/vibeos/saas/mailpit ~/monsaas/mail
+(cd ~/monsaas/mail && podman compose up -d)   # pointez le SMTP de l'app sur localhost:1025
+
+# Stockage objet S3-compatible (uploads / images produit ecommerce)
+cp -r /usr/share/vibeos/saas/object-storage ~/monsaas/s3 && cd ~/monsaas/s3
+cp .env.example .env                            # éditez S3_ACCESS_KEY / S3_SECRET_KEY
+podman compose up -d                            # endpoint S3 : http://localhost:8333
+aws --endpoint-url http://localhost:8333 s3 mb s3://uploads
+```
+
 ## D — HTTPS local valide (offline)
 
 ```sh
@@ -66,6 +80,17 @@ oha -z 30s http://localhost:3000/
 
 Profil système sous charge : `perf`, `sar`/`pidstat` (`sysstat`), `bpftrace`,
 `bcc` — tous dans l'image.
+
+**Métriques applicatives + dashboards** (l'analyse de perf du SaaS dans la durée) :
+
+```sh
+cp -r /usr/share/vibeos/saas/observability ~/monsaas/obs && cd ~/monsaas/obs
+cp .env.example .env      # éditez GRAFANA_ADMIN_PASSWORD
+podman compose up -d      # Grafana : http://localhost:3000 (Prometheus déjà branché)
+```
+
+Exposez `/metrics` dans votre app, puis décommentez le job `monapp` dans
+`prometheus/prometheus.yml`.
 
 ## Z — Déployer
 

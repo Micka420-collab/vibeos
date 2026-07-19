@@ -1,0 +1,16 @@
+# Config Prometheus minimale — adaptez pour scraper VOTRE app.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # Prometheus se scrape lui-même (métriques de la sonde elle-même).
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Exemple : scraper VOTRE app exposant /metrics sur l'hôte podman.
+  # host.containers.internal pointe l'hôte depuis le conteneur (rootless/pasta).
+  # Décommentez et adaptez le port :
+  # - job_name: "monapp"
+  #   static_configs:
+  #     - targets: ["host.containers.internal:8000"]
