@@ -44,6 +44,7 @@ pas dans l'image. `podman compose down` arrête ; `down -v` efface tout.
 | `observability/` | Prometheus + Grafana — l'**analyse de performance** du SaaS (dashboards + métriques, datasource déjà branché) |
 | `object-storage/` | SeaweedFS (S3-compatible, Apache-2.0) — uploads / images produit d'un ecommerce ; MinIO écarté (AGPL+archivé) |
 | `mailpit/` | Catcher SMTP de dev — teste les emails (inscription, reset) sans les envoyer, avec UI web |
+| `meilisearch/` | Recherche produit / plein-texte (Meilisearch, MIT) — le capstone ecommerce |
 
 ## Outils à la demande (Seau B) — épinglés et vérifiés
 
