@@ -40,6 +40,43 @@ sudo firewall-cmd --reload
 sudo firewall-cmd --list-all                 # 3) RE-vérifie : http/https/ssh, rien d'autre
 ```
 
+## 1-bis. Vérifie ce que tu exposes VRAIMENT (audit défensif, avant d'ouvrir)
+
+Le §1 *déclare* une intention de pare-feu ; il ne **prouve** pas qu'elle tient.
+VibeOS est security-first et livre une trousse cybersécu — sers-t'en **sur ta
+propre infra**, en défensif, avant d'exposer quoi que ce soit :
+
+- **Confirme la surface réseau depuis DEHORS.** Scanner *depuis le serveur lui-même*
+  trompe : un paquet vers ta propre IP arrive par `lo` (que firewalld accepte
+  d'office) et ne voit **ni** le NAT **ni** les security groups de l'hébergeur.
+  Scanne depuis une **autre machine** (ton poste, un VPS) :
+  ```sh
+  nmap -Pn -p- --reason <IP-PUBLIQUE>      # depuis un AUTRE hôte, pas le serveur
+  nmap -6  -Pn -p- <IPv6-DU-SERVEUR>       # AUSSI en v6 si tu publies un AAAA (§2)
+  # attendu : 22/80/443 = open ; tout le reste = FILTERED (le pare-feu absorbe).
+  # un port `closed` n'est PAS un succès : le pare-feu a LAISSÉ PASSER le paquet
+  #   (RST renvoyé) — ta règle firewalld ne tient pas là, même si rien n'écoute
+  #   encore. Le jour où un service bind 0.0.0.0, il est public. → reviens au §1.
+  # 5432/6379/7700 (base/cache/search), 3000 (Grafana), 9090 (cockpit) en open = STOP.
+  ```
+  Scan **TCP** (l'UDP `-sU` est lent et rarement utile ici). Vérifie aussi l'**AUP
+  de la machine d'où tu scannes** : un scan sortant depuis un shell cloud mutualisé
+  peut violer ses conditions, même vers ta propre IP.
+- **Audite le durcissement de l'hôte.** `lynis` note la config système (SSH,
+  noyau, services, permissions) et liste des correctifs concrets :
+  ```sh
+  sudo lynis audit system            # index de durcissement + warnings/suggestions
+  ```
+  Traite les `[WARNING]` d'abord. Sur un OS image (bootc), les correctifs vont dans
+  la **recette de l'image**, pas sur l'hôte : ignore les suggestions qui supposent
+  un système mutable classique (installer des paquets, repartitionner, écrire `/usr`).
+
+> ⚖️ **Gouvernance.** Audit **défensif de TA PROPRE infra** — légitime. La trousse
+> contient aussi des outils *offensifs* : les pointer sur une cible **tierce** est
+> du **T2/T3** (autorisation requise), pas ce dont il s'agit ici. Tu audites **ce
+> que tu possèdes** — et le scan externe valide le combiné hébergeur+hôte, garde
+> donc le `firewall-cmd --list-all` du §1 comme preuve côté hôte.
+
 ## 2. Vrai TLS : Caddy en frontal (un seul port public)
 
 En prod, Caddy termine le TLS pour un **vrai domaine** et obtient un certificat
@@ -175,6 +212,7 @@ tête). Catalogue et arbitrage des fournisseurs : `docs/ECOSYSTEM.md`.
 ## Checklist prod
 
 - [ ] Pare-feu : seuls 80/443/ssh ouverts ; DB/cache/search jamais publics
+- [ ] Surface réseau **vérifiée depuis l'extérieur** (`nmap`), hôte audité (`lynis`)
 - [ ] Caddy : vrai domaine, DNS pointé, TLS Let's Encrypt automatique
 - [ ] Secrets en podman secrets / systemd-creds — rien dans git
 - [ ] Unités systemd + `linger` (démarrage auto, restart)
