@@ -169,3 +169,17 @@ Tout est mergé et sur `main` :
 - **Deux flakes quay traversés** aujourd'hui (purge de digest + EOF CDN sur un pull de base) — reruns OK. Ça **renforce le dossier du miroir** (#168, ta décision).
 
 **Constat honnête.** La surface **autonome, sûre et à valeur** du touseau SaaS/ecommerce est maintenant **couverte de bout en bout** : outils dans l'image, 6 modèles serveur par projet, installeur à la demande vérifié, catalogue, runbook A→Z, garde de sécurité. Ce qui reste est **de ton côté** : la capacité `deploy.*` gouvernée (attend ton allowlist, #92 mergée mais la décision d'archi t'appartient), la brique `browser.*` (touche le cœur `vibed` → PR flaggée, jamais auto-mergée), le durcissement Phase 3/4 (exige un système démarré), et la décision supply-chain du miroir (#168). Je ne fabrique pas de risque pour paraître occupé ; je garde de la veille et je te laisse un état net et complet.
+
+### 2026-07-19 (dimanche soir) — « ne t'arrête plus » : auto-bump, revue Fable 5, bug E2E
+
+Tu m'as dit d'arrêter de m'arrêter, et d'utiliser Fable 5 pour revoir mon code. Les deux ont **beaucoup** payé.
+
+- **Auto-bump du digest [#112]** : j'assume enfin une décision que je te renvoyais (« opérateur »). Un workflow détecte la purge quay et **ouvre la PR de bump + déclenche le build** (tu gardes le merge). Fini les reruns manuels quand quay purge la nuit.
+- **Revue Fable 5 (3 passes) → de vrais bugs que j'avais loupés :**
+  - **[#113]** le garde compose était **fail-OUVERT** sur 3 styles YAML (un `0.0.0.0` passait sans bruit) ET ci.yml ne le déclenchait jamais sur les compose. Corrigé + re-mutation-testé.
+  - **[#114]** l'auto-bump : `actions:write` manquant (PR sans CI), bump quotidien au lieu de sur-purge, force-push écrasant les commits humains. Corrigé.
+  - **[#116]** 2ᵉ passe (vérif des fixes) : confirmés sûrs **par exécution**, + le dernier trou du garde (`network_mode: host`).
+  - **[#117]** 3ᵉ passe : mon **runbook de prod donnait 4 conseils dangereux** — pare-feu à fausse confiance (cockpit restait public), `pg_dump|gzip` qui masque l'échec (backups vides), mdp prod dans l'historique shell, ports rootless poussant vers `sudo podman` qui contourne firewalld. Tous corrigés.
+- **Test d'intégration E2E → bug shippé [#118]** : le modèle `postgres-valkey` (livré #97, sur `main`) **crash-loop dès le 1er `up`** — `postgres:18` refuse l'ancien chemin de volume `/var/lib/postgresql/data`. N'importe qui suivant le QUICKSTART l'aurait heurté. Corrigé, **vérifié E2E** (db healthy, CRUD réel). Mes smoke-tests isolés l'avaient raté ; tester l'**intégration** (une appli se connecte) a fait la différence. Les **6 modèles sont désormais tous vérifiés fonctionnels**.
+
+**Bilan.** Le touseau SaaS/ecommerce n'est plus seulement complet : il est **relu adversarialement (Fable 5) et vérifié E2E**. Ton insistance a rattrapé un garde de sécurité fail-ouvert, un runbook prod dangereux et un modèle qui crash-loop. Merci d'avoir insisté. `main` propre, 0 PR ouverte. Je continue la veille et j'enchaîne sur toute vraie amélioration sûre.
