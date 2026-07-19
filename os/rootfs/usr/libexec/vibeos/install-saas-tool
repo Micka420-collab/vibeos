@@ -108,7 +108,11 @@ main() {
 	trap "rm -rf '$tmp'" EXIT
 
 	msg "→ téléchargement de $tool ($arch)…"
-	curl -fsSL -o "$tmp/dl" "$url" || die "téléchargement échoué : $url"
+	# --proto/--proto-redir '=https' : refuse tout downgrade HTTP, même via une
+	# redirection (l'intégrité est déjà couverte par le sha256, ceci est de
+	# l'hygiène de transport). --max-time borne un téléchargement qui traîne.
+	curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 \
+		-o "$tmp/dl" "$url" || die "téléchargement échoué : $url"
 
 	msg "→ vérification sha256…"
 	if ! printf '%s  %s\n' "$sha" "$tmp/dl" | sha256sum -c - >/dev/null 2>&1; then
