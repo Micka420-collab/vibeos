@@ -40,6 +40,34 @@ sudo firewall-cmd --reload
 sudo firewall-cmd --list-all                 # 3) RE-vérifie : http/https/ssh, rien d'autre
 ```
 
+## 1-bis. Vérifie ce que tu exposes VRAIMENT (audit défensif, avant d'ouvrir)
+
+Le §1 *déclare* une intention de pare-feu ; il ne **prouve** pas qu'elle tient.
+VibeOS est security-first et livre une trousse cybersécu — sers-t'en **sur ta
+propre infra**, en défensif, avant d'exposer quoi que ce soit :
+
+- **Confirme la surface réseau depuis DEHORS.** `nmap` lancé *sur le serveur
+  lui-même* ment : le trafic loopback/local ne traverse pas firewalld comme un
+  paquet venu d'Internet. Scanne depuis une **autre machine** (un VPS, ton poste,
+  un shell cloud) :
+  ```sh
+  nmap -Pn -p- <IP-PUBLIQUE-DU-SERVEUR>     # depuis un AUTRE hôte, pas le serveur
+  # attendu : 22, 80, 443 open ; TOUT le reste closed/filtered.
+  # 5432/6379/7700 (base/cache/search), 3000 (Grafana) ou 9090 (cockpit) ouverts
+  # = STOP, reviens au §1 : ta base est publique.
+  ```
+- **Audite le durcissement de l'hôte.** `lynis` note la config système (SSH,
+  noyau, services, permissions) et liste des correctifs concrets :
+  ```sh
+  sudo lynis audit system            # index de durcissement + warnings/suggestions
+  ```
+  Traite d'abord les `[WARNING]` ; les `[SUGGESTION]` selon ton modèle de menace.
+
+> ⚖️ **Gouvernance.** Ceci est de l'audit **défensif de TA PROPRE infra** —
+> légitime, non gouverné. La trousse contient aussi des outils *offensifs* : les
+> pointer sur une cible **tierce** est du **T2/T3** (autorisation requise), pas ce
+> dont il s'agit ici. Tu scannes/audites **ce que tu possèdes**.
+
 ## 2. Vrai TLS : Caddy en frontal (un seul port public)
 
 En prod, Caddy termine le TLS pour un **vrai domaine** et obtient un certificat
@@ -175,6 +203,7 @@ tête). Catalogue et arbitrage des fournisseurs : `docs/ECOSYSTEM.md`.
 ## Checklist prod
 
 - [ ] Pare-feu : seuls 80/443/ssh ouverts ; DB/cache/search jamais publics
+- [ ] Surface réseau **vérifiée depuis l'extérieur** (`nmap`), hôte audité (`lynis`)
 - [ ] Caddy : vrai domaine, DNS pointé, TLS Let's Encrypt automatique
 - [ ] Secrets en podman secrets / systemd-creds — rien dans git
 - [ ] Unités systemd + `linger` (démarrage auto, restart)
