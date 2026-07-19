@@ -12,8 +12,10 @@
 # indépendant des push, qui rend la dérive visible AVANT le prochain push.
 #
 # LECTURE SEULE. `contents: read` (lit le Containerfile) + une requête sur un
-# registre public. Il NOTIFIE (job rouge), il ne bumpe rien. L'auto-bump
-# exigerait des permissions d'écriture — décision opérateur, hors de ce workflow.
+# registre public. Il NOTIFIE (job rouge), il ne bumpe rien : ce job reste
+# volontairement sans permission d'écriture. La REMÉDIATION (résoudre le digest
+# courant + ouvrir la PR de bump) vit dans un workflow séparé aux permissions
+# bornées, `base-digest-autobump.yml` — l'humain garde le merge.
 name: base-digest-fresh
 
 on:

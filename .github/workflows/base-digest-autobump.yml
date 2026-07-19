@@ -1,0 +1,97 @@
+# base-digest-autobump.yml — quand quay purge le digest de base, ouvre la PR de bump.
+#
+# POURQUOI (et pourquoi séparé de base-digest-fresh.yml)
+#
+# La base f44 est VIVANTE : quay purge les anciens index ~chaque jour, le digest
+# épinglé cesse de résoudre, TOUT build casse (arrivé plusieurs fois, dont 2× le
+# 2026-07-19). `base-digest-fresh.yml` DÉTECTE la purge (lecture seule, alerte).
+# Ce workflow-ci REMÉDIE : il résout le digest courant et ouvre une PR de bump —
+# la corvée qu'un humain faisait à la main (skopeo + sed + branche + PR).
+#
+# POSTURE. On épingle toujours le digest quay COURANT de fedora-kinoite:44 — même
+# source de confiance qu'un bump manuel, aucun changement de modèle supply-chain.
+# L'humain garde le dernier mot : ce workflow OUVRE une PR (jamais un merge) et
+# déclenche le build de vérification ; le merge reste manuel, après build vert.
+# C'est le même patron que Dependabot (déjà dans ce dépôt). Les permissions
+# d'écriture sont bornées à ce job : `contents: write` (pousser la branche de
+# bump) + `pull-requests: write` (ouvrir la PR).
+#
+# Le helper bump-base-digest.sh refuse un digest qui ne serait pas une
+# manifest-list multi-arch (amd64+arm64) — un mono-arch casserait l'autre arch.
+name: base-digest-autobump
+
+on:
+  schedule:
+    # 08:30 UTC — après l'alerte base-digest-fresh (08:00) et la republication
+    # nocturne de Fedora (~00:30–01:00 UTC).
+    - cron: "30 8 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: base-digest-autobump
+  cancel-in-progress: false
+
+jobs:
+  autobump:
+    name: Ouvrir une PR si le digest de base a été purgé
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRANCH: auto/bump-base-digest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Résoudre le digest courant et réécrire le pin
+        id: bump
+        run: |
+          set -euo pipefail
+          out="$(bash scripts/bump-base-digest.sh os/Containerfile)"
+          echo "$out"
+          if printf '%s' "$out" | grep -q '^unchanged'; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            new="$(printf '%s' "$out" | grep -oE 'sha256:[0-9a-f]{64}' | tail -n1)"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "new_digest=$new" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ouvrir / mettre à jour la PR de bump + déclencher le build
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          new="${{ steps.bump.outputs.new_digest }}"
+          git config user.name "vibeos-autobump[bot]"
+          git config user.email "vibeos-autobump@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add os/Containerfile
+          git commit \
+            -m "fix(os): auto-bump digest de base F44 -> ${new}" \
+            -m "Le digest épinglé a été purgé par quay (base f44 vivante). Digest courant résolu et vérifié multi-arch (amd64+arm64) par scripts/bump-base-digest.sh. Merge après build vert. Généré par base-digest-autobump.yml."
+          git push --force-with-lease origin "$BRANCH"
+
+          # Ouvre la PR si aucune n'est déjà ouverte pour cette branche.
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" \
+              --title "fix(os): auto-bump digest de base F44 (quay a purgé le pin)" \
+              --body "Le digest de base épinglé a été purgé par quay (base f44 vivante) — tout build cassait. Bump automatique vers le digest courant \`${new}\`, vérifié manifest-list multi-arch (amd64+arm64). À faire : attendre le build de vérification (déclenché par ce workflow), puis merger. Généré par base-digest-autobump.yml."
+          else
+            echo "PR déjà ouverte pour $BRANCH — branche mise à jour."
+          fi
+
+          # Déclenche le build de vérification sur la branche (le dispatch marche
+          # avec GITHUB_TOKEN, contrairement au trigger pull_request d'une PR ouverte
+          # par le token). Le merge reste manuel, après ce build vert.
+          gh workflow run build-os.yml --ref "$BRANCH" || echo "dispatch build-os non déclenché (à lancer à la main si besoin)"
