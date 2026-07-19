@@ -1088,6 +1088,18 @@ hostile dans l'espace d'adressage du moteur de politiques, non.
 - Les latences ci-dessus sont **mesurées en WSL2**, pas sur Fedora bootc. À re-mesurer
   avant de s'engager sur un budget.
 
+### Forme concrète, validée par DEUX consommateurs (ajout 2026-07-19)
+
+Cet ADR était « direction proposée ». Depuis, **deux capacités gouvernées ont été conçues et stress-testées (revue Fable 5) contre ce modèle** — **ADR-021** `deploy.*` ([PR #120](https://github.com/Micka420-collab/vibeos/pull/120)) et **ADR-022** `browser.*` ([PR #124](https://github.com/Micka420-collab/vibeos/pull/124)). Les deux **convergent sur la même forme concrète**, ce qui rend cette ADR décidable. Résumé de ce que les deux exigent :
+
+1. **Un binaire helper `vibed-tool` de faible privilège** (`DynamicUser=yes`, uid distinct de l'agent et de `vibed`) est l'`ExecStart` du **service transitoire** (jamais `--scope`). **Contrainte FD** dérivée indépendamment par les deux : c'est **systemd (pid 1)**, pas `vibed`, qui exécute le service — donc `vibed` **ne peut pas** tenir un pipe/fd hérité vers l'outil ; seul le helper (l'`ExecStart`) le peut (et FD 3 collisionne avec `SD_LISTEN_FDS_START`).
+2. **Tout l'input hostile est décodé DANS le helper, jamais dans `vibed`** : la réponse d'un CLI de deploy qui parle au réseau (ADR-021), le HTTP CONNECT + le CDP + le DOM d'une page (ADR-022). `vibed` (root, moteur de politiques + tête de la chaîne d'audit) **descend** un snapshot **compilé** de la politique par un canal de contrôle et **remonte** des **résultats bornés + des enregistrements d'audit** sur une **IPC à sens unique** (socketpair). C'est la raison d'être d'ADR-019 : le moteur ne partage jamais son espace d'adressage avec du parsing hostile.
+3. **Les credentials/tokens n'entrent jamais dans un env atteignable par l'agent** : scellés TPM2 (`systemd-creds`), montés dans le `$CREDENTIALS_DIRECTORY` **du helper** (uid distinct). Jamais en argv (`/proc/pid/cmdline` est lisible par tous), jamais `HOME=/home/%i` (les CLIs persistent le token).
+4. **Un profil de durcissement PAR CLASSE D'OUTIL, pas un lockdown unique.** `deploy.*` veut le maximum (`ProtectSystem=strict`, `RestrictNamespaces` deny-all). `browser.*` doit **relâcher** `RestrictNamespaces` en **allowlist (`user pid net mnt`…)** pour que le sandbox userns de Chromium vive dedans — le lockdown maximal générique **casserait** le navigateur. ADR-019 doit donc livrer un **jeu de profils**, pas un seul.
+5. **SELinux (Fedora enforcing)** : chaque unit transitoire (surtout le navigateur : `DynamicUser` + userns + tmpfs + fd hérités) exige un **module de politique** testé **sur enforcing**, pas seulement sur un dev box permissif.
+
+**Conséquence pour la décision.** ADR-019 n'est plus une abstraction : c'est le **patron helper-de-faible-privilège** ci-dessus, dont **`deploy.*` ET `browser.*` dépendent identiquement**. Le trancher (adopter cette forme) **débloque les deux capacités phares d'un coup** ; tout le reste (allowlists, `chromium-headless` dans l'image, les modules SELinux) est mécanique ensuite.
+
 ## ADR-020 — Touseau SaaS + ecommerce gouverné : une deuxième trousse, même modèle que la cybersécurité — *décidé (2026-07-18, autonomie week-end)*
 
 **Statut** : **DÉCIDÉ le 2026-07-18**, en autonomie (Micka absent le week-end, m'a confié de trancher et justifier). Demande : *« ajouter dans l'OS tout ce qu'il faut pour faire des SaaS et les mettre en production, avec des outils d'analyse de performance — un touseau SaaS + ecommerce, et l'IA citoyenne qui développe de A à Z. »* Cadrage retenu par Micka : **les 4 stacks** (JS/TS, Python, full-stack agnostique, low-code self-hosted) + **les deux modes de prod** (cloud managé ET self-hosted).
