@@ -1,0 +1,33 @@
+# Stockage objet S3-compatible — SeaweedFS, en conteneur par projet.
+# Modèle VibeOS. Comble le besoin d'uploads / images produit (SaaS/ecommerce).
+# MinIO est écarté (AGPL + dépôt archivé/EOL) ; SeaweedFS est Apache-2.0, actif.
+#
+#   cp -r /usr/share/vibeos/saas/object-storage ~/monsaas/s3 && cd ~/monsaas/s3
+#   cp .env.example .env       # éditez S3_ACCESS_KEY / S3_SECRET_KEY
+#   podman compose up -d
+#   # endpoint S3 : http://localhost:8333  (path-style, région quelconque)
+#   aws --endpoint-url http://localhost:8333 s3 mb s3://uploads
+#   aws --endpoint-url http://localhost:8333 s3 cp photo.jpg s3://uploads/
+#
+# `server -s3` réunit master + volume + filer + passerelle S3 dans UN conteneur.
+# Creds : tant qu'aucun fichier de conf S3 n'est monté, la passerelle prend les
+# variables AWS_* comme identifiants admin (documenté). Pas de healthcheck
+# déclaré (client HTTP interne non garanti) : sondez /status sur 8333 à la main.
+
+services:
+  s3:
+    image: docker.io/chrislusf/seaweedfs:4.38
+    command: server -s3
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?definissez S3_ACCESS_KEY dans .env}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?definissez S3_SECRET_KEY dans .env}
+    # N'exposez QUE l'API S3 (8333) sur la loopback. Les ports internes
+    # (9333 master, 8080 volume, 8888 filer) restent non publiés.
+    ports:
+      - "127.0.0.1:${S3_PORT:-8333}:8333"
+    volumes:
+      - s3data:/data
+    restart: unless-stopped
+
+volumes:
+  s3data:

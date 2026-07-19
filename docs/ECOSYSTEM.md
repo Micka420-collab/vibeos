@@ -142,6 +142,9 @@ On démarre sur un **Plasma 6 brandé** — fork Catppuccin « VibeOS Dark », p
 |---|---|---|
 | `postgres-valkey/` | PostgreSQL 18 + Valkey | Ports **loopback-only**, mot de passe **exigé** via `.env`, healthchecks, volumes nommés |
 | `reverse-proxy/` | Caddy 2 + TLS local (mkcert) | `https://` de dev offline ; un seul reverse-proxy (non-redondance) |
+| `observability/` | Prometheus (Apache-2.0) + Grafana (AGPL) | Analyse de perf du SaaS ; datasource auto-provisionné, ports loopback-only, mdp Grafana exigé via `.env` |
+| `object-storage/` | SeaweedFS (Apache-2.0), S3-compatible | Uploads/images ecommerce ; MinIO écarté (AGPL+archivé) ; port S3 loopback-only, clés via `.env` |
+| `mailpit/` | Mailpit (MIT), catcher SMTP de dev | Teste les emails sans les envoyer (UI web) ; ports loopback-only |
 
 ### Seau B — À la demande (`offer_optional`) — jamais dans l'image
 

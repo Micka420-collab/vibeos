@@ -1,0 +1,9 @@
+# Auto-provisionne Prometheus comme source de données Grafana au démarrage.
+# Pas de clic : Grafana lit ce dossier à chaque boot.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
