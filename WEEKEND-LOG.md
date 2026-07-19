@@ -149,3 +149,23 @@ Tu es repassé, tu as **mergé ADR-020 (#92) toi-même** (direction de la trouss
 - **Décision que je te laisse [tâche #168]** : ce bump quasi-quotidien est une vraie friction (déjà 4×). Le vrai fix (miroir de la base sur ghcr, ou cron qui auto-ouvre la PR de bump) **change la posture supply-chain / les permissions du cron** — donc à **trancher par toi**, pas en autonomie. Options + compromis notés.
 
 **En vol** : #106 (build, débloque tout) puis #104 (à rebuild sur `main` corrigé). Je les mène au vert et je les merge.
+
+### 2026-07-19 (dimanche, suite) — substrat complet + tout vérifié en réel
+
+Tout est mergé et sur `main` :
+- **#106 (bump digest)** et **#104 (3 modèles)** mergés — tu as d'ailleurs mergé #104 toi-même à 15:06 (je l'ai découvert après coup ; leçon notée : **vérifier l'état de merge avant de relancer un build**). `main` build vert de nouveau.
+- **[PR #108] Meilisearch** mergé — le **capstone recherche ecommerce**. Le substrat SaaS/ecommerce est désormais **complet** (6 modèles par projet) :
+
+  | Modèle | Rôle | Vérifié |
+  |---|---|---|
+  | `postgres-valkey` | base + cache | config standard |
+  | `reverse-proxy` | Caddy + TLS local | config standard |
+  | `object-storage` | SeaweedFS (S3) | **smoke-testé** (S3 up, creds env) |
+  | `observability` | Prometheus + Grafana | **smoke-testé** (datasource auto-provisionné, DNS inter-conteneurs) |
+  | `mailpit` | catcher email de dev | config standard |
+  | `meilisearch` | recherche produit | **smoke-testé** (auth master-key enforced) |
+
+- **Discipline « vérifier, pas supposer »** : les 3 modèles à config non triviale (SeaweedFS, observability, Meilisearch) sont **lancés en réel** (WSL/docker), pas juste affirmés. Le garde `check-saas-compose` valide les 6 en loopback-only.
+- **Deux flakes quay traversés** aujourd'hui (purge de digest + EOF CDN sur un pull de base) — reruns OK. Ça **renforce le dossier du miroir** (#168, ta décision).
+
+**Constat honnête.** La surface **autonome, sûre et à valeur** du touseau SaaS/ecommerce est maintenant **couverte de bout en bout** : outils dans l'image, 6 modèles serveur par projet, installeur à la demande vérifié, catalogue, runbook A→Z, garde de sécurité. Ce qui reste est **de ton côté** : la capacité `deploy.*` gouvernée (attend ton allowlist, #92 mergée mais la décision d'archi t'appartient), la brique `browser.*` (touche le cœur `vibed` → PR flaggée, jamais auto-mergée), le durcissement Phase 3/4 (exige un système démarré), et la décision supply-chain du miroir (#168). Je ne fabrique pas de risque pour paraître occupé ; je garde de la veille et je te laisse un état net et complet.
