@@ -183,3 +183,18 @@ Tu m'as dit d'arrêter de m'arrêter, et d'utiliser Fable 5 pour revoir mon code
 - **Test d'intégration E2E → bug shippé [#118]** : le modèle `postgres-valkey` (livré #97, sur `main`) **crash-loop dès le 1er `up`** — `postgres:18` refuse l'ancien chemin de volume `/var/lib/postgresql/data`. N'importe qui suivant le QUICKSTART l'aurait heurté. Corrigé, **vérifié E2E** (db healthy, CRUD réel). Mes smoke-tests isolés l'avaient raté ; tester l'**intégration** (une appli se connecte) a fait la différence. Les **6 modèles sont désormais tous vérifiés fonctionnels**.
 
 **Bilan.** Le touseau SaaS/ecommerce n'est plus seulement complet : il est **relu adversarialement (Fable 5) et vérifié E2E**. Ton insistance a rattrapé un garde de sécurité fail-ouvert, un runbook prod dangereux et un modèle qui crash-loop. Merci d'avoir insisté. `main` propre, 0 PR ouverte. Je continue la veille et j'enchaîne sur toute vraie amélioration sûre.
+
+### 2026-07-19 (dimanche, tard) — le design de `deploy.*`, durci par Fable 5, t'attend
+
+Tu m'as dit « continue » : j'ai avancé la **feature phare que ta demande initiale nomme « le mettre en production »** — pas les mains vides, un design concret et déjà stress-testé.
+
+- **[ADR-021 / #120]** — `deploy.*` gouverné, design complet des **3 verrous** : allowlist de cibles (`[rule.deploy]`), approbation humaine sur le **contenu**, et surtout l'**isolation des credentials** qu'ADR-020 laissait *ouverte* (héritée du helper-process d'ADR-019 : le token cloud scellé TPM2, dans un service transitoire à uid distinct, jamais atteignable par l'agent).
+- **Revue Fable 5 du design → 6 vrais trous fermés** (ancrés dans `policy.rs`/`approval.rs`/THREAT-MODEL) : token qui fuirait par argv (`/proc/cmdline` lisible par tous), séparation d'UID comme vrai contrôle (pas le namespace), HOME éphémère (les CLIs persistent le token), approbation-sur-digest qui était du **théâtre** (fly/vercel buildent au deploy → il faut une image immuable épinglée), `[rule.deploy]` qui devait être un **verdict** et non un prédicat, et le fait que **T3 == T2 aujourd'hui**. Design corrigé avant que tu le lises.
+
+**Les décisions qui t'attendent pour passer à l'implémentation** (je ne les prends pas seul — cœur de confiance / dépense d'argent) :
+1. **ADR-019** (le helper-process de séparation de privilège) — dont dépendent `deploy.*` ET `browser.*`. C'est la clé de voûte.
+2. **`[rule.deploy]`** validé (verdict, IDs immuables) + tes **cibles réelles**.
+3. **T3 réel** vs assumer que le plafond est T2 (pour les actions qui dépensent).
+4. Toujours en attente : la décision **miroir de base** (#168) et le **boot/test ISO**.
+
+**État `main`** : propre, la trousse SaaS/ecommerce complète + relue Fable 5 + vérifiée E2E. La seule PR ouverte est #120 (ce design, flaggé pour toi). J'ai poussé tout ce qui était **sûr et autonome** ; ce qui reste est un petit ensemble de **décisions d'architecture qui te reviennent**, chacune posée concrètement, prête à exécuter dès ton feu vert.
