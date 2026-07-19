@@ -110,7 +110,7 @@ depuis podman 4.4. Exemple minimal `~/.config/containers/systemd/monsaas-db.cont
 [Container]
 Image=docker.io/library/postgres:18
 Secret=pg_password,type=env,target=POSTGRES_PASSWORD
-Volume=pgdata.volume:/var/lib/postgresql/data
+Volume=pgdata.volume:/var/lib/postgresql
 
 [Service]
 Restart=on-failure
