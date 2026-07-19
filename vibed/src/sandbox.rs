@@ -262,6 +262,46 @@ impl TransientUnit {
             .collect()
     }
 
+    /// Assemble the full `systemd-run` argv that launches this hardened unit and
+    /// exec's the low-privilege helper. No shell — each element is one argv slot,
+    /// passed straight to `Command` (the spawn increment injects the binary path
+    /// the way `tools/svc.rs` injects `systemctl`).
+    ///
+    /// Fixed flags:
+    ///   * `--pipe --wait` — run to completion, forwarding the caller's stdio so
+    ///     the control payload (down) and the bounded result (up) cross the
+    ///     pid-1 boundary that a literal `socketpair` cannot: systemd (not
+    ///     `vibed`) exec's the service, so `vibed` hands the stdio to
+    ///     `systemd-run`, which is its own child. This is ADR-019's one-way IPC
+    ///     realised as systemd-run stdio — the mechanism, not a literal socket.
+    ///   * `--collect` — GC the transient unit when it exits.
+    ///   * `--quiet` — no systemd-run chatter on stdout, so the result channel
+    ///     stays clean.
+    ///   * **no `--unit=`** — let systemd auto-name `run-<nnn>.service`; a fixed
+    ///     unit name would let two concurrent invocations collide (Fable 5).
+    ///
+    /// A `--` fence terminates option parsing before the helper, so a helper
+    /// arg that looks like an option can never be read by `systemd-run`.
+    pub fn systemd_run_command(
+        &self,
+        systemd_run_bin: &str,
+        helper_bin: &str,
+        helper_args: &[String],
+    ) -> Vec<String> {
+        let mut argv = vec![
+            systemd_run_bin.to_string(),
+            "--pipe".to_string(),
+            "--wait".to_string(),
+            "--collect".to_string(),
+            "--quiet".to_string(),
+        ];
+        argv.extend(self.to_systemd_run_args());
+        argv.push("--".to_string());
+        argv.push(helper_bin.to_string());
+        argv.extend(helper_args.iter().cloned());
+        argv
+    }
+
     /// Number of compiled properties.
     pub fn len(&self) -> usize {
         self.properties.len()
@@ -362,6 +402,189 @@ fn validate_abs_path(pth: &str, what: &str) -> Result<(), String> {
         return Err(format!("{what} path must not contain whitespace: {pth:?}"));
     }
     Ok(())
+}
+
+/// The low-privilege `vibed-tool` helper's logic, kept in the library so it is
+/// unit-tested here while `src/bin/vibed-tool.rs` stays a thin `main`.
+///
+/// This runs **inside** the transient hardened service (a distinct dynamic uid).
+/// `vibed` (root) never runs the tool itself — it spawns `systemd-run`, which
+/// exec's this helper. Modes:
+///   * `probe` — report the helper's OWN confinement so the caller can PROVE the
+///     ADR-019 profile applied. The **strong** evidence is `/proc/self/status`
+///     (`Seccomp: 2` ⇒ a syscall filter is installed, `CapBnd`/`CapEff` all-zero
+///     ⇒ the empty bounding set took, `NoNewPrivs: 1`, `Umask: 0077`) plus a
+///     **behavioural** namespace test: `unshare(CLONE_NEWUSER)` returns EPERM
+///     under the deploy deny-all profile and succeeds under the browser
+///     allow-list. The namespace **inode ids** are reported only for the caller
+///     to COMPARE against its own — on their own they prove nothing, because
+///     `RestrictNamespaces` blocks *creating* namespaces, it does not *move* the
+///     service into new ones (verified: a deploy unit shares the host
+///     user/pid/net namespace; only `mnt` differs, from `ProtectSystem`).
+///   * `deploy`, `browser` — later increments (run the CLI / drive Chromium).
+pub mod helper {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::MetadataExt;
+
+    /// Dispatch on the mode (argv[1]). Unknown modes fail closed.
+    pub fn run(mode: &str) -> Result<String, String> {
+        match mode {
+            "probe" => Ok(probe_report()),
+            other => Err(format!("unknown vibed-tool mode {other:?} (known: probe)")),
+        }
+    }
+
+    /// Gather this process's confinement facts as JSON. Reads only its own
+    /// `/proc/self`, `stat`s `$HOME`, lists `$CREDENTIALS_DIRECTORY` (names only),
+    /// and attempts one unprivileged `unshare` **last**. Linux-only.
+    pub fn probe_report() -> String {
+        let st = status_fields();
+        let get = |k: &str| st.get(k).cloned();
+
+        // "Uid:\t<real>\t<eff>\t<saved>\t<fs>" — report real and effective.
+        let uid_line = get("Uid").unwrap_or_default();
+        let mut uid_parts = uid_line.split_whitespace();
+        let uid = uid_parts.next().and_then(|s| s.parse::<u64>().ok());
+        let euid = uid_parts.next().and_then(|s| s.parse::<u64>().ok());
+
+        // Namespace inode ids: for COMPARISON by the caller, not proof. A read
+        // failure is anomalous (`/proc/self/ns/*` survives ProcSubset=pid), so
+        // surface the errno rather than a neutral string (fail-closed signal).
+        let ns = |kind: &str| match std::fs::read_link(format!("/proc/self/ns/{kind}")) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => format!("error:{}", e.raw_os_error().unwrap_or(-1)),
+        };
+
+        // HOME must be an ephemeral tmpfs dir OWNED by us in 0700 — not merely a
+        // string under /run (which only proves the env var was set).
+        let home = std::env::var("HOME").unwrap_or_default();
+        let (home_owner, home_mode) = match std::fs::metadata(&home) {
+            Ok(m) => (Some(m.uid()), Some(format!("{:04o}", m.mode() & 0o7777))),
+            Err(_) => (None, None),
+        };
+        let home_ephemeral = home.starts_with("/run/vibed-tool/")
+            && !home.contains("..")
+            && home_owner.is_some()
+            && home_owner.map(u64::from) == euid
+            && home_mode.as_deref() == Some("0700");
+
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // Credential NAMES only — never contents.
+        let credentials = std::env::var_os("CREDENTIALS_DIRECTORY").and_then(|d| {
+            std::fs::read_dir(&d).ok().map(|rd| {
+                rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                    .collect::<Vec<_>>()
+            })
+        });
+
+        // Behavioural namespace proof — LAST, since on success we land in a fresh
+        // user namespace and then only serialise + exit.
+        let unshare_user = unshare_userns_result();
+
+        serde_json::json!({
+            "tool": "vibed-tool",
+            "mode": "probe",
+            "uid": uid,
+            "euid": euid,
+            "no_new_privs": get("NoNewPrivs"),
+            "seccomp": get("Seccomp"),
+            "seccomp_filters": get("Seccomp_filters"),
+            "cap_bnd": get("CapBnd"),
+            "cap_eff": get("CapEff"),
+            "umask": get("Umask"),
+            "nspid": get("NSpid"),
+            "ns_user": ns("user"),
+            "ns_pid": ns("pid"),
+            "ns_net": ns("net"),
+            "ns_mnt": ns("mnt"),
+            "home": home,
+            "home_owner_uid": home_owner,
+            "home_mode": home_mode,
+            "home_ephemeral": home_ephemeral,
+            "cwd": cwd,
+            "credentials": credentials,
+            "unshare_user": unshare_user,
+        })
+        .to_string()
+    }
+
+    /// Parse `/proc/self/status` into `{field: value}` (value trimmed).
+    fn status_fields() -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if let Some((k, v)) = line.split_once(':') {
+                    m.insert(k.trim().to_string(), v.trim().to_string());
+                }
+            }
+        }
+        m
+    }
+
+    /// Behavioural test of `RestrictNamespaces`: attempt to create a user
+    /// namespace. `"eperm"` (deploy deny-all), `"ok"` (browser allow-list), or
+    /// `"error:<errno>"`.
+    fn unshare_userns_result() -> String {
+        // SAFETY: `unshare(CLONE_NEWUSER)` affects only this process, and we call
+        // it last — nothing after reads the namespace. On success we sit in a
+        // fresh user namespace and immediately serialise + exit.
+        let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
+        if rc == 0 {
+            return "ok".to_string();
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EPERM) => "eperm".to_string(),
+            Some(n) => format!("error:{n}"),
+            None => "error".to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn probe_report_is_valid_json_with_strong_confinement_keys() {
+            let out = run("probe").expect("probe mode runs");
+            let v: serde_json::Value = serde_json::from_str(&out).expect("probe emits valid JSON");
+            assert_eq!(v["tool"], "vibed-tool");
+            assert_eq!(v["mode"], "probe");
+            // uid must be a real number, not null (a null would be a real signal).
+            assert!(v["uid"].is_u64(), "uid must parse to a number: {out}");
+            // The strong-proof keys the on-target checker reads.
+            for k in [
+                "seccomp",
+                "cap_bnd",
+                "cap_eff",
+                "no_new_privs",
+                "umask",
+                "ns_mnt",
+                "home_ephemeral",
+                "unshare_user",
+            ] {
+                assert!(v.get(k).is_some(), "probe report must carry {k}: {out}");
+            }
+            // The behavioural namespace test reports one of the known outcomes.
+            let u = v["unshare_user"].as_str().unwrap();
+            assert!(
+                u == "ok" || u == "eperm" || u.starts_with("error:"),
+                "unexpected unshare_user {u:?}"
+            );
+        }
+
+        #[test]
+        fn unknown_mode_fails_closed() {
+            assert!(
+                run("deploy").is_err(),
+                "unimplemented mode must fail closed"
+            );
+            assert!(run("").is_err());
+            assert!(run("../etc/passwd").is_err());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -563,6 +786,47 @@ mod tests {
         assert!(args.contains(&"--property=DynamicUser=yes".to_string()));
         assert!(!args.iter().any(|a| a.contains("%i")));
         assert_eq!(args.len(), deploy_go().len());
+    }
+
+    /// The full systemd-run argv: fixed hardening flags, every property, a `--`
+    /// fence, then the helper — and no fixed `--unit=` (auto-named, no collision).
+    #[test]
+    fn systemd_run_command_builds_a_fenced_argv() {
+        let u = browser();
+        let argv = u.systemd_run_command(
+            "/usr/bin/systemd-run",
+            "/usr/libexec/vibed-tool",
+            &["probe".to_string()],
+        );
+        assert_eq!(argv[0], "/usr/bin/systemd-run");
+        for flag in ["--pipe", "--wait", "--collect", "--quiet"] {
+            assert!(argv.iter().any(|a| a == flag), "missing {flag}: {argv:?}");
+        }
+        assert!(
+            !argv.iter().any(|a| a.starts_with("--unit")),
+            "must not fix a unit name"
+        );
+        // The properties are carried through.
+        assert!(argv.iter().any(|a| a == "--property=DynamicUser=yes"));
+        // The `--` fence sits immediately before the helper binary.
+        let fence = argv.iter().position(|a| a == "--").expect("a -- fence");
+        assert_eq!(argv[fence + 1], "/usr/libexec/vibed-tool");
+        assert_eq!(argv[fence + 2], "probe");
+        // Everything between the binary (argv[0]) and the fence is a flag/property;
+        // the helper argv is after it.
+        assert!(argv[1..fence].iter().all(|a| a.starts_with("--")));
+    }
+
+    /// The profile must never set `Standard*`: `systemd-run --pipe` relies on the
+    /// unit inheriting systemd-run's stdio, and a `StandardInput=`/`Output=`
+    /// property would silently clobber the IPC channel (Fable 5).
+    #[test]
+    fn profile_never_sets_stdio_which_would_clobber_the_pipe() {
+        for u in [deploy_go(), deploy_node(), browser()] {
+            assert_eq!(u.get("StandardInput"), None);
+            assert_eq!(u.get("StandardOutput"), None);
+            assert_eq!(u.get("StandardError"), None);
+        }
     }
 
     // ---- fail-closed validation ------------------------------------------

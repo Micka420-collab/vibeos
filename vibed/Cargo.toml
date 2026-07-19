@@ -35,6 +35,11 @@ dev-overrides = []
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Already in the tree transitively (tokio/mio/socket2); made direct only so the
+# ADR-019 helper's `probe` can call unshare(CLONE_NEWUSER) as a BEHAVIOURAL test
+# that RestrictNamespaces took (EPERM under deny-all). Same pinned 0.2.x, no new
+# supply-chain surface.
+libc = "0.2"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
