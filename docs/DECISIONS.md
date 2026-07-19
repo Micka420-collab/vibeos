@@ -1281,30 +1281,48 @@ Aujourd'hui `apply_rule` réduit **tout ≥ T2** à `RequireApproval` (`policy.r
 
 ADR-017 craignait « pas de Chromium arm64, portage à faire soi-même ». **Vérifié faux aujourd'hui** : Fedora 44 package **`chromium-headless` pour x86_64 ET aarch64** (76/67 Mo, **dépôt principal**, version 150.x, fraîche). Google, lui, ne publie **aucun** `chrome-headless-shell` linux-arm64 (amd64 à vie) — donc on prend **le paquet Fedora**, jamais les binaires Google (qui violeraient la règle multi-arch). ~300 Mo de delta image. **Le showstopper d'ADR-017 tombe.**
 
-### Moteur + pilotage — CDP par pipe, zéro Node
+> **Durci après revue Fable 5 (2026-07-19)** : la 1ʳᵉ version mettait le proxy et le parsing CDP **dans `vibed` root** — ce qui **violait ADR-019** (parser de l'input hostile dans le moteur de politiques). Corrigé ci-dessous ; le design en sort **plus sûr**, et le profil éphémère **neutralise** même un résiduel qu'ADR-017 acceptait.
 
-- **Moteur** : `chromium-headless` (+ `chromium-common`), RPM **signé Fedora**, dans une couche du `Containerfile`. Pas de Playwright/Puppeteer (Node), pas de binaire tiré d'un CDN mutable — cohérent bootc.
-- **Pilotage** : `vibed` (Rust) parle le **Chrome DevTools Protocol** directement, transport `--remote-debugging-pipe` : JSON-RPC sur les **FD 3/4 hérités**, **aucun port TCP** (même pas localhost). Le canal CDP devient une **capacité** que seul `vibed` (le parent) détient. Crates Rust maintenues : `chromiumoxide` 0.9.1 / `headless_chrome` 1.0.22.
-- **Piège Chrome ≥136** (à graver dans le spawner, pas la doc) : le débogage est **ignoré** sauf `--user-data-dir=<répertoire éphémère non-défaut>`.
+### Architecture — `vibed` ne parse JAMAIS un octet hostile (le vrai patron ADR-019)
 
-### Isolation — service transitoire ET sandbox Chromium (allowlist, pas deny-all)
+Point porteur : **tout ce qui touche à l'input hostile vit dans un helper de faible privilège, pas dans `vibed`**. L'`ExecStart` du service transitoire est un binaire **`vibed-tool`** (son propre `DynamicUser`, uid distinct de l'agent), qui : (1) **spawn `chromium-headless` comme SON enfant** — c'est lui, pas `vibed` ni systemd/pid 1, qui détient les FD du pipe CDP ; (2) **parle le CDP** et **décode toute donnée dérivée de la page** (texte DOM, console, captures) ; (3) **fait tourner le proxy CONNECT** (ou délègue à un `vibed-proxy` frère, autre uid low-priv) qui parse le HTTP hostile.
 
-Le navigateur parse du **HTML hostile** : Rule of 2 d'ADR-019 (entrée hostile + code non sûr + privilège) → **processus séparé obligatoire**. Le service transitoire d'ADR-019 l'enveloppe, mais avec un **profil de durcissement DÉDIÉ** (pas le lockdown maximal générique) :
+`vibed` (root, moteur de politiques) **descend** un snapshot **compilé** de `[rule.domains]` par un canal de contrôle, et **remonte** des **résultats bornés déjà extraits + des audits par-CONNECT** sur une IPC à sens unique (socketpair). Le moteur et la tête de la chaîne d'audit ne voient **jamais** un octet hostile — exactement ce qu'ADR-019 exige. *(La 1ʳᵉ version « proxy + spawner CDP dans `vibed` » se contredisait avec sa propre clé de voûte.)* La contrainte FD le confirme : un service transitoire est exécuté par **systemd**, pas par `vibed` — seul un helper-`ExecStart` peut tenir le pipe (et FD 3 entre en collision avec `SD_LISTEN_FDS_START`).
 
-- `NoNewPrivileges=yes` — OK : le sandbox user-namespace de Chromium n'exige **aucun** privilège.
-- **`RestrictNamespaces=user pid net`** (**allowlist**, pas `yes`/deny-all) : Chromium crée ses propres namespaces (son sandbox layer-1) **à l'intérieur**. `SystemCallFilter` laisse `clone`/`unshare`/`setns`.
-- **`--no-sandbox` INTERDIT** (upstream : « strongly discouraged »). Le sandbox Chromium reste **actif dans** le sandbox systemd — défense en profondeur, pas l'un OU l'autre.
-- `/dev/shm` en **tmpfs réel** dans le unit (sinon Chromium crash sur les pages lourdes) ou `--disable-dev-shm-usage`.
+### Moteur + transport — pipe SEULEMENT, jamais un port (invariant testé)
 
-### Egress — un proxy `vibed`, PAS `IPAddressAllow` (correction d'ADR-017)
+- **Moteur** : `chromium-headless` (+ `chromium-common`), RPM **signé Fedora**, couche du `Containerfile`. Zéro Node, zéro binaire d'un CDN mutable.
+- **Transport** : `--remote-debugging-pipe` (FD 3/4 tenus par le helper). **`--remote-debugging-port` est INTERDIT — invariant *testé* du constructeur d'arguments**, pas une reco : un port CDP est **non authentifié**, et le `Bash` non gouverné de l'agent (uid `%i`) s'y connecterait (`curl`/ws sur `127.0.0.1:port`) et piloterait le navigateur **en contournant tous les tiers**. On ne cache pas un port avec `IPAddressDeny` — **le port n'existe pas**. Crates Rust : `chromiumoxide` 0.9.1 / `headless_chrome` 1.0.22.
+- **UID distinct, non négociable** : navigateur sous uid ≠ agent (`DynamicUser`). Jamais `User=%i` : même uid = l'agent lit `/proc/<pid>/fd` et pilote CDP direct.
+- **Piège Chrome ≥136** : débogage ignoré sauf `--user-data-dir=<répertoire éphémère non-défaut>`.
 
-**ADR-017 disait « egress dérivé de l'allowlist de domaines, appliqué par systemd ». C'est faux et il faut le réécrire** : `IPAddressAllow`/`Deny` sont **par IP/CIDR, jamais par hostname**. Et un navigateur tire de dizaines d'hôtes (CDN **anycast**, TTL courts) : un snapshot d'IP au moment de l'appel **casse** les sous-ressources (course entre le DNS de vibed et celui du navigateur). La bonne architecture :
+### Profil — ÉPHÉMÈRE, aucun login persistant (révise ADR-017 #3)
 
-- `vibed` fait tourner un **petit proxy CONNECT** qui **voit les hostnames** et évalue `[rule.domains]` **par CONNECT** (cible/SNI/Host).
-- Le navigateur reçoit `--proxy-server=<proxy vibed>` : **aucun DNS direct** (le proxy résout). Le service a donc `IPAddressDeny=any` + `IPAddressAllow=<proxy>` — un **backstop dur** : même un renderer évadé n'atteint que le proxy de `vibed`.
-- `IPAddressAllow` redevient ce qu'il sait faire (un **kill-switch une-ligne**) ; la politique de domaines vit dans le proxy, là où les hostnames existent.
+**Décision normative** : profil **éphémère par appel** (`--user-data-dir` jetable, spawn-par-appel). **Aucun état d'authentification persisté.** Conséquence majeure : `browser.click`/`fill` agissent sur un navigateur **anonyme**, jamais sur tes sessions connectées — **le scénario catastrophe d'ADR-017 (« une page piégée fait agir l'agent EN TON NOM ») s'évapore**, et les T1 de `read`/`navigate`/`click`/`fill` deviennent **défendables** (pire cas = un clic/submit anonyme). **Ceci révise explicitement ADR-017 décision #3** (« profil persistant, reste connecté »).
 
-### Surface d'outils (tiers d'ADR-017)
+**Coût, dit honnêtement** : les cibles derrière login (repos privés, wikis internes) sont **inatteignables**. Si un login devient nécessaire, c'est une **nouvelle ADR** qui doit (a) rouvrir les tiers (action authentifiée → **T2**, la règle « tier suit l'identité » qu'ADR-017 avait écartée), (b) garder l'uid distinct, (c) un magasin de cookies **géré par `vibed`**, jamais le vrai jar de l'utilisateur. Ne PAS boulonner un cookie jar persistant : ça rouvre le trou **et** pousse à casser l'uid distinct.
+
+### Isolation — profil systemd DÉDIÉ (moins de confinement, sur l'input le plus hostile — tension assumée)
+
+Le service transitoire d'ADR-019 enveloppe helper+navigateur, avec un **profil dédié** (pas le lockdown générique) :
+
+- `NoNewPrivileges=yes` — compatible **uniquement** avec le sandbox **user-namespace** de Chromium (le legacy `chrome-sandbox` setuid est cassé par NNP). Le design **exige** le chemin userns **et** que les **userns non privilégiés restent activés** au noyau — à **affirmer au spawn** (échec = événement d'audit, pas un crash muet) : bootc met le noyau à jour ; `user.max_user_namespaces=0` empêcherait le sandbox d'initialiser, et `--no-sandbox` étant interdit, le navigateur **refuserait de démarrer** (fail-closed).
+- **`RestrictNamespaces=`** en **allowlist dérivée empiriquement** de ce que `chromium-headless` `unshare()` réellement — **au moins `user pid net mnt`** (le sandbox layer-1 crée aussi un **mount namespace** ; l'oublier le casse), possiblement `ipc`. Pas trois types choisis à la main.
+- **`--no-sandbox` INTERDIT.** Le sandbox Chromium reste actif **dans** le sandbox systemd.
+- **SELinux (Fedora *enforcing*)** : `DynamicUser` + userns non privilégiés + tmpfs `/dev/shm` + FD de pipe hérités = source connue d'AVC → **module de politique dédié**, **testé sur enforcing** (pas un dev box permissif). *(Silence de la 1ʳᵉ version — vrai trou pour cet OS.)*
+- `/dev/shm` tmpfs réel ; `MemoryMax=` sur le cgroup du unit.
+
+**Tension assumée** : ce profil confine **moins** (la plus large surface namespace/syscall — la création de userns non privilégiés est un vecteur d'élévation connu) que les autres outils ADR-019, sur **l'outil qui ingère le plus d'input hostile**. Le compensateur est le proxy + backstop IP — d'où l'importance qu'ils soient **hors** de `vibed`.
+
+### Egress — borné aux HÔTES autorisés, PAS aux DONNÉES (honnête)
+
+`IPAddressAllow` est par IP/CIDR, jamais par hostname (correction d'ADR-017 posée). Le **proxy CONNECT (dans le helper)** voit les hostnames et évalue `[rule.domains]` par CONNECT ; le navigateur a `--proxy-server=<proxy>`, aucun DNS direct, et le unit `IPAddressDeny=any` + `IPAddressAllow=<proxy>` (backstop dur). **Mais la borne réelle, sans surpromesse** :
+
+- L'allowlist s'applique à **chaque hôte de sous-ressource** → strict = les sites cassent (fan-out CDN) ; large = l'ensemble des puits d'exfil s'élargit d'autant. **Utilisabilité et surface d'exfil bougent ensemble.**
+- **TLS rend le proxy aveugle au path/corps** : une page sur un domaine autorisé fait `POST https://autorisé.com/chemin-attaquant` ou `GET …?x=<volé>` — le proxy ne voit que `CONNECT autorisé.com:443` → autorisé. **L'egress est borné à l'*ensemble* des hôtes autorisés, pas à *ce qui* sort vers eux.** GitHub (explicitement allowlisté par ADR-017, inscriptible via la session) est un **canal d'exfil ouvert**. « Allowlist-worthy » doit vouloir dire « ne peut pas relayer » — ce que peu d'hôtes utiles satisfont : **tension de gouvernance réelle**.
+- Correctifs honnêtes : (1) **auditer chaque CONNECT + le compte d'octets** dans la chaîne chaînée (les sous-ressources sont hors du chemin d'audit MCP) ; (2) un **budget de volume d'egress par session** (mesurable **sans déchiffrer**) contre l'exfil en masse ; (3) épingler CONNECT-authority == hôte résolu et **refuser ECH/domain-fronting** (si le Chromium Fedora active ECH, le proxy ne voit plus rien).
+
+### Surface d'outils (tiers d'ADR-017, défendables grâce à l'éphémérité)
 
 | Outil | CDP | Tier |
 |---|---|---|
@@ -1313,21 +1331,21 @@ Le navigateur parse du **HTML hostile** : Rule of 2 d'ADR-019 (entrée hostile +
 | `browser.screenshot` | `Page.captureScreenshot` | **T1** |
 | `browser.click` | `Input.dispatchMouseEvent` | **T1** |
 | `browser.fill` | `Input.dispatchKeyEvent` | **T1** |
-| soumission de formulaire | navigation POST | **T2** — agir en ton nom |
+| soumission de formulaire | navigation POST | **T2** |
 
-Chaque page lue est une **entrée hostile** ; chaque action porte un tier ; tout est audité.
+T1 tient **parce que le profil est éphémère** (aucune session à détourner) et l'egress backstoppé. Le texte hostile qui atteint le contexte du LLM reste le résiduel M2/S1 irréductible déjà accepté.
 
 ### Modèle d'instance
 
-**Spawn par appel** (le service transitoire = ramasse-miettes : téardown = nettoyage) — simple, colle au cycle de vie du unit. La **mémoire** est le mur (150–400 Mo/session, Chrome ne rend pas la RAM), pas le CPU/disque. Un **pool** (un navigateur par tier + `Target.createBrowserContext` éphémère par appel, recyclage sur seuil RSS) est **swappable plus tard sans changer la surface d'outils**.
+**Spawn par appel** (service transitoire = ramasse-miettes) + **`MemoryMax=` sur le cgroup** (Chrome ne rend pas la RAM ; on mesure `memory.current`/PSS via cgroup, pas le RSS qui double-compte les pages partagées). La mémoire est le mur. Un **pool** (`Target.createBrowserContext` par appel) est swappable, mais **process-par-appel reste préférable** pour un outil à input hostile.
 
 ### Ce que ça demande, et à qui
 
-- **Micka** : trancher **ADR-019** (le service transitoire — clé de voûte commune à `deploy.*` et `browser.*`) ; valider que `chromium-headless` (~300 Mo) a sa place dans l'image. L'allowlist `[rule.domains]` existe déjà.
-- **Puis implémentable en autonomie** : la couche `chromium-headless` dans le `Containerfile`, le **proxy CONNECT** + le spawner **CDP-par-pipe** dans `vibed`, le **profil systemd dédié** du navigateur, les outils `browser.*` mappés.
+- **Micka** : trancher **ADR-019** (le service transitoire + le patron **helper de faible privilège** — clé de voûte commune à `deploy.*` et `browser.*`) ; valider `chromium-headless` (~300 Mo) + un **module SELinux** pour le unit navigateur.
+- **Puis en autonomie** : la couche `chromium-headless`, le helper `vibed-tool` (spawn CDP-par-pipe + proxy CONNECT, **tout** le parsing hostile), l'IPC de contrôle `vibed`↔helper (domaines ↓, résultats bornés + audit ↑), le profil systemd dédié + politique SELinux, les outils `browser.*`.
 
-### Résiduel accepté
+### Résiduel accepté (honnête)
 
-- Sandbox Chromium + service systemd = **défense en profondeur, pas preuve** : une chaîne (RCE renderer → évasion du userns Chromium → évasion du namespace systemd) reste concevable ; le proxy + `IPAddressAllow` est le dernier mur (le renderer évadé n'atteint que le proxy).
-- Lié au **rythme de paquet Fedora** pour Chromium (frais aujourd'hui : 150.x) — un Chromium Fedora en retard = surface web en retard, à surveiller comme le digest de base.
-- Egress **par domaine au niveau proxy**, pas plus fin : une page autorisée qui tire un sous-domaine malveillant **dans l'allowlist** n'est pas distinguée — garde-fou ultime = la **curation humaine** de l'allowlist (résiduel déjà accepté par ADR-017).
+- Défense en profondeur, **pas preuve** : une chaîne (RCE renderer → évasion userns → évasion du namespace du unit) reste concevable ; le helper (uid distinct) protège `vibed`, pas l'inverse ; le proxy + `IPAddressAllow` est le dernier mur.
+- **Exfil borné aux hôtes, pas aux données** (cf. Egress) — garde-fou = **curation humaine** d'hôtes qui **ne relaient pas** + budget de volume + audit par-CONNECT. À ne pas surpromettre.
+- Lié au **rythme de paquet Fedora** pour Chromium (frais aujourd'hui) — un retard = surface web en retard, à surveiller comme le digest de base.
