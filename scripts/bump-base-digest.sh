@@ -67,7 +67,10 @@ fi
 # Sécurité : n'accepter QUE si le nouveau digest est une manifest-list multi-arch
 # (amd64+arm64). Un digest mono-arch casserait le build de l'autre arch. On grep
 # avec tolérance aux espaces (le JSON brut de skopeo est indenté).
-raw="$(skopeo inspect --raw "docker://${REPO}@${current}")"
+if ! raw="$(skopeo inspect --raw "docker://${REPO}@${current}")"; then
+	echo "erreur: impossible d'inspecter le manifeste ${REPO}@${current}" >&2
+	exit 5
+fi
 if ! printf '%s' "$raw" | grep -qE '"mediaType"[[:space:]]*:[[:space:]]*"[^"]*(image\.index|manifest\.list)'; then
 	echo "erreur: le digest courant n'est pas une manifest-list multi-arch — abandon" >&2
 	exit 5

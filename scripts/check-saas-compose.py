@@ -69,6 +69,16 @@ def check_file(path):
         if stripped.startswith("#"):
             continue  # ligne entièrement commentée : ignorée
 
+        # `network_mode: host` partage la pile réseau de l'hôte et IGNORE toute
+        # liaison loopback — tout port du conteneur est alors exposé, sans passer
+        # par un bloc `ports:` que ce garde inspecterait. Interdit (fail-closed).
+        if re.match(r"^network_mode\s*:\s*[\"']?host[\"']?\s*(#.*)?$", stripped):
+            errors.append(
+                "%s:%d — `network_mode: host` : le conteneur partage la pile "
+                "réseau de l'hôte et contourne la liaison loopback — tout port "
+                "qu'il ouvre est exposé au réseau. Interdit dans un modèle." % (rel, n)
+            )
+
         if in_ports:
             # On reste dans le bloc tant que c'est une entrée de liste. En YAML
             # une entrée de séquence peut être à la MÊME indentation que la clé

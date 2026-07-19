@@ -106,9 +106,11 @@ jobs:
           git commit \
             -m "fix(os): auto-bump digest de base F44 -> ${new}" \
             -m "Le digest épinglé a été purgé par quay (base f44 vivante). Digest courant résolu et vérifié multi-arch (amd64+arm64) par scripts/bump-base-digest.sh. Merge après build vert. Généré par base-digest-autobump.yml."
-          # --force est sûr ICI : on a vérifié au-dessus que la branche est absente
-          # ou finit sur un commit du bot (jamais de travail humain écrasé).
-          git push --force origin "$BRANCH"
+          # --force-with-lease : on a déjà vérifié au-dessus que la branche est
+          # absente ou finit sur un commit du bot ; le lease ferme EN PLUS la
+          # fenêtre TOCTOU entre le fetch et le push (un push humain intercalé
+          # fait alors échouer le lease au lieu d'être écrasé silencieusement).
+          git push --force-with-lease origin "$BRANCH"
 
           # Ouvre la PR si aucune n'est déjà ouverte pour cette branche.
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
