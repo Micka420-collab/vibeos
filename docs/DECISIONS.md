@@ -1198,3 +1198,63 @@ Le **déploiement gouverné** (`deploy.*`) est une **capacité d'exécution nouv
 
 - Le dev local via le `Bash` natif de l'agent reste **hors gouvernance `vibed`** jusqu'à la fermeture de l'écart (invariant n°1, décision `permissions.deny` en attente). Pour du dev sur la machine de l'utilisateur, c'est le comportement attendu ; le danger réel (déploiement, dépense) est, lui, réservé aux tiers gouvernés à venir.
 - Les binaires épinglés (seau A-bis) exigent un **bump manuel** de version dans la table `spec` de `install-saas-tool`. **Pas d'alerte automatisée**, décidé délibérément : une cron de fraîcheur serait soit bruyante (`flyctl` sort chaque jour), soit muette (GitHub ne supprime pas les vieilles releases). Les pins sont des snapshots best-effort ; l'installeur **fail-close** si le hash ne correspond pas, donc un pin périmé n'installe jamais rien de faux — au pire il installe une version un peu ancienne.
+
+## ADR-021 — `deploy.*` gouverné : mettre en production sans jamais donner le token à l'agent — *proposé (2026-07-19, autonomie week-end), à trancher*
+
+**Statut** : **PROPOSÉ**, non tranché. Aucun code écrit. C'est le design concret de la capacité que la demande initiale nomme « le mettre en production » et qu'**ADR-020** a délibérément reportée (« brique gouvernée future »). Il **dépend de deux décisions de Micka** : (a) le **modèle d'allowlist de cibles** ci-dessous ; (b) la décision sur **ADR-019** (le helper-process), dont l'isolation des credentials hérite **entièrement** — sans ADR-019, `deploy.apply` ne se construit pas.
+
+### Le problème, précisément
+
+Déployer, c'est agir **dehors**, avec un **token cloud** (Fly/Vercel/Railway = actif **A2** du THREAT-MODEL) et un effet **irréversible/facturé**. Trois dangers distincts, souvent confondus :
+
+1. **La cible** — l'agent injecté déploie sur un projet qui n'est pas le tien.
+2. **Le contenu** — l'agent déploie **du code malveillant** sur une cible autorisée (leçon d'ADR-017 : l'allowlist borne le *où*, jamais le *quoi*).
+3. **Le token** — l'agent injecté **exfiltre le credential cloud** (le vrai bijou : avec le token, il déploie n'importe quoi, n'importe où, indéfiniment).
+
+ADR-020 avait posé les trois verrous mais laissé le 3ᵉ « ouvert, non résolu par l'allowlist ». Cet ADR le ferme.
+
+### Verrou 3 (token) — hérité d'ADR-019, pas réinventé
+
+**Le token ne vit jamais dans un environnement que l'agent peut atteindre.** `deploy.apply` **ne lance pas** le CLI dans `vibed` ni dans le shell de l'agent : il délègue au **helper-process d'ADR-019** (service systemd transitoire durci, confiné avant `exec`).
+
+- Le token est **scellé TPM2** via `systemd-creds` (déjà dans l'image, cf. Phase 2.5). Le service transitoire le reçoit par `LoadCredentialEncrypted=deploy-token:…` : systemd le **déchiffre et le monte** dans `$CREDENTIALS_DIRECTORY/deploy-token` (mode 0400, **namespace de montage privé** au service).
+- Le service exécute le CLI avec le token lu depuis ce répertoire, `IPAddressAllow` **dérivé de la cible** (comme l'egress navigateur d'ADR-017) et `IPAddressDeny=any` par défaut.
+- **L'agent, via `vibed`, ne fournit que** provider + cible + référence d'artefact. Il ne voit **jamais** le token. `vibed` lui-même ne manipule pas le token en clair — il passe le **nom** du credential au service ; systemd fait le déchiffrement.
+
+C'est le patron OpenSSH / `systemd-executor` d'ADR-019 : la donnée sensible est traitée dans un **processus de privilège séparé**, jamais dans le moteur de politiques.
+
+### Verrou 2 (contenu) — deux outils, approbation sur le digest
+
+- **`deploy.plan` (T2)** : produit un **plan** en lecture — quel artefact (**digest**), vers quelle cible, quel diff de config. Peut interroger l'API provider en lecture. Sortie structurée, auditée, **sans effet**.
+- **`deploy.apply` (T3)** : exécute le plan. **Exige l'approbation humaine** (`vibectl approve`). L'opérateur voit *« déployer l'artefact `sha256:X` vers `fly/myapp-prod` »* et approuve. Le **grant one-shot** est keyé `(deploy.apply, provider+cible+digest, uid)` — approuver un déploiement n'autorise ni le suivant, ni un autre digest, ni une autre cible.
+
+L'approbation porte sur le **contenu** (le digest), pas seulement la cible — fermeture du résiduel d'ADR-017.
+
+### Verrou 1 (cible) — `[rule.deploy]`, sœur de `[rule.domains]`
+
+Décision de Micka : quelles cibles l'IA peut déployer. Schéma proposé (même moteur que `[rule.domains]`) :
+
+```toml
+[[rule]]
+id = "deploy-fly-myapp"
+tools = ["deploy.apply"]
+tier = "T3"
+action = "allow"
+approval = "human"
+  [rule.deploy]
+  provider = "fly"                    # fly | vercel | railway
+  targets  = ["myapp-prod", "myapp-staging"]
+```
+
+Un `deploy.apply` vers `provider/target` hors de toute règle → **refus** (plancher default-deny). L'allowlist borne le *où* ; l'approbation borne le *quoi* ; le helper isole le *token*.
+
+### Ce que ça demande, et à qui
+
+- **Micka** : (a) valider/corriger le **modèle `[rule.deploy]`** ; (b) fournir ses **cibles réelles** ; (c) **trancher ADR-019** (sans le helper-process, pas d'isolation credentials).
+- **Puis implémentable en autonomie** (nouveaux outils gouvernés, comme `svc.restart` l'a été — pas un abaissement du plancher) : `deploy.plan`/`deploy.apply` dans `vibed`, la règle `[rule.deploy]` dans le parseur, le scellement du token via `systemd-creds`.
+
+### Résiduel accepté (dit d'avance)
+
+- Le **provider** reste un tiers de confiance : si Fly/Vercel est compromis, l'artefact approuvé part quand même. Hors périmètre (comme la confiance en quay pour la base).
+- `deploy.plan` **consomme le token** (via le helper) pour interroger le provider → il est **T2**, pas T1 ; un `plan` en boucle est borné par le rate-limiter par-uid.
+- L'approbation humaine suppose que l'opérateur **sait lire** ce qu'il approuve — le garde-fou ultime reste humain, par conception.
