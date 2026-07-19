@@ -313,6 +313,95 @@ impl TransientUnit {
     }
 }
 
+/// The captured outcome of a transient-service invocation.
+#[derive(Debug)]
+pub struct ToolOutput {
+    /// Exit code of `systemd-run` (which propagates the service's), or `None`
+    /// if it was killed by a signal. `systemd-run` returns non-zero on a helper
+    /// failure, a `RuntimeMaxSec` timeout, or a missing binary — vibed also
+    /// reads [`stderr`](Self::stderr) to tell these apart (Fable 5).
+    pub status: Option<i32>,
+    /// The bounded RESULT channel: the helper's stdout, forwarded by `--pipe`.
+    pub stdout: String,
+    /// Diagnostics: `systemd-run`'s own chatter (it writes to stderr, never
+    /// stdout) and the helper's stderr, captured on a SEPARATE pipe and never
+    /// merged into the result channel (Fable 5, verified empirically).
+    pub stderr: String,
+}
+
+/// Spawn the hardened transient service and capture its outcome.
+///
+/// `vibed` (root) exec's **`systemd-run`, not the tool**, with the cleared
+/// environment and absolute-binary discipline of `tools/svc.rs`: a compromised
+/// environment can never redirect what the root daemon launches. `systemd-run`
+/// then exec's the low-privilege helper under the compiled hardening profile.
+///
+/// The `control_payload` (a compiled policy snapshot / request) is written to
+/// the service's stdin via `--pipe`, then stdin is **closed** before we read, so
+/// a bounded payload and a bounded result cannot deadlock on a full pipe. stdout
+/// (the result) and stderr (diagnostics) are captured on **separate** pipes.
+///
+/// Time-bounding is delegated to the profile's `RuntimeMaxSec` + `--wait` (the
+/// same reliance on the child's own bound that `svc.rs` documents for
+/// systemctl); `vibed` adds no wall-clock of its own here.
+///
+/// NOTE: the *systemd behaviour* this drives can only be validated on the target
+/// (a full-systemd Fedora host); here the caller side is exercised against a
+/// fake `systemd-run` exactly as `svc.rs` is exercised against a fake systemctl.
+pub fn spawn_transient(
+    systemd_run_bin: &str,
+    unit: &TransientUnit,
+    helper_bin: &str,
+    helper_args: &[String],
+    control_payload: &[u8],
+) -> Result<ToolOutput, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let argv = unit.systemd_run_command(systemd_run_bin, helper_bin, helper_args);
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn_transient: cannot exec {}: {e}", argv[0]))?;
+
+    // Write the control payload on a SEPARATE thread, then close stdin (drop the
+    // handle => EOF). Writing on its own thread while the main thread drains
+    // stdout/stderr is deadlock-free for ANY payload/result size — writing fully
+    // before reading could wedge once both exceed the pipe buffer.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "spawn_transient: no stdin pipe".to_string())?;
+    let payload = control_payload.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&payload));
+
+    // Reads stdout and stderr concurrently to completion, then reaps the child.
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("spawn_transient: waiting for systemd-run: {e}"))?;
+
+    // Surface a control-payload write failure (e.g. helper died before reading),
+    // but only if the run did not itself already fail.
+    match writer.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) if out.status.success() => {
+            return Err(format!("spawn_transient: writing control payload: {e}"));
+        }
+        Ok(Err(_)) => {} // run failed anyway; its status/stderr is the real signal
+        Err(_) => return Err("spawn_transient: control-payload writer panicked".to_string()),
+    }
+
+    Ok(ToolOutput {
+        status: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
 // --------------------------------------------------------------------------
 // Fail-closed validation of every value that reaches a `--property=` string.
 // Each renders to its own argv (no shell), so the risk is not shell injection
@@ -827,6 +916,134 @@ mod tests {
             assert_eq!(u.get("StandardOutput"), None);
             assert_eq!(u.get("StandardError"), None);
         }
+    }
+
+    // ---- spawn (against a fake systemd-run, like svc.rs' fake systemctl) --
+
+    /// Write an executable fake `systemd-run` that records its argv and the
+    /// control payload it receives on stdin, echoes a canned result to stdout and
+    /// chatter to stderr, and exits with `exit`. Uses only shell builtins so it
+    /// runs under `env_clear()` (empty PATH — no `cat`/external binaries).
+    #[cfg(unix)]
+    fn fake_systemd_run(
+        dir: &std::path::Path,
+        argv_marker: &std::path::Path,
+        payload_marker: &std::path::Path,
+        result: &str,
+        exit: i32,
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("systemd-run");
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"$@\" > '{argv}'\n\
+             IFS= read -r payload\n\
+             printf '%s' \"$payload\" > '{payload}'\n\
+             printf '%s\\n' '{result}'\n\
+             echo 'run-uXX.service: chatter to stderr' >&2\n\
+             exit {exit}\n",
+            argv = argv_marker.display(),
+            payload = payload_marker.display(),
+            result = result,
+            exit = exit,
+        );
+        std::fs::write(&path, script).expect("write fake systemd-run");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Retry around the TEST-ONLY ETXTBSY race (a parallel test's fork() can
+    /// transiently hold our write fd to the just-written fake). Production only
+    /// ever execs the static `/usr/bin/systemd-run`.
+    #[cfg(unix)]
+    fn spawn_retry(
+        bin: &str,
+        unit: &TransientUnit,
+        helper: &str,
+        args: &[String],
+        payload: &[u8],
+    ) -> Result<ToolOutput, String> {
+        for _ in 0..50 {
+            match spawn_transient(bin, unit, helper, args, payload) {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                other => return other,
+            }
+        }
+        spawn_transient(bin, unit, helper, args, payload)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_transient_pipes_payload_and_keeps_channels_separate() {
+        let dir = std::env::temp_dir().join(format!("vibed-spawn-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (argv_m, payload_m) = (dir.join("argv"), dir.join("payload"));
+        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, "BOUNDED-RESULT", 0);
+
+        let out = spawn_retry(
+            &bin,
+            &browser(),
+            "/usr/libexec/vibed-tool",
+            &["probe".to_string()],
+            b"control-snapshot-v1\n",
+        )
+        .expect("spawn succeeds");
+
+        // Result on stdout, diagnostics on stderr, never merged.
+        assert!(
+            out.stdout.contains("BOUNDED-RESULT"),
+            "result: {:?}",
+            out.stdout
+        );
+        assert!(out.stderr.contains("chatter"), "chatter: {:?}", out.stderr);
+        assert!(!out.stdout.contains("chatter"), "channels must not merge");
+        assert_eq!(out.status, Some(0));
+        // The control payload reached the child's stdin.
+        assert_eq!(
+            std::fs::read_to_string(&payload_m).unwrap(),
+            "control-snapshot-v1"
+        );
+        // The hardened profile and the `--` fence reached systemd-run's argv.
+        let argv = std::fs::read_to_string(&argv_m).unwrap();
+        assert!(
+            argv.contains("--property=DynamicUser=yes"),
+            "profile: {argv}"
+        );
+        assert!(
+            argv.contains("-- /usr/libexec/vibed-tool probe"),
+            "fence: {argv}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_transient_propagates_a_nonzero_exit() {
+        let dir = std::env::temp_dir().join(format!("vibed-spawn-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (argv_m, payload_m) = (dir.join("argv"), dir.join("payload"));
+        let bin = fake_systemd_run(&dir, &argv_m, &payload_m, "", 64);
+
+        let out = spawn_retry(
+            &bin,
+            &browser(),
+            "/usr/libexec/vibed-tool",
+            &["probe".to_string()],
+            b"x\n",
+        )
+        .expect("spawn runs");
+        assert_eq!(
+            out.status,
+            Some(64),
+            "the helper's exit code must propagate"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- fail-closed validation ------------------------------------------
