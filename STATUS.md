@@ -10,9 +10,11 @@
 > #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth).
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-18 (week-end autonome)** — **trousse SaaS +
-> ecommerce livrée** (#95/#97/#99/#100 mergées ; ADR-020 #92 ouverte pour la
-> décision `deploy.*`). Journal détaillé du week-end : [WEEKEND-LOG.md](WEEKEND-LOG.md).
+> Dernière mise à jour : **2026-07-19 (week-end autonome, dimanche)** — **trousse
+> SaaS + ecommerce complète dev→prod** : 6 modèles serveur par projet, installeur
+> à la demande, catalogue, runbooks dev+prod, garde CI. ADR-020 (#92) **mergée par
+> Micka** ; la capacité `deploy.*` gouvernée reste sa décision. Journal détaillé :
+> [WEEKEND-LOG.md](WEEKEND-LOG.md).
 
 ## Vue d'ensemble
 
@@ -127,7 +129,14 @@
   - **[#97] modèles `compose` par projet** (`/usr/share/vibeos/saas/`) : PostgreSQL 18 + Valkey, et Caddy + TLS local `mkcert`. Les **serveurs** vivent en conteneurs **par projet** (ports loopback-only, mdp exigé via `.env`, volumes nommés), jamais gravés dans l'image.
   - **[#100] installeur à la demande** `/usr/libexec/vibeos/install-saas-tool` : `oha`/`vegeta`/`flyctl`/`railway` téléchargés **épinglés + sha256 fail-closed** vers `~/.local/bin`, hors `/usr`. Testé de bout en bout (install `oha` OK ; hash corrompu **refusé**). Décision : **pas gravés** (redondance avec `ab`, churn/taille de `flyctl`, déploiement gouverné de toute façon).
   - **[#99] catalogue [ECOSYSTEM.md](docs/ECOSYSTEM.md)** : 3 seaux (embarqué / à la demande / référence self-hosted) + pièges de licence. **Fact-check Fable 5** des licences à la source (Redis tri-licence, Stripe Apache-2.0…).
-  - **Honnêteté (invariant projet)** : la seule chose *vraiment* neuve demandée — **déployer en prod** — n'est **PAS** livrée. `deploy.*` gouverné dans `vibed` est une **capacité d'exécution nouvelle** qui attend (a) l'**allowlist de cibles de Micka**, (b) le helper-process d'[ADR-019](docs/DECISIONS.md), (c) l'isolation des credentials cloud. **[ADR-020 / PR #92](https://github.com/Micka420-collab/vibeos/pull/92) reste OUVERTE** pour cette décision — non auto-mergée.
+  - **Honnêteté (invariant projet)** : la seule chose *vraiment* neuve demandée — **déployer en prod** — n'est **PAS** livrée. `deploy.*` gouverné dans `vibed` est une **capacité d'exécution nouvelle** qui attend (a) l'**allowlist de cibles de Micka**, (b) le helper-process d'[ADR-019](docs/DECISIONS.md), (c) l'isolation des credentials cloud. **[ADR-020 / PR #92](https://github.com/Micka420-collab/vibeos/pull/92) a été mergée par Micka** (2026-07-19) — la doctrine est validée, mais la *capacité* `deploy.*` (allowlist + credentials) reste sa décision d'archi, non auto-mergée.
+
+- **2026-07-19 (dimanche) — substrat complet dev→prod + vérifié.** Sur demande explicite de Micka de continuer, le substrat SaaS/ecommerce est étendu et bouclé :
+  - **3 modèles serveur de plus** ([#104]) : `observability/` (Prometheus + Grafana), `object-storage/` (SeaweedFS S3, MinIO écarté AGPL+archivé), `mailpit/` (catcher email dev) ; puis **`meilisearch/`** ([#108], recherche produit ecommerce). **6 modèles** par projet au total.
+  - **Garde CI** ([#105]) : `check-saas-compose.py` — tout modèle doit publier ses ports en **loopback-only** (fail-closed). Méta-garde à 8, mutation-testé.
+  - **Runbook production** ([#110]) : `/usr/share/vibeos/saas/PRODUCTION.md` — self-hosted durci (pare-feu, TLS Let's Encrypt, secrets podman/TPM2, systemd, sauvegardes). Couvre le « mettre en production » explicitement demandé.
+  - **Vérifié en réel** (WSL/docker) : SeaweedFS, la stack observability (datasource auto-provisionné) et Meilisearch (auth enforced) **smoke-testés**, pas seulement affirmés.
+  - **Infra** : digest de base F44 re-bumpé ([#106], quay purge ~quotidienne — cf. la décision structurelle laissée à Micka, miroir vs auto-PR).
 
 ## 📋 Reste à faire (court terme)
 
