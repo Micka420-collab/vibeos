@@ -23,14 +23,21 @@ avec les bons réflexes — **pas de raccourci qui expose une base**.
 
 ## 1. Le pare-feu d'abord (avant d'exposer quoi que ce soit)
 
-**Seuls 80 et 443 sont publics. La base, le cache, Meilisearch, l'admin Grafana
-ne sortent JAMAIS sur l'interface publique.** Les modèles de la trousse lient
-déjà `127.0.0.1` : garde ça en prod, et ne publie QUE le reverse-proxy.
+**Seuls 80/443 et ssh sont publics. La base, le cache, Meilisearch, l'admin
+Grafana ne sortent JAMAIS sur l'interface publique.** Les modèles de la trousse
+lient déjà `127.0.0.1` : garde ça en prod, et ne publie QUE le reverse-proxy.
+
+⚠️ **Regarde ce qui est DÉJÀ ouvert — n'assume rien.** Une install Fedora Server
+laisse souvent `cockpit` (9090, un portail de login) et `dhcpv6-client` actifs :
+tu te croirais en 80/443/ssh alors que **cockpit est public**. Les commandes qui
+suivent n'ajoutent que ; c'est la liste FINALE qui compte, pas ce que tu tapes.
 
 ```sh
-sudo firewall-cmd --permanent --add-service=http --add-service=https
-sudo firewall-cmd --permanent --add-service=ssh        # garde ton accès
+sudo firewall-cmd --list-all                 # 1) LIS la liste réelle
+sudo firewall-cmd --permanent --remove-service=cockpit   # 2) ferme l'inutile (adapte)
+sudo firewall-cmd --permanent --add-service=http --add-service=https --add-service=ssh
 sudo firewall-cmd --reload
+sudo firewall-cmd --list-all                 # 3) RE-vérifie : http/https/ssh, rien d'autre
 ```
 
 ## 2. Vrai TLS : Caddy en frontal (un seul port public)
@@ -40,25 +47,40 @@ Let's Encrypt tout seul. Remplace le `Caddyfile` de dev par :
 
 ```
 monsaas.example.com {
-    reverse_proxy localhost:3000       # ton app (ou le conteneur applicatif)
+    # host.containers.internal = l'hôte vu DEPUIS le conteneur Caddy (podman).
+    # `localhost:3000` ne marcherait que si Caddy tournait dans le netns de l'hôte
+    # — sinon c'est le loopback DU conteneur (502, pas une fuite, mais ça ne marche pas).
+    reverse_proxy host.containers.internal:3000
     encode gzip zstd
 }
 ```
 
-Fais pointer l'enregistrement DNS `A`/`AAAA` de `monsaas.example.com` vers ton
-serveur, publie Caddy sur `:80`+`:443` (les seuls ports publics), et il gère le
-certificat + le renouvellement. **Pré-requis** : 80 et 443 accessibles depuis
-Internet (le challenge ACME en a besoin).
+Fais pointer le DNS `A`/`AAAA` de `monsaas.example.com` vers ton serveur ; Caddy
+gère le certificat + le renouvellement. **Pré-requis ACME** : 80 et 443 joignables
+depuis Internet.
 
-## 3. Secrets : jamais en clair, jamais dans git
-
-Le `.env` des modèles est pour le **dev**. En prod, utilise **podman secrets** :
+⚠️ **Rootless + ports < 1024.** Ce guide est *rootless* (`systemctl --user`), or
+podman rootless ne peut pas lier `:80`/`:443` par défaut. **NE « corrige » PAS ça
+avec `sudo podman`** : les ports publiés en **rootful** contournent firewalld
+(règles netavark) et rendent le §1 caduc. Autorise plutôt les ports bas en rootless :
 
 ```sh
-printf '%s' 'un-vrai-mot-de-passe-fort' | podman secret create pg_password -
+echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-vibeos-ports.conf
+sudo sysctl --system
 ```
 
-…et référence-le dans le service (compose) :
+## 3. Secrets : générés, jamais tapés en clair, jamais dans git
+
+Le `.env` des modèles est pour le **dev**. En prod, **podman secrets** — et
+**génère** le mot de passe, ne le tape pas : sur VibeOS l'IA partage ton shell, et
+l'historique / les transcripts gardent tout ce que tu saisis.
+
+```sh
+openssl rand -base64 32 | podman secret create pg_password -   # généré, jamais tapé
+```
+
+Référence-le dans le service, **en retirant** `POSTGRES_PASSWORD` de `environment`
+ET du `.env` (les deux à la fois = l'entrée postgres refuse de démarrer) :
 
 ```yaml
 services:
@@ -72,40 +94,65 @@ secrets:
     external: true
 ```
 
-Alternative VibeOS-native : **systemd-creds** scellé TPM2 (déjà dans l'image, cf.
-la trousse sécurité) pour les secrets d'unités. Ne commite **jamais** un secret.
+Note : le driver fichier de podman stocke le secret en base64 (≈ clair) sous
+`~/.local/share/containers/...` — mieux qu'un `.env` de projet qu'un agent lit,
+mais pas scellé. Pour du vrai scellement, **systemd-creds** TPM2 (déjà dans
+l'image, cf. la trousse sécurité). Ne commite **jamais** un secret.
 
-## 4. Démarrage automatique : systemd, pas un shell
+## 4. Démarrage automatique : systemd (Quadlet), pas un shell
 
-Un `podman compose up` dans un terminal meurt au logout. En prod, génère des
-unités systemd (Quadlet, la voie moderne de podman) ou :
+Un `podman compose up` dans un terminal meurt au logout. La voie **supportée** sur
+podman 5.x (ce que livre F44) est **Quadlet** : un fichier `.container` déclaratif
+que systemd gère. `podman generate systemd` marche encore mais est **déprécié**
+depuis podman 4.4. Exemple minimal `~/.config/containers/systemd/monsaas-db.container` :
 
-```sh
-# À partir des conteneurs lancés, génère des unités utilisateur :
-podman generate systemd --new --files --name monsaas-db
-mkdir -p ~/.config/systemd/user && mv container-*.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now container-monsaas-db.service
-loginctl enable-linger "$USER"     # les unités user tournent hors session
+```ini
+[Container]
+Image=docker.io/library/postgres:18
+Secret=pg_password,type=env,target=POSTGRES_PASSWORD
+Volume=pgdata.volume:/var/lib/postgresql/data
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
 ```
 
-`Restart=on-failure` (posé par `generate systemd`) relance après un crash ; le
-`linger` les fait démarrer au boot du serveur.
-
-## 5. Sauvegardes : l'état vit dans des volumes — dumpe-le dehors
-
-Un volume nommé n'est pas une sauvegarde. Dump régulier, **hors du serveur** :
-
 ```sh
-# PostgreSQL — dump logique, compressé, daté (via l'horloge de l'hôte)
-podman exec monsaas-db pg_dump -U app -d app | gzip > "backup-$(date +%F).sql.gz"
-# Meilisearch — snapshot via l'API (voir la doc /snapshots) ou copie de /meili_data à l'arrêt
-# Objet (SeaweedFS) — réplique le bucket : aws s3 sync s3://uploads ./backup-uploads/
+systemctl --user daemon-reload            # génère l'unité depuis le .container
+systemctl --user start monsaas-db.service
+loginctl enable-linger "$USER"            # tourne hors session ET au boot du serveur
 ```
 
-Automatise-le (timer systemd) et **copie les dumps ailleurs** (autre machine,
-stockage objet distant). Teste une **restauration** au moins une fois — une
-sauvegarde jamais restaurée n'en est pas une.
+`Restart=on-failure` relance après un crash ; le `linger` démarre l'unité au boot.
+
+## 5. Sauvegardes : l'état vit dans des volumes — dumpe-le dehors, sans mentir
+
+Un volume nommé n'est pas une sauvegarde. **Piège classique** : `pg_dump | gzip >
+f.gz` renvoie le code de sortie de `gzip`, PAS de `pg_dump` — un dump échoué (base
+coupée, disque plein) produit quand même un `.gz` « réussi » minuscule. Un timer
+qui automatise ce one-liner ne verrait **jamais** l'échec : des mois de
+sauvegardes vides, découvert à la restauration. Fais un script honnête :
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail                       # pipefail : l'échec de pg_dump fait échouer
+out="backup-$(date +%F).sql.gz"
+tmp="$(mktemp)"
+podman exec monsaas-db pg_dump -U app -d app | gzip > "$tmp"
+[ -s "$tmp" ] || { echo "dump vide — abandon" >&2; exit 1; }
+mv "$tmp" "$out"                        # renomme SEULEMENT si tout a réussi
+# + pg_dumpall --globals-only pour les rôles ; CHIFFRE le dump avant de le copier
+#   hors serveur (il contient toutes tes données prod).
+```
+
+- **Meilisearch** : snapshot via l'API (doc `/snapshots`) ou copie de `/meili_data` à l'arrêt.
+- **Objet (SeaweedFS)** : `aws --endpoint-url http://127.0.0.1:8333 s3 sync s3://uploads ./backup-uploads/` (ton endpoint local, pas AWS).
+
+Automatise (timer systemd) **avec alerte à l'échec**, copie les dumps **ailleurs**
+(chiffrés), et **teste une restauration** — une sauvegarde jamais restaurée n'en
+est pas une.
 
 ## 6. Mises à jour
 
