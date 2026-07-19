@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod policy;
 pub mod ratelimit;
 pub mod reasoning;
+pub mod sandbox;
 pub mod sha256;
 pub mod supervisor;
 #[cfg(test)]
