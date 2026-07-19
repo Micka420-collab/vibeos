@@ -22,7 +22,11 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # PostgreSQL 18+ EXIGE le montage sur /var/lib/postgresql (les données vont
+      # dans un sous-répertoire versionné, ex. `18/`) — ça permet `pg_upgrade`.
+      # Monter sur .../data (l'ancienne convention ≤17) fait REFUSER le démarrage
+      # à l'image pg18 (« unused mount/volume » → crash-loop). Vérifié E2E.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-app}"]
       interval: 5s
