@@ -205,12 +205,23 @@ fn validate_value(val: &str) -> Result<String, String> {
 /// **opaque** (le contenu vient d'une page hostile). Le transport `run_browser`
 /// construira la [`CdpSession`] sur les fds du pipe puis appellera ceci.
 ///
-/// **Incrément 1** : les verbes SANS sélecteur — `navigate`/`read`/`screenshot`. Leurs
-/// commandes CDP ne portent aucune entrée agent interpolée (URL en paramètre, hôte déjà
-/// validé ; expressions `Runtime.evaluate` CONSTANTES). `click`/`fill`/`submit`, qui
-/// exigent le **binding CDP par-objet** du sélecteur/valeur (`DOM.querySelector` par
-/// paramètre → `Input.dispatch*`/`Runtime.callFunctionOn` avec le nœud en `arguments`,
-/// jamais d'interpolation — invariant ADR-022), arrivent à l'incrément suivant.
+/// Les 6 verbes sont couverts. Aucune entrée agent n'est interpolée dans du JS :
+/// - `navigate`/`read`/`screenshot` : URL en paramètre CDP, expressions `Runtime.evaluate`
+///   CONSTANTES ;
+/// - `click`/`fill`/`submit` : le sélecteur est un **paramètre** de `DOM.querySelector`,
+///   la valeur d'un `fill` est un **argument** de `Runtime.callFunctionOn` (fonction JS
+///   CONSTANTE). Le sélecteur/la valeur n'atteignent JAMAIS une source
+///   `evaluate`/`functionDeclaration`.
+///
+/// ⚠️ Nuance (Fable 5) : `fill`/`submit` **agissent sur le nœud résolu** (`objectId` via
+/// `callFunctionOn`) — binding par-objet complet. `click`, lui, ne résout le nœud que
+/// pour en tirer des **coordonnées** (`DOM.getBoxModel`) puis dispatche à (x,y) : c'est
+/// un binding **plus faible** — le navigateur délivre le clic à l'élément **hit-testé
+/// topmost** à ces coordonnées, pas forcément au nœud résolu (une page hostile peut
+/// superposer un overlay = clickjacking ciblé). Partiellement inhérent à cliquer sur une
+/// page hostile ; la vérification hit-test (`DOM.getNodeForLocation` == nœud résolu, ou
+/// un de ses descendants) est à ajouter **avant le câblage live** (elle exige un test
+/// contre le vrai chromium — descendants d'un bouton, etc.).
 ///
 /// À porter par l'incrément transport (Fable 5) : (1) toutes les commandes utilisent
 /// ici `session_id: None` (la cible navigateur) ; le vrai chromium exige le `sessionId`
@@ -292,13 +303,143 @@ pub(crate) fn run_action<C: CdpChannel>(
                 })?;
             Ok(json!({ "screenshot_png_base64": data }))
         }
-        BrowserAction::Click { .. } | BrowserAction::Fill { .. } | BrowserAction::Submit { .. } => {
-            Err(
-                "browser: click/fill/submit — incrément suivant (binding CDP par-objet)"
-                    .to_string(),
-            )
+        BrowserAction::Click { selector } => {
+            let node = resolve_node(session, selector)?;
+            // Amène l'élément dans le viewport, puis clique en son CENTRE géométrique.
+            // Les coordonnées sont numériques : aucune entrée agent n'atteint le JS.
+            session.call(
+                "DOM.scrollIntoViewIfNeeded",
+                json!({ "nodeId": node }),
+                None,
+            )?;
+            let bm = session.call("DOM.getBoxModel", json!({ "nodeId": node }), None)?;
+            let (x, y) = box_center(&bm)?;
+            for ty in ["mousePressed", "mouseReleased"] {
+                session.call(
+                    "Input.dispatchMouseEvent",
+                    json!({ "type": ty, "x": x, "y": y, "button": "left", "clickCount": 1 }),
+                    None,
+                )?;
+            }
+            Ok(json!({ "clicked": selector }))
+        }
+        BrowserAction::Fill { selector, value } => {
+            let node = resolve_node(session, selector)?;
+            let object_id = resolve_object(session, node)?;
+            // BINDING PAR-OBJET (invariant ADR-022) : la fonction est une CONSTANTE ; la
+            // valeur voyage comme ARGUMENT `arguments[0].value`, JAMAIS interpolée dans la
+            // source. Remplace la valeur ET émet 'input' (pour que les frameworks JS la
+            // voient).
+            let r = session.call(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration":
+                        "function(v){ this.value = v; this.dispatchEvent(new Event('input', {bubbles:true})); }",
+                    "arguments": [ { "value": value } ],
+                }),
+                None,
+            )?;
+            // Fail-closed (Fable 5, comme `read`) : une fonction qui lève renvoie un
+            // « succès » CDP portant `exceptionDetails` — sans ce contrôle l'agent
+            // croirait avoir rempli le champ et enchaînerait (« mot de passe saisi →
+            // submit ») sur un faux signal.
+            if r.get("exceptionDetails").is_some() {
+                return Err(
+                    "browser.fill: la saisie a levé une exception côté page — refusé".to_string(),
+                );
+            }
+            Ok(json!({ "filled": selector }))
+        }
+        BrowserAction::Submit { selector } => {
+            let node = resolve_node(session, selector)?;
+            let object_id = resolve_object(session, node)?;
+            // Fonction CONSTANTE, AUCUN argument (`this` = le formulaire résolu).
+            // requestSubmit() déclenche la validation HTML5 ; submit() est le repli.
+            let r = session.call(
+                "Runtime.callFunctionOn",
+                json!({
+                    "objectId": object_id,
+                    "functionDeclaration":
+                        "function(){ if (this.requestSubmit) this.requestSubmit(); else this.submit(); }",
+                    "arguments": [],
+                }),
+                None,
+            )?;
+            if r.get("exceptionDetails").is_some() {
+                return Err(
+                    "browser.submit: la soumission a levé une exception côté page — refusé"
+                        .to_string(),
+                );
+            }
+            Ok(json!({ "submitted": selector }))
         }
     }
+}
+
+/// Résout un sélecteur CSS en `nodeId` DOM. Le sélecteur est un **PARAMÈTRE** de
+/// `DOM.querySelector` (binding par-objet), jamais du JS. `Err` si l'élément n'existe
+/// pas (`nodeId` 0) — fail-closed, pas de clic « dans le vide ».
+fn resolve_node<C: CdpChannel>(session: &mut CdpSession<C>, selector: &str) -> Result<u64, String> {
+    let doc = session.call("DOM.getDocument", json!({ "depth": 0 }), None)?;
+    let root = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "browser: DOM.getDocument sans nodeId racine".to_string())?;
+    let q = session.call(
+        "DOM.querySelector",
+        json!({ "nodeId": root, "selector": selector }),
+        None,
+    )?;
+    let node = q
+        .get("nodeId")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "browser: DOM.querySelector sans nodeId".to_string())?;
+    if node == 0 {
+        return Err(format!(
+            "browser: aucun élément pour le sélecteur {selector:?}"
+        ));
+    }
+    Ok(node)
+}
+
+/// Résout un `nodeId` en `objectId` JS (pour `Runtime.callFunctionOn`).
+fn resolve_object<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    node_id: u64,
+) -> Result<String, String> {
+    let r = session.call("DOM.resolveNode", json!({ "nodeId": node_id }), None)?;
+    r.get("object")
+        .and_then(|o| o.get("objectId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "browser: DOM.resolveNode sans objectId".to_string())
+}
+
+/// Centre géométrique de la box « content » d'un `DOM.getBoxModel`
+/// (`content = [x1,y1, x2,y2, x3,y3, x4,y4]`, les 4 coins).
+fn box_center(bm: &Value) -> Result<(f64, f64), String> {
+    let content = bm
+        .get("model")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "browser: DOM.getBoxModel sans content".to_string())?;
+    if content.len() < 8 {
+        return Err("browser: box model 'content' incomplet".to_string());
+    }
+    // Fail-closed (Fable 5) : une coordonnée non-numérique/non-finie est refusée, pas
+    // coercée en 0.0 — sinon un box model piégé ferait cliquer le coin (0,0) du viewport
+    // (ce que la page y a peint).
+    let coord = |i: usize| -> Result<f64, String> {
+        content[i]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| "browser: coordonnée de box model non-finie — refusé".to_string())
+    };
+    let x = (coord(0)? + coord(2)? + coord(4)? + coord(6)?) / 4.0;
+    let y = (coord(1)? + coord(3)? + coord(5)? + coord(7)?) / 4.0;
+    Ok((x, y))
 }
 
 #[cfg(test)]
@@ -406,18 +547,197 @@ mod tests {
         assert_eq!(out["screenshot_png_base64"], "aGVsbG8=");
     }
 
+    /// Décode les commandes émises en objets JSON (sans le NUL final).
+    fn sent_commands(s: CdpSession<FakeCdp>) -> Vec<Value> {
+        s.into_channel()
+            .sent
+            .iter()
+            .map(|b| serde_json::from_slice(&b[..b.len() - 1]).unwrap())
+            .collect()
+    }
+
     #[test]
-    fn click_fill_submit_are_deferred_to_the_next_increment() {
-        let chan = FakeCdp::new(vec![]);
+    fn fill_binds_selector_and_value_as_data_never_interpolated_into_js() {
+        // Payloads d'injection JS dans le sélecteur ET la valeur.
+        let selector = r#"input"]; window.__pwned=1//"#;
+        let value = r#""; window.__pwned=2//"#;
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})), // DOM.getDocument
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 42}})),          // DOM.querySelector
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "OBJ"}}})), // resolveNode
+            cdp_frame(json!({"id": 4, "result": {"result": {}}})),          // callFunctionOn
+        ]);
         let mut s = CdpSession::new(chan);
-        let err = run_action(
+        run_action(
             &mut s,
-            &BrowserAction::Click {
-                selector: "#x".into(),
+            &BrowserAction::Fill {
+                selector: selector.into(),
+                value: value.into(),
             },
         )
-        .unwrap_err();
-        assert!(err.contains("incrément suivant"));
+        .unwrap();
+        let sent = sent_commands(s);
+        // Le sélecteur voyage UNIQUEMENT comme paramètre de DOM.querySelector.
+        let qs = sent
+            .iter()
+            .find(|c| c["method"] == "DOM.querySelector")
+            .unwrap();
+        assert_eq!(qs["params"]["selector"], selector);
+        // La valeur voyage UNIQUEMENT comme argument de callFunctionOn.
+        let cf = sent
+            .iter()
+            .find(|c| c["method"] == "Runtime.callFunctionOn")
+            .unwrap();
+        assert_eq!(cf["params"]["arguments"][0]["value"], value);
+        // AUCUN champ de source JS (`functionDeclaration` OU `expression`) ne contient le
+        // sélecteur, la valeur, ni le payload — preuve qu'il n'y a PAS d'interpolation
+        // (invariant ADR-022). On teste les DEUX champs pour attraper une régression qui
+        // ferait passer un payload par `Runtime.evaluate` (Fable 5).
+        for c in &sent {
+            for field in ["functionDeclaration", "expression"] {
+                if let Some(src) = c["params"][field].as_str() {
+                    assert!(
+                        !src.contains(selector),
+                        "sélecteur interpolé dans {field} : {src}"
+                    );
+                    assert!(
+                        !src.contains(value),
+                        "valeur interpolée dans {field} : {src}"
+                    );
+                    assert!(!src.contains("__pwned"), "payload dans {field} : {src}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn click_resolves_the_selector_and_dispatches_at_the_box_center() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 42}})),
+            cdp_frame(json!({"id": 3, "result": {}})), // scrollIntoViewIfNeeded
+            cdp_frame(
+                json!({"id": 4, "result": {"model": {"content": [0, 0, 100, 0, 100, 50, 0, 50]}}}),
+            ),
+            cdp_frame(json!({"id": 5, "result": {}})),
+            cdp_frame(json!({"id": 6, "result": {}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "button".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out["clicked"], "button");
+        let sent = sent_commands(s);
+        assert_eq!(
+            sent.iter()
+                .find(|c| c["method"] == "DOM.querySelector")
+                .unwrap()["params"]["selector"],
+            "button"
+        );
+        // Clic au CENTRE (50,25) via coordonnées numériques, pas de JS.
+        let press = sent
+            .iter()
+            .find(|c| {
+                c["method"] == "Input.dispatchMouseEvent" && c["params"]["type"] == "mousePressed"
+            })
+            .unwrap();
+        assert_eq!(press["params"]["x"], 50.0);
+        assert_eq!(press["params"]["y"], 25.0);
+    }
+
+    #[test]
+    fn click_fails_closed_when_the_selector_matches_nothing() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 0}})), // querySelector : rien
+        ]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#nope".into()
+            }
+        )
+        .unwrap_err()
+        .contains("aucun élément"));
+    }
+
+    #[test]
+    fn submit_calls_a_constant_function_on_the_resolved_form_with_no_args() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 7}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "FORM"}}})),
+            cdp_frame(json!({"id": 4, "result": {"result": {}}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "form#login".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out["submitted"], "form#login");
+        let sent = sent_commands(s);
+        let cf = sent
+            .iter()
+            .find(|c| c["method"] == "Runtime.callFunctionOn")
+            .unwrap();
+        assert_eq!(cf["params"]["objectId"], "FORM");
+        assert!(cf["params"]["functionDeclaration"]
+            .as_str()
+            .unwrap()
+            .contains("requestSubmit"));
+        assert_eq!(cf["params"]["arguments"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fill_fails_closed_on_a_page_side_exception() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 42}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "OBJ"}}})),
+            cdp_frame(
+                json!({"id": 4, "result": {"result": {}, "exceptionDetails": {"text": "boom"}}}),
+            ),
+        ]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(
+            &mut s,
+            &BrowserAction::Fill {
+                selector: "#x".into(),
+                value: "v".into()
+            }
+        )
+        .unwrap_err()
+        .contains("exception"));
+    }
+
+    #[test]
+    fn click_fails_closed_on_a_non_finite_box_coordinate() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 42}})),
+            cdp_frame(json!({"id": 3, "result": {}})), // scrollIntoViewIfNeeded
+            // Coin non-numérique : refusé, pas de clic (0,0).
+            cdp_frame(
+                json!({"id": 4, "result": {"model": {"content": ["x", "y", 0, 0, 0, 0, 0, 0]}}}),
+            ),
+        ]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "b".into()
+            }
+        )
+        .unwrap_err()
+        .contains("non-finie"));
     }
 
     #[test]
