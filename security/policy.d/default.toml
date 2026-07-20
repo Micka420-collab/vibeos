@@ -219,6 +219,13 @@ action = "allow"
 reason = "Read-only classification of a hypothetical (tool, target) call — returns the policy decision + tier without executing, approving, or touching the approval store. A hint for the governed editor auto-mode (ADR-014); real enforcement stays at execution."
 
 [[rule]]
+id = "policy-capabilities"
+tools = ["policy.capabilities"]
+tier = "T0"
+action = "allow"
+reason = "Read-only capability manifest DERIVED from the loaded policy (tools/tier/approval/target constraints) so the agent plans in reality instead of discovering limits by refusal. Indicative only; the authoritative decision stays the per-call evaluation, so it can never over-promise."
+
+[[rule]]
 id = "memory-append"
 tools = ["memory.append"]
 tier = "T1"

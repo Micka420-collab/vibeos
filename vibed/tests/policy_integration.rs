@@ -97,6 +97,14 @@ fn shipped_default_policy_canonical_decisions() {
         "sandbox.probe (T1) must be allowed by the shipped policy"
     );
 
+    // policy.capabilities (T0): the derived capability manifest must be readable by
+    // the shipped policy — otherwise the planning aid is dead behind default-deny.
+    assert_eq!(
+        engine.evaluate("policy.capabilities", Some(Tier::T0), NO_CTX),
+        Decision::Allow,
+        "policy.capabilities (T0) must be allowed by the shipped policy"
+    );
+
     // deploy.plan is T2 and DENIED by the shipped policy: it carries NO
     // [rule.deploy] rule, so a deploy is refused until the operator adds one with
     // their allowed (provider, target) pairs and provisions the sealed token +

@@ -1430,3 +1430,51 @@ Aujourd'hui `apply_rule` réduit **tout ≥ T2** à `RequireApproval` (`policy.r
 - Le **provider** reste un tiers de confiance (Fly/Vercel compromis → l'artefact approuvé part). Hors périmètre.
 - Une **seule** approbation autorise un `apply` dont le coût est non borné (un deploy peut lever beaucoup de machines) — mais c'est du contenu approuvé par l'humain. Le grant one-shot (consommé atomiquement au démarrage, `mcp.rs`) ferme bien « approuve une fois, boucle » : un `apply` identique re-rencontre `RequireApproval`.
 - L'approbation suppose que l'opérateur **sait lire** ce qu'il approuve (le digest lié à SON build) — garde-fou ultime humain, par conception.
+
+## ADR-023 — `policy.capabilities` (T0) : un manifeste de capacités DÉRIVÉ de la politique — *décidé & livré (idéation Fable 5, symbiose IA-citoyenne)*
+
+**Statut** : **DÉCIDÉ & livré**. Première brique de l'idéation « IA citoyenne » : la
+moitié *efficacité* du citoyen. (ADR-018 est resté un numéro sauté ; on continue à
+023 pour ne pas rouvrir d'ambiguïté.)
+
+### Contexte
+
+Aujourd'hui un agent découvre ses limites **par le refus** : il tente un outil, la
+politique répond `deny`/`require_approval`, il ré-essaie. C'est coûteux (tours,
+tokens, latence) et frustrant pour une IA qui *vit* dans l'OS. Un vrai citoyen doit
+pouvoir **lire la carte** de ce qu'il a le droit de faire, pour planifier dans la
+réalité.
+
+### Décision
+
+Un outil **`policy.capabilities` (T0, lecture seule, sans argument)** qui rend la
+**politique chargée** en un manifeste JSON : par règle, ses `tools`, son `tier`, son
+`action`, son mode d'`approval`, sa `base_decision` (hors contexte) et ses
+contraintes de cibles (`paths`/`services`/`domains` allowlists, `deploy` targets).
+
+**Ce qui rend ça sûr, par conception :**
+- **Dérivé, pas dupliqué** : le rendu (dans l'outil `tools/policy_tool.rs`, la
+  présentation) lit les **mêmes** règles que `PolicyEngine::evaluate` via un
+  accesseur `rules()` ; le moteur reste la source unique, donc le manifeste **ne
+  peut pas sur-promettre**.
+- **Indicatif, pas contractuel** : le champ s'appelle `base_decision`, pas
+  `decision`. La décision **fait foi via `evaluate` à l'appel** (premier-match,
+  plancher de tier, prédicat `[rule.domains]`, verdict `[rule.deploy]`, contraintes
+  de contexte). Un manifeste « faux » (par ex. après un rechargement de politique)
+  ne peut donc rien débloquer — l'enforcement reste à l'exécution.
+- **N'accorde rien** : la politique décrit les **propres bornes** de l'agent ;
+  les lui montrer ne lui donne aucun pouvoir qu'il n'a pas. Les allow-lists /
+  deny-lists exposées sont des frontières qu'il ne peut pas franchir de toute façon.
+- **Pas de fuite opérateur** : le champ `reason` (notes humaines) n'est **pas**
+  exposé.
+
+### Conséquences
+
+- L'agent planifie sans tâtonner : moins de refus, moins de tokens, moins de
+  latence — sans élargir d'un iota sa surface de pouvoir.
+- Fondation pour la suite de l'idéation : le **manifeste de capacités** est aussi
+  l'entrée du « diff de capacités » qu'une future `os.propose` présentera à
+  l'humain (approbation sur preuves), et la surface que la **teinte de session**
+  restreindra.
+- Résiduel accepté : `base_decision` est une simplification (elle n'exécute pas
+  `evaluate`) ; c'est assumé et **documenté dans le manifeste lui-même** (`note`).
