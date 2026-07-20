@@ -885,17 +885,23 @@ de gouvernance, pas d'implémentation.
 |---|---|---|
 | 1 | Allowlist de domaines | **Allowlist + approbation T2 hors liste.** Domaines de confiance navigables librement ; tout autre domaine déclenche une approbation T2 au premier accès, puis est mémorisé. Le default-deny est préservé. |
 | 2 | Tiers des outils `browser.*` | **Tout en T1 sauf les formulaires.** `read`/`screenshot`/`navigate`/`click`/`fill` = T1 ; seule la **soumission de formulaire** est T2. |
-| 3 | Sessions authentifiées | **Profil persistant, connexions autorisées.** L'agent peut rester connecté aux sites. — ⚠️ **SUPERSÉDÉ par ADR-022 : profil éphémère sans identifiants** (le résiduel ci-dessous est de ce fait neutralisé). |
+| 3 | Sessions authentifiées | **Profil persistant, connexions autorisées.** L'agent peut rester connecté aux sites. — ⚠️ **SUPERSÉDÉ par ADR-022 : profil éphémère sans identifiants** (résiduel d'identité stockée neutralisé ; action silencieuse subsiste — voir ADR-022). |
 | 4 | Egress | **Navigateur dans sa propre unité systemd durcie**, dont l'allowlist d'egress est **dérivée de l'allowlist de domaines** (point 1). La politique décide, systemd applique au niveau réseau. |
 
 ### ⚠️ Résiduel ACCEPTÉ par l'opérateur — ne pas l'enterrer
 
-> **NEUTRALISÉ depuis (ADR-022).** Ce résiduel vient de la **combinaison** des
-> décisions 2 (clics T1) et 3 (sessions persistantes). La décision 3 ayant été
-> superséded par le **profil éphémère sans identifiants** d'ADR-022, il n'y a plus
-> d'identité à détourner : le pire cas retombe de « action authentifiée
-> silencieuse » à « action anonyme sur un profil jetable ». Le paragraphe est
-> conservé comme trace du raisonnement, pas comme risque courant.
+> **MIS À JOUR par ADR-022 — résiduel d'IDENTITÉ neutralisé, résiduel d'ACTION
+> SILENCIEUSE subsistant.** Ce résiduel vient de la **combinaison** des décisions 2
+> (clics T1) et 3 (sessions persistantes). ADR-022 supersède la décision 3 par un
+> **profil éphémère sans identifiants** : la moitié « identité stockée » est
+> neutralisée (plus de session persistante à chevaucher). MAIS — revue Fable 5 —
+> (a) la décision 2 est confirmée, donc l'**action silencieuse subsiste** : une
+> action destructrice qui n'exige **aucune auth** tire toujours, anonymement, sur
+> un domaine allowlisté (`navigate` GET à effet de bord, bouton POST-via-`onclick`
+> = `click` T1) ; (b) l'**agent** (pas le profil) peut **réinjecter** une identité
+> via `browser.fill` ; (c) l'éphémérité introduit un **résiduel de ré-auth**. Voir
+> ADR-022 pour le détail. Le paragraphe ci-dessous est conservé comme trace du
+> raisonnement d'origine.
 
 Les décisions **2 et 3 sont chacune défendables ; leur COMBINAISON ouvre un trou
 qu'aucune des deux n'ouvre seule**, et il doit être écrit ici plutôt que découvert
@@ -1247,8 +1253,8 @@ ADR-017 vers « pas de binaire navigateur » a disparu.
 | Profil | **Éphémère, sans identifiants.** Aucun credential (`UnitSpec.credential = None` pour la classe browser). Chaque session part d'un profil vierge, jeté à l'arrêt de l'unité. |
 | Confinement | Unité systemd durcie `ToolClass::Browser` : **allow-list de namespaces** (`user pid net mnt`) pour que le sandbox userns de Chromium s'initialise, **pas de `MemoryDenyWriteExecute`** (JIT V8), **pas de `ProcSubset=pid`** (Chromium lit `/proc/cpuinfo`), filtre d'appels gardant `@sandbox`/`chroot`. |
 | Egress | Plancher `IPAddressDeny=any` ; on n'ouvre **que l'IP du proxy CONNECT dédié** (`127.66.0.1/32` — *pas* tout `127.0.0.1`, qui ouvrirait chaque service loopback). Le **proxy évalue `[rule.domains]` par requête** et mappe l'allowlist de domaines sur un egress par-IP. C'est la correction du « `IPAddressAllow` est par-adresse, pas par-domaine » d'ADR-017. |
-| Surface d'outils | Décision 2 d'ADR-017, confirmée : `navigate`/`read`/`screenshot`/`click`/`fill` = **T1** ; **soumission de formulaire = T2**. **`browser.evaluate` (eval JS arbitraire) est EXCLU** — il donnerait une capacité d'exécution de code hors du modèle de verbes ; l'ajouter serait une décision explicite séparée. |
-| Gouvernance | **`[rule.domains]`** (ADR-017 option C), déjà implémenté : **prédicat au moment du match**, hors-liste → on tombe sur le catch-all T2 → **escalade humaine**, jamais un deny sec. Un hôte non établissable (URL impossible à parser) n'hérite jamais d'une règle de confiance. Sœur de `[rule.paths]`/`[rule.services]`, évaluée **avant** le plancher de tier. |
+| Surface d'outils | Décision 2 d'ADR-017, confirmée : `navigate`/`read`/`screenshot`/`click`/`fill` = **T1** ; **soumission de formulaire = T2**. **`browser.evaluate` (eval JS arbitraire) est EXCLU** — il donnerait une capacité d'exécution de code hors du modèle de verbes. ⚠️ **Caveat d'implémentation la plus importante (Fable 5)** : cette exclusion **repose entièrement sur la validation d'args, non construite**. Si la couche par-verbe pilote click/fill/read par `Runtime.evaluate` en **interpolant** le sélecteur/la valeur fournis par l'agent, un sélecteur forgé s'échappe du template vers du JS arbitraire = **`browser.evaluate` de facto, en T1 silencieux**. L'exclusion n'est réelle que si l'implémentation utilise un **binding CDP par objet/paramètre** (`Runtime.callFunctionOn` avec `arguments`, `DOM.querySelector` + `Input.dispatch*`) et **jamais** l'interpolation d'entrée agent dans la source d'`evaluate`. |
+| Gouvernance | **`[rule.domains]`** (ADR-017 option C), déjà implémenté : **prédicat au moment du match**, hors-liste → on tombe sur le catch-all T2 → **escalade humaine**, jamais un deny sec. Un hôte non établissable (URL impossible à parser) n'hérite jamais d'une règle de confiance. Sœur de `[rule.paths]`/`[rule.services]`, évaluée **avant** le plancher de tier. ⚠️ **Attention (Fable 5)** : contrairement au *verdict* `[rule.deploy]`, un prédicat est **contournable par l'ordre des règles** — « hors-liste → catch-all T2 » n'est vrai *que si* le catch-all est effectivement à T2. **Invariant** : la politique navigateur livrée ne doit porter **aucune règle catch-all `browser.*` permissive sans contrainte de domaine** ; sinon un domaine hostile hors-liste retombe en T1 silencieux et brise le périmètre « circonscrit aux domaines allowlistés ». À défaut de garantie d'écriture, envisager un **verdict** (deny/escalade avant le plancher, indépendant de l'ordre) comme `[rule.services].denied`. |
 
 ### Correction de doctrine — la décision 3 d'ADR-017 est superséded
 
@@ -1260,19 +1266,62 @@ mot pour mot par le `THREAT-MODEL`) pouvait faire **cliquer** l'agent « Supprim
 le dépôt » **en son nom, sans approbation** (un bouton n'est pas un formulaire, donc
 la seule chose classée T2 ne s'applique pas).
 
-**Le profil éphémère retire l'identité, donc neutralise ce résiduel** — il ne se
-contente pas de l'accepter. Sans session connectée, il n'y a **aucune identité à
-détourner** : un clic piégé n'agit plus « au nom de l'opérateur » parce qu'il n'y a
-pas de nom. Le contenu de page reste une **entrée hostile** (invariant du modèle de
-menace, non négociable), mais le pire cas passe de « action authentifiée
-silencieuse » à « action anonyme sur un profil jetable ». C'est un **durcissement**,
-au prix de la fluidité des sessions connectées qu'ADR-017 avait choisie —
-arbitrage assumé par la PR #124. L'alternative « le tier suit l'identité » qu'ADR-017
-avait écartée devient sans objet : il n'y a plus d'identité.
+Le profil éphémère **retire le résiduel d'IDENTITÉ STOCKÉE** — la moitié du trou
+d'ADR-017, pas sa totalité (revue adversariale Fable 5). Précisément :
+
+- **Ce qui est neutralisé** : le cookie de session *persistant* qu'une page piégée
+  chevauchait pour agir en votre nom n'existe plus. Sans session stockée, ce
+  chemin-là est fermé.
+- **Ce qui SUBSISTE (résiduel d'action silencieuse — décision 2, confirmée)** :
+  clics et `navigate` restent T1, donc *silencieux*. Une action destructrice qui
+  **n'exige aucune authentification** se déclenche toujours sur un domaine
+  allowlisté — `navigate` (T1) vers une URL GET à effet de bord tire **au
+  chargement, sans clic** ; un bouton POST-via-`onclick` est un `click` (T1), pas
+  un `submit` (T2) ; poster sur un formulaire public, déclencher un webhook non
+  authentifié, ou atteindre un service interne/loopback qui **fait confiance à la
+  position réseau** — tout cela reste destructeur et anonyme. « Supprimer le
+  dépôt » tire encore, anonymement, sur toute cible qui n'exige pas d'auth.
+- **Ce que l'éphémérité ne couvre PAS** : le profil est vierge, **l'agent ne l'est
+  pas**. L'agent porte son jeton d'abonnement dans son `env` et garde ses `Bash`/
+  `Read` natifs (mitigation S1 du `THREAT-MODEL`). Une page piégée peut lui dire
+  « connecte-toi » ; l'agent lit un secret qu'il *peut* atteindre (`env`,
+  `memory`, un fichier de config) et le **réinjecte via `browser.fill` (T1,
+  silencieux)** dans un formulaire de login ou un flux OAuth. Le profil est vierge
+  à t0, l'agent y **recrée** une identité à t1. « Aucune identité *stockée* »
+  n'égale donc **pas** « aucune action authentifiée ».
+
+C'est un **durcissement réel** — la moitié stockée du résiduel disparaît, et le pire
+cas *par défaut* retombe d'« authentifié silencieux » à « anonyme jetable » — au prix
+de la fluidité des sessions connectées qu'ADR-017 avait choisie (arbitrage assumé par
+la PR #124). Mais ce n'est **pas** une neutralisation totale : voir le résiduel
+introduit ci-dessous.
 
 > Note pour le lecteur d'ADR-017 : les décisions 2 et 4 tiennent ; la **décision 3
-> (profil persistant) et son résiduel accepté sont remplacés** par le profil
-> éphémère de cet ADR-022.
+> (profil persistant) est remplacée** par le profil éphémère. Le **résiduel
+> d'IDENTITÉ stockée** qu'elle portait est neutralisé ; le **résiduel d'ACTION
+> SILENCIEUSE** (décision 2) subsiste, et l'éphémérité en **introduit un nouveau**
+> (ré-authentification, ci-dessous).
+
+### Résiduel INTRODUIT par l'éphémérité — la ré-authentification
+
+Un cookie persistant est un *bearer* que l'agent **utilise sans pouvoir le lire ni
+l'exfiltrer**. Le forcer à se reconnecter à chaque session signifie que, pour toute
+tâche que l'opérateur veut *réellement* authentifiée (« lis mes notifications
+GitHub », « publie ceci »), l'agent manipule le **credential brut** à chaque fois —
+récupéré depuis `env`/`memory`/un gestionnaire, tapé via `fill` — **là où une page
+hostile allowlistée peut exfiltrer le credential lui-même** (strictement pire que
+chevaucher un cookie opaque). S'y ajoutent CAPTCHA re-résolus, perte des cookies
+anti-fraude → step-up auth, et des boucles de re-login qui **entraînent** le pattern
+« secret dans le contexte de l'agent ».
+
+ADR-021 fait le choix **inverse** pour les tokens de deploy : credential scellé
+remis au *helper* (HOME éphémère, jamais lisible par l'agent — verrou 3).
+**Invariant pour l'implémentation** : si le navigateur doit un jour servir à du
+travail authentifié, le chemin de ré-auth doit **réutiliser le patron ADR-021**
+(secret scellé injecté hors de portée de l'agent), **jamais** un `browser.fill` de
+secret tapé par l'agent. Tant que ce patron n'existe pas, le profil credential-free
+n'est un durcissement net **que si le navigateur ne sert qu'à de la navigation non
+authentifiée**.
 
 ### État de livraison
 
@@ -1287,9 +1336,16 @@ avait écartée devient sans objet : il n'y a plus d'identité.
 2. le **mode `run_browser`** du helper `vibed-tool` (transport CDP sur pipe : corrélation des `id`, `sessionId`, gestion des events) — analogue de `run_deploy`/`run_cli` ;
 3. la **couche pure par verbe** (`tools/browser.rs`, analogue de `plan_command`/`validate_target`) : validation d'args (URL via `domain::host_of`, sélecteurs) + commandes CDP par verbe.
 
+> **Décidé ≠ enforced (Fable 5).** Jusqu'à la livraison du proxy CONNECT, l'egress
+> par-domaine est **design-only**. Les seuls contrôles VIVANTS aujourd'hui sont
+> (a) `credential = None` (codé, testé) et (b) l'egress épinglé à l'IP unique du
+> proxy — qui, **sans listener, signifie aucune navigation du tout** (fail-closed,
+> correct). La neutralisation du résiduel d'identité stockée repose sur (a), pas
+> sur le proxy.
+
 ### À trancher à l'implémentation (micro-décisions, non bloquantes)
 
-- **Approche CDP par verbe** : proposition — sélecteur via `Runtime.evaluate` (`element.click()`, `element.value=…`, `form.submit()`), `Page.navigate` pour naviguer, `Page.captureScreenshot` pour la capture, `Runtime.evaluate`(outerHTML/innerText) pour la lecture. Simple, sans coordonnées ; à valider en revue Fable 5.
+- **Approche CDP par verbe** : `Page.navigate` (navigation), `Page.captureScreenshot` (capture). Pour click/fill/read, **binding par objet — jamais interpolation** (cf. caveat `browser.evaluate` ci-dessus) : `DOM.querySelector` → nodeId, puis `Input.dispatch*` / `Runtime.callFunctionOn` avec le nœud en `arguments` ; l'entrée agent (sélecteur, valeur) ne touche **jamais** la source d'un `evaluate`. Sans coordonnées.
 - **Forme exacte du proxy CONNECT** (processus dédié vs thread du helper ; où vit la décision `[rule.domains]`).
 - **Schémas JSON d'args** par outil (câblage catalogue + dispatch + branche `audit_target` pour l'hôte).
 - **`browser.evaluate` reste exclu** sauf décision explicite de Micka.
