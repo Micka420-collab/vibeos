@@ -631,6 +631,31 @@ fn parse_and_validate(src: &str) -> Result<Vec<Rule>, FileError> {
                 }
             }
         }
+        // A `[rule.deploy]` allow rule MUST be T2+ (Fable 5, defence in depth):
+        // deploy acts OUTSIDE with a cloud token, so the human-approval floor must
+        // apply. Without this, the day a `deploy.*` tool is registered, a
+        // mis-tiered rule could grant a LISTED target with no human in the loop —
+        // the floor would rest entirely on the tool's registry tier.
+        if rule.deploy.is_some() && rule.action == Action::Allow && rule.tier < Tier::T2 {
+            return Err(FileError::Invalid(format!(
+                "rule '{}': '[rule.deploy]' with action=allow requires tier T2+ \
+                 (deploy acts outside with a cloud token; the human-approval floor \
+                 must apply)",
+                rule.id
+            )));
+        }
+        // `[rule.deploy]` and `[rule.domains]` can never both be meaningful: a
+        // deploy tool carries no host (`derive_deploy` sets no domain), so the
+        // domain scope would silently make the whole rule dead. Refuse it — same
+        // "an allow-list that quietly grants nothing" stance as above (Fable 5).
+        if rule.deploy.is_some() && rule.domains.is_some() {
+            return Err(FileError::Invalid(format!(
+                "rule '{}': carries both '[rule.deploy]' and '[rule.domains]' — a \
+                 deploy tool has no host, so the domain scope would make the rule \
+                 silently inapplicable; split them into separate rules",
+                rule.id
+            )));
+        }
     }
     Ok(file.rule)
 }
@@ -767,6 +792,20 @@ mod tests {
             "allowed=[{provider=\"fly\", target=\"x\", region=\"eu\"}]"
         ))
         .contains("unknown"));
+        // A [rule.deploy] allow rule below T2 is refused — the human floor MUST
+        // apply to a cloud deploy (Fable 5, defence in depth).
+        assert!(parse_err(
+            "[[rule]]\nid=\"d\"\ntools=[\"deploy.apply\"]\ntier=\"T1\"\naction=\"allow\"\n\
+             [rule.deploy]\nallowed=[{provider=\"fly\", target=\"x\"}]"
+        )
+        .contains("requires tier T2+"));
+        // A rule carrying both deploy and domains is refused (dead-rule trap).
+        assert!(parse_err(
+            "[[rule]]\nid=\"d\"\ntools=[\"deploy.apply\"]\ntier=\"T2\"\naction=\"allow\"\n\
+             approval=\"human\"\n[rule.deploy]\nallowed=[{provider=\"fly\", target=\"x\"}]\n\
+             [rule.domains]\nonly=[\"x.com\"]"
+        )
+        .contains("both"));
     }
 
     fn host_ctx(host: &str) -> CallContext<'_> {

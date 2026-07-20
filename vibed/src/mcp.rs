@@ -780,6 +780,15 @@ fn audit_target(
     if unit_bearing(name) {
         return service.map(str::to_string);
     }
+    if deploy_bearing(name) {
+        // Bind the grant/audit to the DERIVED (provider, target) pair the verdict
+        // checked — never raw args — so a one-shot approval for one listed pair
+        // can NEVER be spent on another, and the operator (and the audit trail)
+        // see exactly which target is being deployed (ADR-021 lock 1; Fable 5).
+        let raw_provider = args.get("provider").and_then(Value::as_str);
+        let raw_target = args.get("target").and_then(Value::as_str);
+        return derive_deploy(name, raw_provider, raw_target).map(|(p, t)| format!("{p}:{t}"));
+    }
     if name == "pkg.install" {
         return args.get("name").and_then(Value::as_str).map(str::to_string);
     }
@@ -2190,6 +2199,29 @@ mod tests {
         // deploy_bearing agrees.
         assert!(deploy_bearing("deploy.apply") && deploy_bearing("deploy.plan"));
         assert!(!deploy_bearing("svc.restart") && !deploy_bearing("browser.navigate"));
+    }
+
+    #[test]
+    fn audit_target_binds_a_deploy_to_its_derived_pair() {
+        // The grant/audit subject is the DERIVED (provider, target), so a one-shot
+        // approval for one listed pair can never be spent on another (Fable 5).
+        let full = json!({"provider": "fly", "target": "app-A"});
+        assert_eq!(
+            audit_target("deploy.apply", None, None, &full),
+            Some("fly:app-A".to_string())
+        );
+        // A missing target still names exactly what was asked (verdict denies it).
+        let partial = json!({"provider": "fly"});
+        assert_eq!(
+            audit_target("deploy.plan", None, None, &partial),
+            Some("fly:".to_string())
+        );
+        // A non-deploy tool never gets a deploy subject from smuggled args.
+        let smuggle = json!({"provider": "fly", "target": "app-A"});
+        assert_eq!(
+            audit_target("svc.restart", None, Some("sshd.service"), &smuggle),
+            Some("sshd.service".to_string())
+        );
     }
 
     #[test]
