@@ -1433,7 +1433,10 @@ Aujourd'hui `apply_rule` réduit **tout ≥ T2** à `RequireApproval` (`policy.r
 
 ## ADR-024 — `os.propose` : l'auto-modification comme flux de versions signées réversibles (la north star rendue mécanique) — *proposé (2026-07-20), à trancher*
 
-**Statut** : **PROPOSÉ**, à trancher par Micka. Design ; les incréments de code suivent.
+**Statut** : **PROPOSÉ**, à trancher par Micka. Design **recadré après revue Fable 5** :
+la north star exige **plusieurs** mécanismes ; `os.propose` n'en est **qu'un** (l'auto-
+modification *déclarée de l'image*), nécessaire mais **pas suffisant**. Le seul
+incrément livrable seul est le tool de *draft* (avec ses prérequis fail-closed).
 
 ### La north star (mot pour mot)
 
@@ -1442,17 +1445,35 @@ Aujourd'hui `apply_rule` réduit **tout ≥ T2** à `RequireApproval` (`policy.r
 > vérifiable, signée et réversible**, afin que même un agent IA défaillant ne puisse
 > pas créer de dérive permanente. »
 
-### Le problème que ça pose
+### Cadrage HONNÊTE — ce qui est déjà acquis, ce qui ne l'est pas (revue Fable 5)
 
-ADR-001 (base immuable bootc/OSTree) donne déjà le no-drift pour **l'image** : on ne
-mute pas la racine en place, un changement = une nouvelle image signée, un rollback =
-un reboot. Mais l'**auto-modification de l'IA** — installer un outil, changer une
-config, s'ajouter une capacité — se ferait aujourd'hui **hors** de ce flux (via le
-shell natif de l'agent, ad hoc). Pour tenir la north star, il faut que **toute
-modification initiée par l'IA passe par le pipeline de versions signées**. L'IA ne
-*bricole* jamais : elle **propose**.
+ADR-001 rend déjà `/usr /etc /boot` en lecture seule : **l'image ne peut pas dériver**,
+`os.propose` ou pas. **Mais ce n'est pas là qu'une IA hostile crée de la dérive.** Via
+son **Bash natif** (invariant n°1 de l'ARCHITECTURE ; THREAT-MODEL S1), un agent écrit
+de l'état **persistant qui survit au reboot ET au `bootc switch`** : `~/.local/bin`,
+`uv`/`npm -g`, unités `systemd --user` + timers, `~/.bashrc`, tout `/home` et `/var`.
+Et **« rollback = reboot » ne revient PAS là-dessus** : bootc préserve `/var` et
+`/home` par conception (ADR-005 ; seul un *factory-reset* les purge). Le rollback annule
+donc la seule chose qui ne pouvait pas dériver, et laisse celle qui a dérivé.
 
-### Décision — le mécanisme `os.propose`
+**Conséquence, écrite noir sur blanc :** un agent **non coopératif** ne dépose pas une
+proposition en attendant une approbation T3 — il lance Bash. **Un garde-fou que
+l'attaquant peut simplement ne pas utiliser n'est pas un garde-fou contre cet
+attaquant.** `os.propose` n'est donc **PAS** une frontière de confinement : c'est un
+**canal gouverné, auditable et réversible pour l'auto-modification DÉCLARÉE de
+l'image**, précieux pour un agent *coopératif*. La north star (« aucune dérive
+permanente, même par une IA défaillante ») n'est atteinte que par la **combinaison** :
+
+1. image immuable (ADR-001 — **acquis**) ;
+2. **fermeture du contournement shell** (invariant n°1 / décision `permissions.deny` en attente) ;
+3. **gouvernance de l'état persistant utilisateur** (`/home`, `/var`, unités user, outils installés) ;
+4. `os.propose` (ce canal), pour les changements d'image déclarés.
+
+`os.propose` est **nécessaire, pas suffisant** : livré seul il gouverne le coopératif et
+n'entrave en rien l'hostile. Les points 2 et 3 sont des **prérequis du CLAIM de
+sécurité**, pas seulement du câblage.
+
+### Le mécanisme (pour l'auto-modification déclarée de l'image)
 
 1. **L'IA rédige une PROPOSITION**, jamais un diff libre du `Containerfile` : un
    objet structuré dans un **DSL contraint** décrivant un changement d'environnement —
@@ -1468,46 +1489,95 @@ modification initiée par l'IA passe par le pipeline de versions signées**. L'I
    nouvelle version **signée qu'elle a proposée**. **Rollback = reboot** sur le
    déploiement précédent (conservé).
 
-### Ce qui garantit qu'une IA défaillante ne crée AUCUNE dérive permanente
+### Ce que chaque garde-fou fait VRAIMENT (revue Fable 5)
 
-- **L'IA ne peut que PROPOSER.** La construction est hors-machine, la clé de
-  signature hors de sa portée, le boot atomique, l'ancienne version conservée. **Pire
-  cas d'un agent hostile/défaillant : une proposition rejetée, ou une image rollbackée
-  par reboot.** Jamais un état persistant altéré.
-- **Exclusion constitutionnelle** (garde-fou Fable 5) : une proposition ne peut
-  **JAMAIS** toucher `policy.rs`, `audit.rs`, `approval.rs`, le code du helper sandbox,
-  ni élargir `policy.d` au-delà d'ajouts **rétrécissants**. *Le moteur qui juge n'est
-  pas amendable par le jugé.* C'est vérifié mécaniquement à l'enregistrement ET au
-  build (fail-closed), pas laissé au bon vouloir du modèle.
-- **Diff cumulatif contre une ancre** (garde-fou Fable 5) : dix propositions
-  innocentes = une capture (allowlists d'egress qui s'élargissent une par une).
-  L'humain lit un **diff de capacités cumulé** contre une version-ancre épinglée, pas
-  un diff isolé ; **tout élargissement de politique est T3**, quoi qu'il arrive.
-- **Anti-rubber-stamp** : l'humain approuve un **diff de capacités**, pas un
-  Dockerfile qui pourrait cacher un binaire derrière une URL. (Extension future :
-  « approbation sur preuves » — la proposition arrive **construite, bootée en jetable,
-  tests verts, diff de manifeste joint** ; idée 6 de l'idéation.)
+- **L'IA ne peut que PROPOSER** — vrai **pour ce canal** : build hors-machine, clé de
+  signature hors de sa portée, boot atomique, ancienne version conservée. Pire cas
+  *dans le canal* : proposition rejetée, ou image rollbackée. (Ne dit **rien** de la
+  dérive hors-canal — voir le cadrage ci-dessus.)
+- **Exclusion « constitutionnelle » — enforçable seulement au BUILD, par un analyseur
+  d'image entière NON ENCORE CONÇU.** « Ne touche jamais `policy.rs` » est un
+  contresens : un paquet ne diffe pas la source de vibed. Le vrai risque est un
+  changement du **comportement runtime du TCB** *sans* toucher sa source : drop-in
+  systemd sur `vibed.service`, `/etc/ld.so.preload`, module PAM/NSS/SELinux, générateur
+  systemd, scriptlet RPM `%post` (root au build), ou une **dépendance transitive** qui
+  remplace une lib du TCB. L'exclusion exige donc une **analyse différentielle de
+  l'image entière** (tous les fichiers écrits par le paquet + sa clôture de dépendances
+  + la sortie des scriptlets, contre une denylist de chemins TCB) — **indécidable au
+  niveau du DSL, et impossible à l'enregistrement** (clôture et scriptlets n'existent
+  qu'*après* le build). C'est le **composant porteur, non conçu à ce jour**.
+- **`policy.d` « rétrécit seulement » — casse sur l'ordre premier-match.** Un fragment
+  `00-proposal.toml` qui trie AVANT `default.toml` pré-empte l'évaluation de **tout**
+  outil ; un `allow` placé avant un `deny` masque ce deny. Le « diff cumulatif » doit se
+  calculer sur la **politique effective ÉVALUÉE** (rejouer un jeu de requêtes fixe à
+  travers la politique fusionnée, comparer les verdicts) — **jamais** un diff *textuel*
+  de fragments. Tout élargissement reste **T3**.
+- **DSL contraint — contraint la SYNTAXE, pas l'EFFET.** `PACKAGE x` et `RUN dnf install
+  x` ont la même puissance ; « ajouter un service » = du code **root au boot**. Le seul
+  apport réel du DSL : forcer des **sources allowlistées + épinglées + hashées** (le
+  narrowing supply-chain du patron `install-saas-tool` d'ADR-020) et rendre la
+  proposition **diffable**. Il ne borne **pas** la capacité — ce sont l'analyse d'image
+  au build + le tier/approbation qui la bornent.
+- **Diff de capacités — défend le *smuggling d'élargissement de politique*, PAS les
+  trojans de contenu.** Un paquet compromis (hash épinglé, dépôt allowlisté) qui
+  n'ajoute **aucune** capacité de politique mais téléphone à la maison au runtime a un
+  diff de capacités **bénin** — exactement ce que l'humain approuve. **Signer authentifie
+  la provenance, pas la bienveillance.** Le résiduel M4 (chaîne d'appro) demeure, borné
+  seulement par l'egress runtime (`IPAddressDeny`) + audit ; et l'« approbation sur
+  preuves » (boot-test jetable, idée 6) n'attrape **pas** un payload à détente/retardé
+  (limite déjà admise pour S4).
 
-### Premier incrément (1 PR, sûr)
+### Premier incrément (1 PR) — et ce qu'il exige pour mériter le label « sûr »
 
-Outil **`os.proposal_draft`** (T0/T1, lecture+écriture bornée du store de
-propositions) : écrit une **proposition structurée** (le DSL + une justification + un
-plan de rollback) dans `/var/lib/vibeos/proposals/`, avec une entrée d'audit dédiée,
-et `vibectl proposals list`. **Zéro build, zéro switch, zéro signature** — d'abord le
-**format** et la **trace**. Le reste (le pipeline de build+signature hors-machine, le
-`bootc switch` gouverné) est un incrément ultérieur, gaté sur la revue de Micka et sur
-le substrat de signature (Phase 4).
+Outil **`os.proposal_draft`** : écrit une **proposition structurée** (le DSL + une
+justification + un plan de rollback) dans le store `/var/lib/vibeos/proposals/`, avec
+une entrée d'audit dédiée, et `vibectl proposals list`. Zéro build, zéro switch, zéro
+signature. **Inerte d'EFFET, mais pas sans risque** — prérequis fail-closed **dès le
+jour 1** (revue Fable 5) :
+
+- **Quota + rate-limit** sur le store : `/var` héberge **aussi** l'audit (invariant 3 :
+  *audit qui échoue ⇒ action qui échoue*) et la mémoire ; un agent qui spamme des
+  propositions remplirait `/var` et **ferait échouer TOUS les appels** (self-DoS de la
+  surface de gouvernance). Câbler `ratelimit.rs` + un quota de **nombre** et
+  **d'octets**.
+- **Schéma typé + validé fail-closed** (la validation EST la moitié sécurité) : nom de
+  paquet `^[a-z0-9][a-z0-9+._-]*$` **et** présent dans le set réel du dépôt allowlisté ;
+  chemins de config vérifiés contre la denylist de chemins TCB **dès le draft** ;
+  champs libres stockés **inertes** et rendus **échappés** — anti-**injection stockée**
+  dans le futur pipeline de build ou l'UI de revue humaine.
+- **Id de proposition assigné par vibed, jamais par l'agent** (sinon `../../` sort du
+  store).
+- **Store traité comme la mémoire** (THREAT-MODEL S2) : une entrée de denylist `fs.*`
+  pour que le **seul écrivain** soit `os.proposal_draft` (sinon `fs.write` + traversée y
+  écrit hors du flux audité).
+- **Audit via `Audit::record`** (jamais un écrivain maison), `target` = **id assigné par
+  vibed** et non du texte libre agent (le digest FNV-1a + l'échappement serde défusent
+  l'injection de champ d'audit, à cette condition).
+- **Tier** : T1 est défini pour les fichiers **utilisateur** (`/home/**`) ; ceci écrit
+  dans `/var/lib/vibeos/` (emplacement **système**, voisin de l'audit et de la mémoire).
+  Le garder sans-humain (la latence T1 convient) mais le **gouverner comme
+  `memory.append`** — append-only + quota + écrivain unique + id assigné — **pas comme
+  `fs.write`**.
+
+Avec ces prérequis, le tool de draft est réellement inerte et **peut être livré seul**
+(il ne dépend ni de la teinte de session, ni du manifeste, ni de la preuve-de-build).
 
 ### Conséquences & résiduel
 
-- Le mécanisme **transforme la contrainte en capacité** : l'auto-amélioration de l'IA
-  devient un **produit de première classe** de l'OS (une IA qui améliore son propre
-  environnement) **sans jamais** échapper au no-drift. C'est le cœur de la symbiose.
-- Résiduel **accepté** : la **chaîne d'approvisionnement Fedora** (les paquets
-  proposés) reste un risque de toute distro — borné par le DSL (sources allowlistées,
-  épinglées, hashées), pas créé par l'IA.
-- Résiduel **à fermer avant le pipeline live** : l'écart « dev local via le `Bash`
-  natif de l'agent hors gouvernance » (déjà noté en ADR-020) — tant qu'il est ouvert,
-  `os.propose` gouverne la modification *déclarée* mais pas le contournement *shell* ;
-  la fermeture de cet écart (invariant n°1) est le prérequis pour que la north star
-  soit **totale** et pas seulement offerte.
+- Bien cadré, `os.propose` **transforme la contrainte en capacité** : un canal
+  d'auto-amélioration **gouverné, tracé, réversible** — précieux pour un agent
+  *coopératif*, et une brique de la symbiose. Mais **ce n'est pas** la garantie no-drift
+  à lui seul.
+- Résiduel **accepté** : chaîne d'appro Fedora (bornée par sources pinnées+hashées, pas
+  créée par l'IA) ; **trojans de contenu à capacité bénigne** (M4, bornés par
+  egress+audit, pas par le diff de capacités ni par la signature).
+- **Prérequis BLOQUANTS du CLAIM north-star** — à fermer AVANT que « aucune dérive
+  permanente » soit vrai, pas seulement du câblage de pipeline :
+  1. le **contournement Bash natif** / décision `permissions.deny` (invariant n°1) ;
+  2. la **gouvernance de l'état persistant utilisateur** (`/home`, `/var`, unités user,
+     outils installés) ;
+  3. l'**analyseur d'exclusion d'image entière** au build (non conçu) ;
+  4. le **diff de capacités sur politique effective** (pas textuel) ;
+  5. la **vérification de signature côté machine** — tant que la vérif cosign client est
+     recalée en Phase 4 (ADR-008), `bootc` ne **refuse** pas encore une image non
+     signée : la « version signée » n'est pas encore vérifiée *par la machine*.
