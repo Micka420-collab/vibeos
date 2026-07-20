@@ -885,10 +885,17 @@ de gouvernance, pas d'implémentation.
 |---|---|---|
 | 1 | Allowlist de domaines | **Allowlist + approbation T2 hors liste.** Domaines de confiance navigables librement ; tout autre domaine déclenche une approbation T2 au premier accès, puis est mémorisé. Le default-deny est préservé. |
 | 2 | Tiers des outils `browser.*` | **Tout en T1 sauf les formulaires.** `read`/`screenshot`/`navigate`/`click`/`fill` = T1 ; seule la **soumission de formulaire** est T2. |
-| 3 | Sessions authentifiées | **Profil persistant, connexions autorisées.** L'agent peut rester connecté aux sites. |
+| 3 | Sessions authentifiées | **Profil persistant, connexions autorisées.** L'agent peut rester connecté aux sites. — ⚠️ **SUPERSÉDÉ par ADR-022 : profil éphémère sans identifiants** (le résiduel ci-dessous est de ce fait neutralisé). |
 | 4 | Egress | **Navigateur dans sa propre unité systemd durcie**, dont l'allowlist d'egress est **dérivée de l'allowlist de domaines** (point 1). La politique décide, systemd applique au niveau réseau. |
 
 ### ⚠️ Résiduel ACCEPTÉ par l'opérateur — ne pas l'enterrer
+
+> **NEUTRALISÉ depuis (ADR-022).** Ce résiduel vient de la **combinaison** des
+> décisions 2 (clics T1) et 3 (sessions persistantes). La décision 3 ayant été
+> superséded par le **profil éphémère sans identifiants** d'ADR-022, il n'y a plus
+> d'identité à détourner : le pire cas retombe de « action authentifiée
+> silencieuse » à « action anonyme sur un profil jetable ». Le paragraphe est
+> conservé comme trace du raisonnement, pas comme risque courant.
 
 Les décisions **2 et 3 sont chacune défendables ; leur COMBINAISON ouvre un trou
 qu'aucune des deux n'ouvre seule**, et il doit être écrit ici plutôt que découvert
@@ -1210,6 +1217,89 @@ Le **déploiement gouverné** (`deploy.*`) est une **capacité d'exécution nouv
 
 - Le dev local via le `Bash` natif de l'agent reste **hors gouvernance `vibed`** jusqu'à la fermeture de l'écart (invariant n°1, décision `permissions.deny` en attente). Pour du dev sur la machine de l'utilisateur, c'est le comportement attendu ; le danger réel (déploiement, dépense) est, lui, réservé aux tiers gouvernés à venir.
 - Les binaires épinglés (seau A-bis) exigent un **bump manuel** de version dans la table `spec` de `install-saas-tool`. **Pas d'alerte automatisée**, décidé délibérément : une cron de fraîcheur serait soit bruyante (`flyctl` sort chaque jour), soit muette (GitHub ne supprime pas les vieilles releases). Les pins sont des snapshots best-effort ; l'installeur **fail-close** si le hash ne correspond pas, donc un pin périmé n'installe jamais rien de faux — au pire il installe une version un peu ancienne.
+
+## ADR-022 — Runtime `browser.*` : chromium-headless piloté par pipe CDP, profil éphémère, egress par proxy CONNECT — *décidé (design PR #124) ; substrat livré, exécution à venir*
+
+**Statut** : **DÉCIDÉ** pour le runtime concret. ADR-017 a tranché la *gouvernance*
+(option C : livrer la capacité `browser.*` gouvernée, sans forker Chromium ;
+`[rule.domains]`) mais a laissé l'*implémentation* à venir et deux points
+explicitement « à réconcilier » (egress, profil). Cet ADR canonise le runtime
+conçu dans la PR #124 et **supersède la décision 3 d'ADR-017** (voir « Correction
+de doctrine » ci-dessous). Le **substrat est déjà livré et testé** dans `main` ; il
+reste la couche d'exécution.
+
+### Contexte
+
+ADR-017 a fermé le « quoi » et le « qui décide ». Restaient trois inconnues de
+runtime qu'il listait comme à trancher avant tout code : **comment** piloter le
+navigateur, **quel profil** de session, et **comment** réconcilier « atteindre
+internet » avec le plancher `IPAddressDeny=any` de l'unité agent. La PR #124 les a
+tranchées, et un fait a changé depuis ADR-017 : **Fedora 44 package
+`chromium-headless` pour x86_64 ET aarch64** — le showstopper arm64 qui poussait
+ADR-017 vers « pas de binaire navigateur » a disparu.
+
+### Décision — le runtime
+
+| Axe | Décision |
+|---|---|
+| Moteur | **`chromium-headless`** (paquet Fedora 44, **amd64 + arm64** — multi-arch préservé). Pas de fork, pas de codecs brevetés, pas de dette Chromium. |
+| Pilotage | **CDP sur *pipe*** (`--remote-debugging-pipe`) : **zéro port TCP, zéro Node**. `--no-sandbox` et `--remote-debugging-port` sont **interdits au niveau argv** (le helper refuse de les émettre). |
+| Profil | **Éphémère, sans identifiants.** Aucun credential (`UnitSpec.credential = None` pour la classe browser). Chaque session part d'un profil vierge, jeté à l'arrêt de l'unité. |
+| Confinement | Unité systemd durcie `ToolClass::Browser` : **allow-list de namespaces** (`user pid net mnt`) pour que le sandbox userns de Chromium s'initialise, **pas de `MemoryDenyWriteExecute`** (JIT V8), **pas de `ProcSubset=pid`** (Chromium lit `/proc/cpuinfo`), filtre d'appels gardant `@sandbox`/`chroot`. |
+| Egress | Plancher `IPAddressDeny=any` ; on n'ouvre **que l'IP du proxy CONNECT dédié** (`127.66.0.1/32` — *pas* tout `127.0.0.1`, qui ouvrirait chaque service loopback). Le **proxy évalue `[rule.domains]` par requête** et mappe l'allowlist de domaines sur un egress par-IP. C'est la correction du « `IPAddressAllow` est par-adresse, pas par-domaine » d'ADR-017. |
+| Surface d'outils | Décision 2 d'ADR-017, confirmée : `navigate`/`read`/`screenshot`/`click`/`fill` = **T1** ; **soumission de formulaire = T2**. **`browser.evaluate` (eval JS arbitraire) est EXCLU** — il donnerait une capacité d'exécution de code hors du modèle de verbes ; l'ajouter serait une décision explicite séparée. |
+| Gouvernance | **`[rule.domains]`** (ADR-017 option C), déjà implémenté : **prédicat au moment du match**, hors-liste → on tombe sur le catch-all T2 → **escalade humaine**, jamais un deny sec. Un hôte non établissable (URL impossible à parser) n'hérite jamais d'une règle de confiance. Sœur de `[rule.paths]`/`[rule.services]`, évaluée **avant** le plancher de tier. |
+
+### Correction de doctrine — la décision 3 d'ADR-017 est superséded
+
+ADR-017 décision 3 avait choisi un **profil persistant, connexions autorisées**, et
+son § « Résiduel ACCEPTÉ » documentait honnêtement le trou ouvert par la
+**combinaison** des décisions 2 (clics en T1) et 3 (sessions persistantes) : une
+page piégée sur un domaine *allowlisté* (ex. une issue GitHub — vecteur M2 cité
+mot pour mot par le `THREAT-MODEL`) pouvait faire **cliquer** l'agent « Supprimer
+le dépôt » **en son nom, sans approbation** (un bouton n'est pas un formulaire, donc
+la seule chose classée T2 ne s'applique pas).
+
+**Le profil éphémère retire l'identité, donc neutralise ce résiduel** — il ne se
+contente pas de l'accepter. Sans session connectée, il n'y a **aucune identité à
+détourner** : un clic piégé n'agit plus « au nom de l'opérateur » parce qu'il n'y a
+pas de nom. Le contenu de page reste une **entrée hostile** (invariant du modèle de
+menace, non négociable), mais le pire cas passe de « action authentifiée
+silencieuse » à « action anonyme sur un profil jetable ». C'est un **durcissement**,
+au prix de la fluidité des sessions connectées qu'ADR-017 avait choisie —
+arbitrage assumé par la PR #124. L'alternative « le tier suit l'identité » qu'ADR-017
+avait écartée devient sans objet : il n'y a plus d'identité.
+
+> Note pour le lecteur d'ADR-017 : les décisions 2 et 4 tiennent ; la **décision 3
+> (profil persistant) et son résiduel accepté sont remplacés** par le profil
+> éphémère de cet ADR-022.
+
+### État de livraison
+
+**Livré et testé dans `main` (le substrat) :**
+- `[rule.domains]` complet dans `policy.rs` (`DomainConstraints{only}`, `Rule.domains`, `CallContext.domain`, `rule_domain_applies`, validation au chargement, exclusion mutuelle avec `[rule.deploy]`) ;
+- extraction d'hôte **maison** `domain::host_of` (pas de crate `url` — posture chaîne d'appro) + matching exact ou `*.`-sous-domaine ancré (jamais `ends_with`, donc `evil-github.com` échoue) ;
+- `derive_domain`/`url_bearing` dans `mcp.rs` (ciblent déjà `browser.`) câblés dans la décision réelle ;
+- profil sandbox `ToolClass::Browser` dans `sandbox.rs`, avec ses invariants testés (allow-list namespaces, absence de W^X/`ProcSubset`, IP proxy unique).
+
+**Reste à construire (la couche d'exécution) :**
+1. le **proxy CONNECT** qui applique `[rule.domains]` par requête et le mappe sur l'egress par-IP ;
+2. le **mode `run_browser`** du helper `vibed-tool` (transport CDP sur pipe : corrélation des `id`, `sessionId`, gestion des events) — analogue de `run_deploy`/`run_cli` ;
+3. la **couche pure par verbe** (`tools/browser.rs`, analogue de `plan_command`/`validate_target`) : validation d'args (URL via `domain::host_of`, sélecteurs) + commandes CDP par verbe.
+
+### À trancher à l'implémentation (micro-décisions, non bloquantes)
+
+- **Approche CDP par verbe** : proposition — sélecteur via `Runtime.evaluate` (`element.click()`, `element.value=…`, `form.submit()`), `Page.navigate` pour naviguer, `Page.captureScreenshot` pour la capture, `Runtime.evaluate`(outerHTML/innerText) pour la lecture. Simple, sans coordonnées ; à valider en revue Fable 5.
+- **Forme exacte du proxy CONNECT** (processus dédié vs thread du helper ; où vit la décision `[rule.domains]`).
+- **Schémas JSON d'args** par outil (câblage catalogue + dispatch + branche `audit_target` pour l'hôte).
+- **`browser.evaluate` reste exclu** sauf décision explicite de Micka.
+
+### Ce que le plancher garantit toujours
+
+Comme pour tout le reste : ce runtime ne lève **rien** du plancher système. Un
+agent ne peut pas, via le navigateur, installer un paquet, redémarrer un service ni
+écrire hors du home de l'appelant. Et le contenu d'une page lue **n'est jamais une
+instruction** — quel que soit le tier des clics.
 
 ## ADR-021 — `deploy.*` gouverné : mettre en production sans jamais donner le token à l'agent — *proposé (2026-07-19, autonomie week-end), à trancher*
 
