@@ -707,9 +707,10 @@ pub mod helper {
         // TLS still works: fly (Go), vercel (Node) and railway (rustls) all find
         // CA roots without SSL_CERT_* — via compiled paths or an embedded store —
         // and `/etc` stays readable under ProtectSystem=strict (Fable 5, verify on
-        // target). Residual exfil is inherent (a hostile binary with a token + net
-        // can echo the token to stdout or tunnel it over recursive DNS) — bounded
-        // only by the read-only TOKEN SCOPE, never by this helper.
+        // target). Residual exfil: the raw-echo-to-stdout/stderr axis is REDACTED
+        // below (a hostile CLI cannot hand the agent its own token that way); a
+        // re-encoded or DNS-tunnelled leak remains, bounded by the read-only TOKEN
+        // SCOPE — the real guarantee, never this helper alone.
         let mut child = Command::new(&req.binary)
             .args(&req.argv)
             .env_clear()
@@ -720,7 +721,9 @@ pub mod helper {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("deploy: cannot exec {}: {e}", req.binary))?;
-        drop(token); // `.env` already copied it into the child; don't keep ours.
+        // `.env` already copied the token into the child. We keep our copy a moment
+        // longer — only to REDACT it out of the CLI's own stdout/stderr below — then
+        // drop it. See the redaction note before the `Ok(...)`.
 
         // Bounded capture (Fable 5): reuse the module's `read_capped` so a
         // flooding CLI gives a deterministic error, not a noisy cgroup OOM.
@@ -746,14 +749,47 @@ pub mod helper {
         if overflow {
             return Err("deploy: CLI output exceeded cap — killed and refused".to_string());
         }
+        // Belt-and-suspenders (Fable 5): a hostile CLI could echo its own token to
+        // stdout/stderr to hand the agent the credential. Redact every RAW
+        // occurrence of the token here — where the helper still holds it and vibed
+        // never will — before the output leaves this process. This closes only the
+        // raw-echo axis (not a re-encoded or DNS-tunnelled leak); the real bound
+        // stays the read-only token scope. Redact, THEN drop our copy.
+        let stdout = redact(&out.0, token.as_bytes());
+        let stderr = redact(&err.0, token.as_bytes());
+        drop(token);
         // The CLI output is DATA, not a trusted result channel: lossy is fine, and
         // vibed bounds the size again on its side (spawn_transient's cap).
         Ok(serde_json::json!({
             "exit": status.code(),
-            "stdout": String::from_utf8_lossy(&out.0),
-            "stderr": String::from_utf8_lossy(&err.0),
+            "stdout": String::from_utf8_lossy(&stdout),
+            "stderr": String::from_utf8_lossy(&stderr),
         })
         .to_string())
+    }
+
+    /// Replace every RAW occurrence of `secret` in `data` with a redaction
+    /// marker, so a hostile deploy CLI cannot exfiltrate its own token by echoing
+    /// it to stdout/stderr. Byte-exact only — a re-encoded (base64, hex…) or
+    /// tunnelled leak is out of scope; this is defense-in-depth atop the read-only
+    /// token scope, not a substitute for it. Empty `secret` is a no-op.
+    fn redact(data: &[u8], secret: &[u8]) -> Vec<u8> {
+        const MARK: &[u8] = b"[redacted]";
+        if secret.is_empty() || data.len() < secret.len() {
+            return data.to_vec();
+        }
+        let mut out = Vec::with_capacity(data.len());
+        let mut i = 0;
+        while i < data.len() {
+            if data[i..].starts_with(secret) {
+                out.extend_from_slice(MARK);
+                i += secret.len();
+            } else {
+                out.push(data[i]);
+                i += 1;
+            }
+        }
+        out
     }
 
     /// Gather this process's confinement facts as JSON. Reads only its own
@@ -869,6 +905,27 @@ pub mod helper {
         use super::*;
 
         #[test]
+        fn redact_scrubs_every_raw_occurrence_of_the_token() {
+            let token = b"fo1_secret-TOKEN.value";
+            // A hostile CLI echoes the token — twice, adjacent to real output.
+            let hostile = b"before fo1_secret-TOKEN.value middle fo1_secret-TOKEN.value end";
+            let cleaned = redact(hostile, token);
+            let s = String::from_utf8(cleaned).unwrap();
+            assert_eq!(s, "before [redacted] middle [redacted] end");
+            assert!(!s.contains("fo1_secret-TOKEN.value"));
+            // Back-to-back occurrences (no gap) are both scrubbed.
+            let glued = b"fo1_secret-TOKEN.valuefo1_secret-TOKEN.value";
+            assert_eq!(
+                String::from_utf8(redact(glued, token)).unwrap(),
+                "[redacted][redacted]"
+            );
+            // No token present => byte-identical passthrough.
+            assert_eq!(redact(b"clean output", token), b"clean output");
+            // Empty secret is a no-op (never turns every gap into a marker).
+            assert_eq!(redact(b"abc", b""), b"abc");
+        }
+
+        #[test]
         fn probe_report_is_valid_json_with_strong_confinement_keys() {
             let out = run("probe").expect("probe mode runs");
             let v: serde_json::Value = serde_json::from_str(&out).expect("probe emits valid JSON");
@@ -951,12 +1008,16 @@ pub mod helper {
                 stdout.contains("ARGV:status -a my-app"),
                 "argv verbatim: {stdout}"
             );
-            assert!(stdout.contains("TOK:secret-xyz"), "token via env: {stdout}");
-            // The token is in the env line, NEVER in the argv line.
-            let argv_line = stdout.lines().find(|l| l.starts_with("ARGV:")).unwrap();
+            // The child received the token via env (its TOK line is non-empty),
+            // but the helper REDACTED the raw value on the way out — a hostile CLI
+            // cannot exfiltrate its own token by echoing it to stdout (Fable 5).
             assert!(
-                !argv_line.contains("secret-xyz"),
-                "token must never reach argv: {argv_line}"
+                stdout.contains("TOK:[redacted]"),
+                "token delivered via env, then redacted: {stdout}"
+            );
+            assert!(
+                !stdout.contains("secret-xyz"),
+                "raw token must never leave the helper: {stdout}"
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -1036,7 +1097,16 @@ pub mod helper {
             .expect("runs");
             let v: serde_json::Value = serde_json::from_str(&out).unwrap();
             let env = v["stdout"].as_str().unwrap();
-            assert!(env.contains("FLY_API_TOKEN=sekret"), "token present: {env}");
+            // The token var IS set in the child's env (delivery), but its value is
+            // redacted out of the returned stdout (Fable 5 exfil hardening).
+            assert!(
+                env.contains("FLY_API_TOKEN=[redacted]"),
+                "token var present, value redacted: {env}"
+            );
+            assert!(
+                !env.contains("sekret"),
+                "raw token must not leave the helper: {env}"
+            );
             assert!(
                 env.contains("HOME=/run/vibed-tool/x"),
                 "home present: {env}"
