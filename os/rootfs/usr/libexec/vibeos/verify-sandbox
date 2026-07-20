@@ -1,0 +1,144 @@
+#!/usr/bin/python3
+"""verify-sandbox — prove the ADR-019 sandbox confines, on THIS booted host.
+
+Calls the governed ``sandbox.probe`` tool over vibed's MCP socket for both
+profile classes (deploy, browser) and prints a per-class verdict. Read-only: it
+runs the confinement self-test, changes nothing.
+
+The daemon side is unit-tested; whether systemd/SELinux/the kernel actually
+confine the helper can only be observed on real hardware — this is that check.
+
+Exit codes are the contract, and they distinguish the two failures a security
+check must never conflate:
+  0  every class CONFINED
+  1  a class RAN but did NOT confine (fix the hardening/kernel/SELinux)
+  2  could not verify — vibed unreachable, the probe did not run, or a bad reply
+     (fix vibed / install the probe, then re-run). NEVER reported as "not confined".
+
+Run as a user vibed's policy admits (``sandbox.probe`` is T1-allow). Override the
+socket with VIBED_SOCKET for a dev run.
+"""
+
+import json
+import os
+import socket
+import sys
+
+SOCKET = os.environ.get("VIBED_SOCKET", "/run/vibed/mcp.sock")
+PROTOCOL_VERSION = "2024-11-05"
+# The client bounds its own line the way vibed bounds the peer's (MAX_LINE_BYTES):
+# a spoofed endpoint must not be able to make us buffer without limit.
+MAX_LINE = 2 * 1024 * 1024
+
+
+def interpret(resp):
+    """Classify one sandbox.probe reply.
+
+    Returns ``(status, detail)`` with status in ``{"ok", "not_confined",
+    "no_verdict"}``. ``no_verdict`` means the probe never produced a verdict
+    (RPC error, tool refused/failed, unparseable) — that is "could not verify",
+    NOT "did not confine". Every branch is fail-closed: only an explicit
+    ``confined: true`` grades ``ok``.
+    """
+    if "error" in resp:
+        err = resp["error"]
+        msg = err.get("message", err) if isinstance(err, dict) else err
+        return "no_verdict", f"RPC error: {msg!r}"
+    result = resp.get("result") or {}
+    if not isinstance(result, dict):
+        return "no_verdict", f"unexpected result shape: {result!r}"
+    content = result.get("content") or []
+    text = content[0].get("text", "") if content and isinstance(content[0], dict) else ""
+    if result.get("isError"):
+        # The tool was reached but refused or failed (e.g. the helper binary is
+        # missing, or systemd could not start the unit) — it did not run.
+        return "no_verdict", f"probe did not run: {text[:200]!r}"
+    try:
+        report = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return "no_verdict", f"unparseable tool output: {text[:200]!r}"
+    if not isinstance(report, dict):
+        return "no_verdict", f"unexpected report shape: {report!r}"
+    if report.get("confined") is True:
+        return "ok", "confined (distinct uid, seccomp filter, caps dropped, namespaces as expected)"
+    issues = report.get("issues") or []
+    joined = "; ".join(str(i) for i in issues)[:400]
+    return "not_confined", "NOT confined — " + (joined if joined else "no reason given")
+
+
+def main():
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(60)
+        sock.connect(SOCKET)
+    except OSError as exc:
+        print(f"verify-sandbox: cannot connect to {SOCKET}: {exc}", file=sys.stderr)
+        print("  is vibed running, and are you allowed to reach its socket?", file=sys.stderr)
+        return 2
+    conn = sock.makefile("rw", encoding="utf-8", newline="\n")
+
+    def call(method, params, req_id):
+        conn.write(json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}))
+        conn.write("\n")
+        conn.flush()
+        # Read until OUR id comes back: skip any notification or foreign/`null`-id
+        # frame vibed might interleave, so responses can never be mismatched.
+        while True:
+            line = conn.readline(MAX_LINE)
+            if not line:
+                raise ConnectionError("vibed closed the connection mid-request")
+            msg = json.loads(line)
+            if msg.get("id") == req_id:
+                return msg
+
+    # One envelope: ANY transport/parse failure past connect() is "could not
+    # verify" (exit 2), never the exit-1 that means "did not confine".
+    try:
+        init = call(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "verify-sandbox", "version": "1"},
+            },
+            1,
+        )
+        if "error" in init:
+            print(f"verify-sandbox: initialize failed: {init['error']}", file=sys.stderr)
+            return 2
+        served = (init.get("result") or {}).get("protocolVersion")
+        if served != PROTOCOL_VERSION:
+            print(f"verify-sandbox: vibed speaks protocol {served!r}, expected {PROTOCOL_VERSION!r}", file=sys.stderr)
+            return 2
+        # notifications/initialized is a notification: no id, no reply to read.
+        conn.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}))
+        conn.write("\n")
+        conn.flush()
+
+        results = []
+        for req_id, cls in enumerate(("deploy", "browser"), start=10):
+            resp = call("tools/call", {"name": "sandbox.probe", "arguments": {"class": cls}}, req_id)
+            status, detail = interpret(resp)
+            results.append(status)
+            mark = {"ok": "PASS", "not_confined": "FAIL", "no_verdict": "ERROR"}[status]
+            print(f"[{mark}] sandbox.probe class={cls}: {detail}")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        # OSError ⊃ TimeoutError/ConnectionError; ValueError ⊃ JSON/UnicodeDecodeError.
+        print(f"verify-sandbox: lost vibed mid-conversation: {exc!r}", file=sys.stderr)
+        return 2
+
+    print()
+    if all(s == "ok" for s in results):
+        print("verify-sandbox: the ADR-019 sandbox CONFINES on this host.")
+        return 0
+    if any(s == "not_confined" for s in results):
+        print("verify-sandbox: the sandbox RAN but did NOT confine — see the FAIL lines above.", file=sys.stderr)
+        print("  Do NOT wire deploy.*/browser.* onto this sandbox until it passes.", file=sys.stderr)
+        return 1
+    print("verify-sandbox: could NOT run the probe (see the ERROR lines) — fix vibed or the", file=sys.stderr)
+    print("  probe binary, then re-run. This is NOT a confinement failure.", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
