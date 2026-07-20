@@ -1430,3 +1430,84 @@ Aujourd'hui `apply_rule` réduit **tout ≥ T2** à `RequireApproval` (`policy.r
 - Le **provider** reste un tiers de confiance (Fly/Vercel compromis → l'artefact approuvé part). Hors périmètre.
 - Une **seule** approbation autorise un `apply` dont le coût est non borné (un deploy peut lever beaucoup de machines) — mais c'est du contenu approuvé par l'humain. Le grant one-shot (consommé atomiquement au démarrage, `mcp.rs`) ferme bien « approuve une fois, boucle » : un `apply` identique re-rencontre `RequireApproval`.
 - L'approbation suppose que l'opérateur **sait lire** ce qu'il approuve (le digest lié à SON build) — garde-fou ultime humain, par conception.
+
+## ADR-024 — `os.propose` : l'auto-modification comme flux de versions signées réversibles (la north star rendue mécanique) — *proposé (2026-07-20), à trancher*
+
+**Statut** : **PROPOSÉ**, à trancher par Micka. Design ; les incréments de code suivent.
+
+### La north star (mot pour mot)
+
+> « VibeOS ne doit pas être un Linux classique que l'IA peut bricoler. Il doit être
+> un système où **chaque modification produit une nouvelle version complète,
+> vérifiable, signée et réversible**, afin que même un agent IA défaillant ne puisse
+> pas créer de dérive permanente. »
+
+### Le problème que ça pose
+
+ADR-001 (base immuable bootc/OSTree) donne déjà le no-drift pour **l'image** : on ne
+mute pas la racine en place, un changement = une nouvelle image signée, un rollback =
+un reboot. Mais l'**auto-modification de l'IA** — installer un outil, changer une
+config, s'ajouter une capacité — se ferait aujourd'hui **hors** de ce flux (via le
+shell natif de l'agent, ad hoc). Pour tenir la north star, il faut que **toute
+modification initiée par l'IA passe par le pipeline de versions signées**. L'IA ne
+*bricole* jamais : elle **propose**.
+
+### Décision — le mécanisme `os.propose`
+
+1. **L'IA rédige une PROPOSITION**, jamais un diff libre du `Containerfile` : un
+   objet structuré dans un **DSL contraint** décrivant un changement d'environnement —
+   un **paquet** (depuis un dépôt allowlisté, épinglé + hashé), un **fragment de
+   `policy.d`** qui **rétrécit seulement**, un **fichier de config** déclaré, un
+   **outil**. Le DSL est la surface : pas de ligne de Dockerfile arbitraire.
+2. **vibed enregistre** la proposition (store `/var/lib/vibeos/proposals/`) + une
+   **entrée d'audit** dédiée. C'est tout ce que l'IA peut faire : proposer et tracer.
+3. **Un pipeline gouverné construit hors-machine**, **hermétiquement**, puis
+   **signe** (cosign, clé **jamais sur la machine** — même principe qu'ADR-021 pour le
+   token de deploy), et **stage** une nouvelle version bootable.
+4. **Approbation humaine T3** → `bootc switch` → l'IA tourne désormais sur une
+   nouvelle version **signée qu'elle a proposée**. **Rollback = reboot** sur le
+   déploiement précédent (conservé).
+
+### Ce qui garantit qu'une IA défaillante ne crée AUCUNE dérive permanente
+
+- **L'IA ne peut que PROPOSER.** La construction est hors-machine, la clé de
+  signature hors de sa portée, le boot atomique, l'ancienne version conservée. **Pire
+  cas d'un agent hostile/défaillant : une proposition rejetée, ou une image rollbackée
+  par reboot.** Jamais un état persistant altéré.
+- **Exclusion constitutionnelle** (garde-fou Fable 5) : une proposition ne peut
+  **JAMAIS** toucher `policy.rs`, `audit.rs`, `approval.rs`, le code du helper sandbox,
+  ni élargir `policy.d` au-delà d'ajouts **rétrécissants**. *Le moteur qui juge n'est
+  pas amendable par le jugé.* C'est vérifié mécaniquement à l'enregistrement ET au
+  build (fail-closed), pas laissé au bon vouloir du modèle.
+- **Diff cumulatif contre une ancre** (garde-fou Fable 5) : dix propositions
+  innocentes = une capture (allowlists d'egress qui s'élargissent une par une).
+  L'humain lit un **diff de capacités cumulé** contre une version-ancre épinglée, pas
+  un diff isolé ; **tout élargissement de politique est T3**, quoi qu'il arrive.
+- **Anti-rubber-stamp** : l'humain approuve un **diff de capacités**, pas un
+  Dockerfile qui pourrait cacher un binaire derrière une URL. (Extension future :
+  « approbation sur preuves » — la proposition arrive **construite, bootée en jetable,
+  tests verts, diff de manifeste joint** ; idée 6 de l'idéation.)
+
+### Premier incrément (1 PR, sûr)
+
+Outil **`os.proposal_draft`** (T0/T1, lecture+écriture bornée du store de
+propositions) : écrit une **proposition structurée** (le DSL + une justification + un
+plan de rollback) dans `/var/lib/vibeos/proposals/`, avec une entrée d'audit dédiée,
+et `vibectl proposals list`. **Zéro build, zéro switch, zéro signature** — d'abord le
+**format** et la **trace**. Le reste (le pipeline de build+signature hors-machine, le
+`bootc switch` gouverné) est un incrément ultérieur, gaté sur la revue de Micka et sur
+le substrat de signature (Phase 4).
+
+### Conséquences & résiduel
+
+- Le mécanisme **transforme la contrainte en capacité** : l'auto-amélioration de l'IA
+  devient un **produit de première classe** de l'OS (une IA qui améliore son propre
+  environnement) **sans jamais** échapper au no-drift. C'est le cœur de la symbiose.
+- Résiduel **accepté** : la **chaîne d'approvisionnement Fedora** (les paquets
+  proposés) reste un risque de toute distro — borné par le DSL (sources allowlistées,
+  épinglées, hashées), pas créé par l'IA.
+- Résiduel **à fermer avant le pipeline live** : l'écart « dev local via le `Bash`
+  natif de l'agent hors gouvernance » (déjà noté en ADR-020) — tant qu'il est ouvert,
+  `os.propose` gouverne la modification *déclarée* mais pas le contournement *shell* ;
+  la fermeture de cet écart (invariant n°1) est le prérequis pour que la north star
+  soit **totale** et pas seulement offerte.
