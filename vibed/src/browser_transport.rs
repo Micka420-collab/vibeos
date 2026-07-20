@@ -79,10 +79,78 @@ impl CdpChannel for PipeChannel {
     }
 }
 
+/// Argv **durci** de `chromium-headless` pour une session `browser.*` (ADR-022). Tous les
+/// flags sont **fixes** (aucune entrée agent n'atteint l'argv) ; `profile_dir` (profil
+/// **éphémère**, sans identifiants) et `proxy` (l'IP du proxy CONNECT qui évalue
+/// `[rule.domains]`) viennent de `vibed`, pas de l'agent.
+///
+/// **Deux flags ne sont JAMAIS émis** (invariant ADR-022, testé) : `--no-sandbox`
+/// (le sandbox userns de Chromium doit rester — c'est sa défense de couche 1) et
+/// `--remote-debugging-port` (le pilotage passe par le **pipe**, jamais par un port TCP
+/// qui exposerait CDP au réseau). Le builder ne les contient pas ; un test le verrouille.
+pub fn chromium_argv(chromium_bin: &str, profile_dir: &str, proxy: Option<&str>) -> Vec<String> {
+    let mut argv = vec![
+        chromium_bin.to_string(),
+        // Pilotage CDP par PIPE (fds 3/4), pas un port : zéro surface réseau CDP.
+        "--remote-debugging-pipe".to_string(),
+        // Profil éphémère, sans identifiants (ADR-022 supersède le profil persistant).
+        format!("--user-data-dir={profile_dir}"),
+        // Coupe toute la télémétrie / le réseau de fond de Chromium.
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+        "--disable-background-networking".to_string(),
+        "--disable-sync".to_string(),
+        "--disable-component-update".to_string(),
+        "--disable-domain-reliability".to_string(),
+        "--disable-breakpad".to_string(),
+        "--no-pings".to_string(),
+        "--disable-features=Translate,MediaRouter,OptimizationHints".to_string(),
+    ];
+    if let Some(p) = proxy {
+        // Tout l'egress passe par le proxy CONNECT ; aucune liste de contournement.
+        argv.push(format!("--proxy-server={p}"));
+        argv.push("--proxy-bypass-list=".to_string());
+    }
+    argv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::io::{FromRawFd, RawFd};
+
+    #[test]
+    fn chromium_argv_drives_by_pipe_and_never_emits_the_forbidden_flags() {
+        let argv = chromium_argv("/usr/lib/chromium/headless_shell", "/run/x/profile", None);
+        // Pilotage par pipe.
+        assert!(argv.iter().any(|a| a == "--remote-debugging-pipe"));
+        assert!(argv.iter().any(|a| a == "--user-data-dir=/run/x/profile"));
+        assert_eq!(argv[0], "/usr/lib/chromium/headless_shell");
+        // JAMAIS --no-sandbox ni un port de debug (invariant ADR-022, verrouillé ici).
+        assert!(
+            !argv.iter().any(|a| a == "--no-sandbox"),
+            "--no-sandbox ne doit jamais être émis"
+        );
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.starts_with("--remote-debugging-port")),
+            "--remote-debugging-port ne doit jamais être émis (pipe uniquement)"
+        );
+    }
+
+    #[test]
+    fn chromium_argv_routes_all_egress_through_the_proxy_when_given() {
+        let argv = chromium_argv("chromium", "/p", Some("http://127.66.0.1:8888"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "--proxy-server=http://127.66.0.1:8888"));
+        // Liste de contournement VIDE = rien ne sort en direct.
+        assert!(argv.iter().any(|a| a == "--proxy-bypass-list="));
+        // Sans proxy, pas de flag proxy.
+        let no_proxy = chromium_argv("chromium", "/p", None);
+        assert!(!no_proxy.iter().any(|a| a.starts_with("--proxy-server")));
+    }
 
     /// Crée un pipe unidirectionnel `(read, write)` **possédé** via `libc::pipe`. L'unique
     /// `unsafe` du transport vit ici, au point où `pipe(2)` produit les fds bruts.
