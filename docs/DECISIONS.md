@@ -1357,6 +1357,70 @@ agent ne peut pas, via le navigateur, installer un paquet, redémarrer un servic
 écrire hors du home de l'appelant. Et le contenu d'une page lue **n'est jamais une
 instruction** — quel que soit le tier des clics.
 
+### Addendum (2026-07-21, autonomie) — modèle de SESSION : batch éphémère, pas de chromium persistant
+
+**Statut** : **DÉCIDÉ pour v1** (décision d'implémentation prise en autonomie ; ouverte à
+l'override de Micka). Résout la seule micro-décision keystone qu'ADR-022 avait laissée
+implicite et qui **bloque toute la couche d'exécution** (`run_browser`, câblage dispatch).
+
+**Le problème.** ADR-019 est **process-par-appel** : chaque outil gouverné spawne une unité
+transitoire jetable. Mais `browser.navigate` puis `browser.read` sont **deux appels MCP
+distincts**, gouvernés séparément. S'ils spawnent chacun un chromium neuf, `read` observe une
+page **vierge** — `navigate` a chargé la page dans un chromium déjà mort. Il faut un modèle
+qui partage une page vivante entre plusieurs verbes, **sans** casser le confinement ADR-019.
+
+**Options pesées.**
+- **A — process-par-verbe (sans état)** : chaque verbe = chromium neuf. Perd toute continuité ;
+  contredit la surface de verbes déjà décidée (navigate/read/click… séparés). **Rejeté.**
+- **B/D — session persistante** : un chromium **vivant** sur plusieurs appels MCP, piloté par
+  une IPC bidirectionnelle. Continuité parfaite, mais : (1) **casse le confinement ADR-019**
+  (processus hostile de longue durée) ; (2) `vibed` doit gérer un cycle de vie de session
+  (ouverture/fermeture, timeout d'inactivité, concurrence, un-par-agent) — **surface neuve
+  massive** ; (3) transforme l'IPC à sens unique de `systemd-run --pipe` en protocole de
+  streaming. **Différé** (voir ci-dessous).
+- **C — batch éphémère (RETENU)** : une **séquence d'actions** (`[navigate, read, click, read]`)
+  est soumise comme **un seul appel gouverné**, exécutée par **un chromium dans une unité
+  transitoire**, qui rend **tous** les résultats puis meurt. Continuité **au sein** du batch ;
+  chromium mort à la fin de chaque appel gouverné.
+
+**Pourquoi C est cohérent (pas un pis-aller).** Le **profil éphémère** d'ADR-022 scope déjà v1
+à la **navigation non authentifiée** (le § « Résiduel introduit » dit noir sur blanc que le
+credential-free n'est un durcissement net *que si* le navigateur ne sert qu'à ça). Or les seuls
+flux que le batch ne couvre pas — lire-puis-agir-conditionnellement sur la **même** page vivante,
+wizards multi-étapes **avec état de session** — sont précisément les flux **authentifiés
+multi-étapes qu'ADR-022 diffère déjà**. Le batch sert donc **exactement** le périmètre v1 :
+fetch/extraction (`navigate→read/screenshot`) et action aveugle idempotente
+(`navigate→fill→submit→read`). La session persistante (B/D) n'est requise **que** le jour où le
+travail authentifié atterrit — et ce jour-là elle arrive **avec** le patron de ré-auth ADR-021
+(secret scellé hors de portée de l'agent), pas avant.
+
+**Ce que le batch préserve.**
+1. **Confinement ADR-019 intact** : une unité transitoire par appel, chromium jeté à la fin —
+   **aucun** processus hostile de longue durée, **aucune** gestion de session dans `vibed`.
+2. **IPC à sens unique inchangée** : un `control_payload` (le batch d'actions) descend, des
+   **résultats bornés** remontent — **exactement** la forme `run_deploy`/`run_cli` (le batch
+   EST le payload de contrôle que le mode `run_browser` du helper lit sur stdin).
+3. **Gouvernance améliorée, pas dégradée** : le tier du batch = **max** des tiers de ses verbes
+   (un `submit` → batch **T2**, approbation humaine sur **le plan entier**, pas un verbe isolé —
+   l'humain voit la séquence complète, meilleure lisibilité qu'une approbation par-verbe).
+   `[rule.domains]` est évalué pour **chaque** `navigate` du batch ; un hôte hors-allowlist
+   escalade tout le batch (catch-all T2). L'audit enregistre le batch comme une transaction.
+
+**Limite assumée (honnête).** Le batch **ne peut pas** réagir en cours de route : l'agent doit
+planifier la séquence **avant** de voir ce qu'un `read` retourne. Pour agir sur ce qu'il vient
+de lire, il resoumet un **second batch** — qui **recharge** la page (chromium neuf), donc l'état
+non idempotent (post-login, panier multi-étapes) est **perdu**. C'est acceptable **parce que**
+ce cas = flux authentifié/stateful = hors périmètre v1 (ci-dessus). Le jour où ce n'est plus
+acceptable, c'est le signal de construire la session persistante — **pas** de bricoler C.
+
+**Conséquence pour l'implémentation.** Le mode `run_browser` du helper lit un **batch d'actions
+validées** (chaque action déjà passée par `plan_action`) sur son stdin, lance chromium
+(`chromium_argv`), fait **une fois** `attach_page` → un `sessionId`, puis exécute les actions
+**en séquence** via `run_action(session, action, &page)` contre la **même** page, agrège les
+résultats bornés et rend un JSON. Une action qui échoue **arrête** le batch (fail-closed) et rend
+les résultats partiels + l'erreur. `browser.evaluate` reste exclu ; le binding par-objet reste
+l'invariant.
+
 ## ADR-021 — `deploy.*` gouverné : mettre en production sans jamais donner le token à l'agent — *proposé (2026-07-19, autonomie week-end), à trancher*
 
 **Statut** : **PROPOSÉ**, non tranché. Aucun code écrit. C'est le design concret de la capacité que la demande initiale nomme « le mettre en production » et qu'**ADR-020** a délibérément reportée (« brique gouvernée future »). Il **dépend de deux décisions de Micka** : (a) le **modèle d'allowlist de cibles** ci-dessous ; (b) la décision sur **ADR-019** (le helper-process), dont l'isolation des credentials hérite **entièrement** — sans ADR-019, `deploy.apply` ne se construit pas.
