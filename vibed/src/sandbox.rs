@@ -639,15 +639,20 @@ pub mod helper {
     /// argv), and captured stdout/stderr — it inherits none of our descriptors.
     fn run_deploy() -> Result<String, String> {
         use std::io::Read;
+        // The control channel is vibed (trusted), but cap the read defensively.
         let mut payload = String::new();
         std::io::stdin()
+            .take(1 << 20)
             .read_to_string(&mut payload)
             .map_err(|e| format!("deploy: reading control payload: {e}"))?;
         let req: DeployRequest = serde_json::from_str(payload.trim())
             .map_err(|e| format!("deploy: malformed control payload: {e}"))?;
         let creds = std::env::var("CREDENTIALS_DIRECTORY")
             .map_err(|_| "deploy: no $CREDENTIALS_DIRECTORY (token not sealed in?)".to_string())?;
-        let home = std::env::var("HOME").unwrap_or_default();
+        // HOME is set by the unit (`Environment=HOME=…`); its absence is an
+        // impossible branch — fail closed rather than hand the CLI `HOME=""`.
+        let home = std::env::var("HOME")
+            .map_err(|_| "deploy: no $HOME in the transient unit".to_string())?;
         run_cli(&req, &creds, &home)
     }
 
@@ -655,12 +660,36 @@ pub mod helper {
     /// exec path is testable against a fake CLI and a scratch credstore.
     fn run_cli(req: &DeployRequest, creds_dir: &str, home: &str) -> Result<String, String> {
         use std::process::{Command, Stdio};
-        // The sealed token (credstore filename must be a bare name, never a path).
+        // The binary MUST be an absolute path — never a name resolved via PATH
+        // (murky under `env_clear`; Fable 5). The spawn layer pins it to an
+        // allow-listed CLI path.
+        if !std::path::Path::new(&req.binary).is_absolute() {
+            return Err(format!(
+                "deploy: binary must be an absolute path: {:?}",
+                req.binary
+            ));
+        }
+        // Credstore filename must be a bare name, never a path.
         if req.cred_name.is_empty() || req.cred_name.contains('/') || req.cred_name.contains("..") {
             return Err(format!(
                 "deploy: invalid credential name {:?}",
                 req.cred_name
             ));
+        }
+        // Defence in depth — NOT the primary read-only control (that is the
+        // read-only-scoped sealed token + the [rule.deploy] verdict): refuse an
+        // obviously-mutating first subcommand. An INCOMPLETE deny-list by nature;
+        // only a read-only token is the real end-to-end guarantee.
+        if let Some(sub) = req.argv.first() {
+            const MUTATING: &[&str] = &[
+                "deploy", "up", "redeploy", "launch", "rm", "remove", "destroy", "delete", "scale",
+                "restart", "secrets", "env", "create", "add",
+            ];
+            if MUTATING.iter().any(|m| sub == m) {
+                return Err(format!(
+                    "deploy.plan: refusing a mutating subcommand {sub:?} (read-only only)"
+                ));
+            }
         }
         let token_path = std::path::Path::new(creds_dir).join(&req.cred_name);
         let token = std::fs::read_to_string(&token_path).map_err(|e| {
@@ -669,24 +698,60 @@ pub mod helper {
                 token_path.display()
             )
         })?;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err("deploy: sealed token is empty".to_string());
+        }
         // Run the CLI: cleared env + token + ephemeral HOME, stdin CLOSED, output
         // captured. `Command` never shell-splits, so argv reaches the CLI verbatim.
-        let out = Command::new(&req.binary)
+        // TLS still works: fly (Go), vercel (Node) and railway (rustls) all find
+        // CA roots without SSL_CERT_* — via compiled paths or an embedded store —
+        // and `/etc` stays readable under ProtectSystem=strict (Fable 5, verify on
+        // target). Residual exfil is inherent (a hostile binary with a token + net
+        // can echo the token to stdout or tunnel it over recursive DNS) — bounded
+        // only by the read-only TOKEN SCOPE, never by this helper.
+        let mut child = Command::new(&req.binary)
             .args(&req.argv)
             .env_clear()
-            .env(&req.token_env, token.trim())
+            .env(&req.token_env, &token)
             .env("HOME", home)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .map_err(|e| format!("deploy: cannot exec {}: {e}", req.binary))?;
+        drop(token); // `.env` already copied it into the child; don't keep ours.
+
+        // Bounded capture (Fable 5): reuse the module's `read_capped` so a
+        // flooding CLI gives a deterministic error, not a noisy cgroup OOM.
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let out_h = std::thread::spawn(move || super::read_capped(stdout, 4 * 1024 * 1024));
+        let err_h = std::thread::spawn(move || super::read_capped(stderr, 256 * 1024));
+        let out = out_h
+            .join()
+            .map_err(|_| "deploy: stdout reader panicked".to_string())?
+            .map_err(|e| format!("deploy: reading CLI stdout: {e}"))?;
+        let err = err_h
+            .join()
+            .map_err(|_| "deploy: stderr reader panicked".to_string())?
+            .map_err(|e| format!("deploy: reading CLI stderr: {e}"))?;
+        let overflow = out.1 || err.1;
+        if overflow {
+            let _ = child.kill();
+        }
+        let status = child
+            .wait()
+            .map_err(|e| format!("deploy: reaping the CLI: {e}"))?;
+        if overflow {
+            return Err("deploy: CLI output exceeded cap — killed and refused".to_string());
+        }
         // The CLI output is DATA, not a trusted result channel: lossy is fine, and
-        // vibed bounds the size on its side (spawn_transient's cap).
+        // vibed bounds the size again on its side (spawn_transient's cap).
         Ok(serde_json::json!({
-            "exit": out.status.code(),
-            "stdout": String::from_utf8_lossy(&out.stdout),
-            "stderr": String::from_utf8_lossy(&out.stderr),
+            "exit": status.code(),
+            "stdout": String::from_utf8_lossy(&out.0),
+            "stderr": String::from_utf8_lossy(&err.0),
         })
         .to_string())
     }
@@ -907,6 +972,81 @@ pub mod helper {
             assert!(run_cli(&req, "/tmp", "/tmp")
                 .unwrap_err()
                 .contains("invalid credential name"));
+        }
+
+        #[test]
+        fn run_cli_refuses_a_relative_binary_and_a_mutating_subcommand() {
+            let req = |bin: &str, sub: &str| DeployRequest {
+                binary: bin.to_string(),
+                argv: if sub.is_empty() {
+                    vec![]
+                } else {
+                    vec![sub.to_string()]
+                },
+                token_env: "X".to_string(),
+                cred_name: "deploy-token".to_string(),
+            };
+            // Relative binary => refused (no murky PATH resolution).
+            assert!(run_cli(&req("flyctl", "status"), "/tmp", "/tmp")
+                .unwrap_err()
+                .contains("absolute path"));
+            // A mutating first subcommand => refused (defence in depth).
+            for m in ["deploy", "up", "destroy", "scale", "secrets"] {
+                assert!(
+                    run_cli(&req("/usr/bin/flyctl", m), "/tmp", "/tmp")
+                        .unwrap_err()
+                        .contains("mutating subcommand"),
+                    "must refuse {m}"
+                );
+            }
+        }
+
+        /// `env_clear` really strips the parent env: only HOME + the token var
+        /// (plus what `sh` itself sets) reach the CLI — a canary leaks nothing.
+        #[cfg(unix)]
+        #[test]
+        fn run_cli_clears_the_parent_env() {
+            use std::os::unix::fs::PermissionsExt;
+            std::env::set_var("VIBED_LEAK_CANARY", "leaked");
+            let dir = std::env::temp_dir().join(format!("vibed-denv-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let cli = dir.join("envcli");
+            std::fs::write(&cli, "#!/bin/sh\nenv\n").unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(dir.join("deploy-token"), "sekret\n").unwrap();
+            let req = DeployRequest {
+                binary: cli.to_string_lossy().into_owned(),
+                argv: vec![],
+                token_env: "FLY_API_TOKEN".to_string(),
+                cred_name: "deploy-token".to_string(),
+            };
+            let creds = dir.to_string_lossy().into_owned();
+            let out = (|| {
+                for _ in 0..50 {
+                    match run_cli(&req, &creds, "/run/vibed-tool/x") {
+                        Err(e) if e.contains("Text file busy") => {
+                            std::thread::sleep(std::time::Duration::from_millis(20))
+                        }
+                        other => return other,
+                    }
+                }
+                run_cli(&req, &creds, "/run/vibed-tool/x")
+            })()
+            .expect("runs");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let env = v["stdout"].as_str().unwrap();
+            assert!(env.contains("FLY_API_TOKEN=sekret"), "token present: {env}");
+            assert!(
+                env.contains("HOME=/run/vibed-tool/x"),
+                "home present: {env}"
+            );
+            assert!(
+                !env.contains("VIBED_LEAK_CANARY"),
+                "parent env must be cleared: {env}"
+            );
+            std::env::remove_var("VIBED_LEAK_CANARY");
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
