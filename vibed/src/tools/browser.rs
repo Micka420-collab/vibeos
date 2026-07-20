@@ -212,18 +212,23 @@ fn validate_value(val: &str) -> Result<String, String> {
 /// paramètre → `Input.dispatch*`/`Runtime.callFunctionOn` avec le nœud en `arguments`,
 /// jamais d'interpolation — invariant ADR-022), arrivent à l'incrément suivant.
 ///
-/// À porter par l'incrément transport (Fable 5) : (1) toutes les commandes utilisent
-/// ici `session_id: None` (la cible navigateur) ; le vrai chromium exige le `sessionId`
-/// de la **page** attachée pour `Page.*`/`Runtime.*` (sans lui il refuse tout — donc
-/// fail-closed, inoffensif tant qu'inerte) : le threading du sessionId doit être conçu,
-/// pas bricolé. (2) La **synchronisation sur le chargement** (`Page.loadEventFired`
-/// filtré sur le `frameId` renvoyé) doit atterrir AVANT le câblage live — sinon un
-/// `read` juste après un `navigate` peut capturer la page PRÉCÉDENTE (intégrité
-/// d'attribution ; le cas de la redirection hors-allowlist, lui, est bloqué à l'egress
-/// par le proxy, pas ici — bon découpage).
+/// Toutes les commandes de page portent le `sessionId` de la **page** attachée (`page`,
+/// produit par [`crate::browser_transport::attach_page`]) : sur `--remote-debugging-pipe`,
+/// le vrai chromium exige ce `sessionId` pour `Page.*`/`Runtime.*` (protocole plat) — sans
+/// lui il refuse tout. C'était le finding Fable 5 (le code utilisait `session_id: None`, la
+/// cible navigateur) ; il est résolu ici en threadant `page` dans chaque `session.call`.
+/// `page` vient de `vibed`/du transport (jamais de l'agent) et est du JSON opaque du pair —
+/// porté comme paramètre CDP, jamais interpolé.
+///
+/// Reste à porter par l'incrément live (Fable 5) : la **synchronisation sur le chargement**
+/// (`Page.loadEventFired` filtré sur le `frameId` renvoyé) doit atterrir AVANT le câblage
+/// live — sinon un `read` juste après un `navigate` peut capturer la page PRÉCÉDENTE
+/// (intégrité d'attribution ; le cas de la redirection hors-allowlist, lui, est bloqué à
+/// l'egress par le proxy, pas ici — bon découpage).
 pub(crate) fn run_action<C: CdpChannel>(
     session: &mut CdpSession<C>,
     action: &BrowserAction,
+    page: &str,
 ) -> Result<Value, String> {
     match action {
         BrowserAction::Navigate { host, url } => {
@@ -239,8 +244,8 @@ pub(crate) fn run_action<C: CdpChannel>(
             // `url` est un PARAMÈTRE CDP, jamais interpolé ; son hôte a déjà passé
             // `[rule.domains]` en amont. (La synchronisation sur le chargement complet —
             // attendre Page.loadEventFired — est un raffinement du prochain incrément.)
-            session.call("Page.enable", json!({}), None)?;
-            let r = session.call("Page.navigate", json!({ "url": url }), None)?;
+            session.call("Page.enable", json!({}), Some(page))?;
+            let r = session.call("Page.navigate", json!({ "url": url }), Some(page))?;
             // Une navigation refusée par le navigateur remonte dans `errorText`.
             if let Some(err) = r.get("errorText").and_then(Value::as_str) {
                 return Err(format!("browser.navigate: navigation refusée : {err}"));
@@ -255,7 +260,7 @@ pub(crate) fn run_action<C: CdpChannel>(
                     "expression": "document.documentElement.outerHTML",
                     "returnByValue": true,
                 }),
-                None,
+                Some(page),
             )?;
             // FAIL-CLOSED (Fable 5) : une page hostile peut faire LEVER l'expression
             // (getters piégés sur documentElement/outerHTML) → CDP répond « succès »
@@ -280,7 +285,11 @@ pub(crate) fn run_action<C: CdpChannel>(
             Ok(json!({ "html": html }))
         }
         BrowserAction::Screenshot => {
-            let r = session.call("Page.captureScreenshot", json!({ "format": "png" }), None)?;
+            let r = session.call(
+                "Page.captureScreenshot",
+                json!({ "format": "png" }),
+                Some(page),
+            )?;
             // Fail-closed : une donnée absente/vide/non-chaîne est une erreur, pas une
             // capture « vide » silencieuse (Fable 5).
             let data = r
@@ -349,15 +358,21 @@ mod tests {
                 host: "github.com".into(),
                 url: "https://github.com/x".into(),
             },
+            "PAGE-SID",
         )
         .unwrap();
         assert_eq!(out["navigated"], "https://github.com/x");
         assert_eq!(out["frameId"], "F1");
-        // La 2e commande est Page.navigate, URL en PARAMÈTRE (jamais du JS).
+        // Les deux commandes CIBLENT LA PAGE (sessionId threadé) : sans lui le vrai chromium
+        // refuserait toute commande Page.* (finding Fable 5). URL en PARAMÈTRE, jamais du JS.
         let sent = s.into_channel().sent;
+        let enable: Value = serde_json::from_slice(&sent[0][..sent[0].len() - 1]).unwrap();
+        assert_eq!(enable["method"], "Page.enable");
+        assert_eq!(enable["sessionId"], "PAGE-SID");
         let nav: Value = serde_json::from_slice(&sent[1][..sent[1].len() - 1]).unwrap();
         assert_eq!(nav["method"], "Page.navigate");
         assert_eq!(nav["params"]["url"], "https://github.com/x");
+        assert_eq!(nav["sessionId"], "PAGE-SID");
     }
 
     #[test]
@@ -373,6 +388,7 @@ mod tests {
                 host: "x".into(),
                 url: "https://x".into(),
             },
+            "PAGE-SID",
         )
         .unwrap_err();
         assert!(err.contains("ERR_NAME_NOT_RESOLVED"), "{err}");
@@ -384,9 +400,10 @@ mod tests {
             json!({"id": 1, "result": {"result": {"value": "<html>hi</html>"}}}),
         )]);
         let mut s = CdpSession::new(chan);
-        let out = run_action(&mut s, &BrowserAction::Read).unwrap();
+        let out = run_action(&mut s, &BrowserAction::Read, "PAGE-SID").unwrap();
         assert_eq!(out["html"], "<html>hi</html>");
         // L'expression est CONSTANTE : aucune entrée agent, aucune surface d'injection.
+        // La commande cible la PAGE (sessionId threadé).
         let sent = s.into_channel().sent;
         let ev: Value = serde_json::from_slice(&sent[0][..sent[0].len() - 1]).unwrap();
         assert_eq!(ev["method"], "Runtime.evaluate");
@@ -394,6 +411,7 @@ mod tests {
             ev["params"]["expression"],
             "document.documentElement.outerHTML"
         );
+        assert_eq!(ev["sessionId"], "PAGE-SID");
     }
 
     #[test]
@@ -402,7 +420,7 @@ mod tests {
             json!({"id": 1, "result": {"data": "aGVsbG8="}}),
         )]);
         let mut s = CdpSession::new(chan);
-        let out = run_action(&mut s, &BrowserAction::Screenshot).unwrap();
+        let out = run_action(&mut s, &BrowserAction::Screenshot, "PAGE-SID").unwrap();
         assert_eq!(out["screenshot_png_base64"], "aGVsbG8=");
     }
 
@@ -415,6 +433,7 @@ mod tests {
             &BrowserAction::Click {
                 selector: "#x".into(),
             },
+            "PAGE-SID",
         )
         .unwrap_err();
         assert!(err.contains("incrément suivant"));
@@ -429,7 +448,7 @@ mod tests {
             "result": {"result": {"type": "object"}, "exceptionDetails": {"text": "Uncaught"}}
         }))]);
         let mut s = CdpSession::new(chan);
-        assert!(run_action(&mut s, &BrowserAction::Read)
+        assert!(run_action(&mut s, &BrowserAction::Read, "PAGE-SID")
             .unwrap_err()
             .contains("exception"));
     }
@@ -438,7 +457,7 @@ mod tests {
     fn read_fails_closed_when_the_value_is_missing_or_not_a_string() {
         let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {"result": {}}}))]);
         let mut s = CdpSession::new(chan);
-        assert!(run_action(&mut s, &BrowserAction::Read)
+        assert!(run_action(&mut s, &BrowserAction::Read, "PAGE-SID")
             .unwrap_err()
             .contains("sans chaîne 'value'"));
     }
@@ -447,7 +466,7 @@ mod tests {
     fn screenshot_fails_closed_on_missing_data() {
         let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {}}))]);
         let mut s = CdpSession::new(chan);
-        assert!(run_action(&mut s, &BrowserAction::Screenshot)
+        assert!(run_action(&mut s, &BrowserAction::Screenshot, "PAGE-SID")
             .unwrap_err()
             .contains("sans données PNG"));
     }
@@ -464,6 +483,7 @@ mod tests {
                 host: "github.com".into(),
                 url: "https://evil.example/x".into(),
             },
+            "PAGE-SID",
         )
         .unwrap_err();
         assert!(err.contains("incohérence hôte/URL"), "{err}");
