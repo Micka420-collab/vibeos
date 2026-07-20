@@ -5,6 +5,7 @@
 
 pub mod approval;
 pub mod audit;
+pub mod cdp;
 pub mod domain;
 pub mod glob;
 pub mod mcp;
