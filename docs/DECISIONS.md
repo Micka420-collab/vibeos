@@ -1465,8 +1465,15 @@ contraintes de cibles (`paths`/`services`/`domains` allowlists, `deploy` targets
 - **N'accorde rien** : la politique décrit les **propres bornes** de l'agent ;
   les lui montrer ne lui donne aucun pouvoir qu'il n'a pas. Les allow-lists /
   deny-lists exposées sont des frontières qu'il ne peut pas franchir de toute façon.
-- **Pas de fuite opérateur** : le champ `reason` (notes humaines) n'est **pas**
-  exposé.
+- **Aucune fuite NOUVELLE** (revue Fable 5) : les fichiers de politique sont déjà
+  lisibles par l'agent — `fs.read /etc/vibeos/policy.d/**` est T0-allow, seul l'écrit
+  y est interdit. Le manifeste n'expose donc **rien** qu'un unique `fs.read` ne
+  donnerait déjà (ids, globs, deny-lists, paires deploy — tout est aussi dans le
+  dépôt public). L'omission du champ `reason` (notes humaines) est de la **propreté**
+  de la vue de commodité, **pas une frontière de sécurité** : si un jour on veut que
+  le manifeste soit la vue *sanctionnée unique*, il faudra bloquer la lecture de
+  `policy.d/**` (décision séparée). La `note` du manifeste dit aussi qu'une denylist
+  **intégrée au code** (+ confinement home, rate-limit) s'applique EN PLUS.
 
 ### Conséquences
 

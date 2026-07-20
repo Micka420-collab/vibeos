@@ -20,10 +20,19 @@ pub(crate) fn capabilities(policy: &PolicyEngine) -> Result<String, String> {
     let rules: Vec<Value> = policy.rules().iter().map(render_rule).collect();
     let manifest = json!({
         "note": "Manifeste DÉRIVÉ de la politique chargée : INDICATIF pour la \
-                 planification. La décision fait foi via l'évaluation à l'appel \
-                 (premier-match des règles, plancher de tier, prédicat [rule.domains], \
-                 verdict [rule.deploy], contraintes de contexte). Tout ce qu'aucune règle \
-                 'allow' ne couvre est refusé par défaut.",
+                 planification, jamais une garantie. La décision fait foi via \
+                 l'évaluation à l'appel — qui peut modifier ce 'base_decision' de \
+                 plusieurs façons non reflétées ici : (1) premier-match des règles (une \
+                 règle antérieure peut masquer celle-ci) ; (2) le TIER DE REGISTRE de \
+                 l'outil : le tier effectif est max(tier de la règle, tier de registre), \
+                 donc une règle sous-tierée peut être remontée ; (3) le prédicat \
+                 [rule.domains] et le verdict [rule.deploy] ; (4) les contraintes de \
+                 contexte (chemin/unité/hôte) ; (5) une DENYLIST intégrée au code + le \
+                 confinement au home de l'appelant + le rate-limit, qui s'appliquent EN \
+                 PLUS de la politique. Tout ce qu'aucune règle 'allow' ne couvre est \
+                 refusé par défaut. Les fichiers de politique sont eux-mêmes lisibles par \
+                 l'agent (fs.read T0) : ce manifeste est une vue de commodité, et \
+                 l'omission de 'reason' est de la propreté, pas une frontière de sécurité.",
         "rule_count": rules.len(),
         "rules": rules,
     });
@@ -31,13 +40,16 @@ pub(crate) fn capabilities(policy: &PolicyEngine) -> Result<String, String> {
 }
 
 fn render_rule(r: &Rule) -> Value {
-    // Décision de base HORS CONTEXTE : le plancher de tier transforme un allow T2/T3 +
-    // approbation humaine en approbation ; un allow T0/T1 reste allow ; un deny reste
-    // deny. Les contraintes et le contexte peuvent encore refuser à l'appel — d'où
-    // « base_decision », pas « decision ».
+    // Décision de base HORS CONTEXTE, alignée EXACTEMENT sur le plancher d'`evaluate`
+    // (Fable 5) : celui-ci plancherne sur `tier >= T2` SEUL — l'`approval` est un
+    // invariant de CHARGEMENT (un allow T2/T3 doit porter approval=human, sinon la
+    // politique est rejetée), jamais relu à l'évaluation. Donc : allow T2/T3 →
+    // require_approval ; allow T0/T1 → allow ; deny → deny. Les contraintes, le contexte
+    // ET le tier de registre (voir la `note`) peuvent encore modifier la décision réelle
+    // à l'appel — d'où « base_decision », pas « decision ».
     let base_decision = match r.action {
         Action::Deny => "deny",
-        Action::Allow if r.tier >= Tier::T2 && r.approval == Approval::Human => "require_approval",
+        Action::Allow if r.tier >= Tier::T2 => "require_approval",
         Action::Allow => "allow",
     };
 
@@ -151,5 +163,35 @@ mod tests {
         assert_eq!(m["rule_count"], 0);
         assert!(m["rules"].as_array().unwrap().is_empty());
         assert!(m["note"].as_str().unwrap().contains("refusé par défaut"));
+    }
+
+    #[test]
+    fn base_decision_mirrors_the_engine_tier_floor_exactly() {
+        // Ancrage anti-dérive (Fable 5) : base_decision doit dire EXACTEMENT ce
+        // qu'`evaluate` décide, pour chaque forme de règle chargeable.
+        use crate::policy::{CallContext, Tier};
+        let cases = [
+            ("os.status", "T0", "allow", "", Tier::T0), // T0 allow → allow
+            (
+                "pkg.install",
+                "T2",
+                "allow",
+                "approval=\"human\"\n",
+                Tier::T2,
+            ), // T2 allow → require_approval (plancher tier-seul)
+        ];
+        for (tool, tier, action, extra, t) in cases {
+            let e = engine(&format!(
+                "[[rule]]\nid=\"r\"\ntools=[\"{tool}\"]\ntier=\"{tier}\"\naction=\"{action}\"\n{extra}"
+            ));
+            let m: Value = serde_json::from_str(&capabilities(&e).unwrap()).unwrap();
+            let base = m["rules"][0]["base_decision"].as_str().unwrap();
+            let dec = e.evaluate(tool, Some(t), CallContext::default());
+            assert_eq!(
+                base,
+                dec.as_str(),
+                "désync base_decision/evaluate pour {tool}"
+            );
+        }
     }
 }
