@@ -184,6 +184,13 @@ denied = [
 ]
 
 [[rule]]
+id = "sandbox-probe"
+tools = ["sandbox.probe"]
+tier = "T1"
+action = "allow"
+reason = "ADR-019 confinement self-test: a FIXED trusted helper (/usr/libexec/vibed-tool) with a FIXED argv and empty stdin, no credential, no target, no network beyond the deny-floor, ephemeral (RuntimeMaxSec/MemoryMax + per-uid rate limiter). Its radius is below fs.write. T1 holds ONLY while the argv/binary/stdin stay fixed — a future generic mode is T2 minimum."
+
+[[rule]]
 id = "memory-query"
 tools = ["memory.query"]
 tier = "T0"

@@ -45,12 +45,19 @@ fn sandbox_probe_with(
     systemd_run_bin: &str,
     helper_bin: &str,
 ) -> Result<String, String> {
-    let class_name = args
-        .get("class")
-        .and_then(Value::as_str)
-        .unwrap_or("deploy");
+    // Distinguish "absent" (default to the strict deploy profile) from "present
+    // but not a string" (reject — fail-closed, not a silent default; Fable 5).
+    let class_name = match args.get("class") {
+        None => "deploy",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => {
+            return Err(
+                "sandbox.probe: 'class' must be a string (\"deploy\" or \"browser\")".to_string(),
+            )
+        }
+    };
     let class = match class_name {
-        // A Go CLI profile is the strict one (deny-all namespaces, W^X); it is the
+        // A Go CLI profile is the strict one (deny-all namespaces, W^X); the
         // right default to prove maximum confinement.
         "deploy" => ToolClass::Deploy { needs_wx: false },
         "browser" => ToolClass::Browser,
@@ -61,9 +68,12 @@ fn sandbox_probe_with(
         }
     };
 
+    // Nonce includes the pid so a probe started after a vibed restart cannot
+    // collide on RuntimeDirectory with an orphan from the previous process still
+    // within its RuntimeMaxSec window (Fable 5 — else a false NEGATIVE).
     let nonce = PROBE_SEQ.fetch_add(1, Ordering::Relaxed);
     let spec = UnitSpec {
-        invocation_id: format!("probe-{nonce}"),
+        invocation_id: format!("probe-{}-{nonce}", std::process::id()),
         credential: None,         // a probe carries no secret — nothing to seal
         egress_allow: Vec::new(), // no network needed; the deny-floor stands
         memory_max: "128M".to_string(),
@@ -72,8 +82,16 @@ fn sandbox_probe_with(
     };
     let unit = TransientUnit::compile(class, &spec)?;
 
-    // The probe ignores stdin (it only reads its own /proc); an empty control
-    // payload just closes the channel cleanly.
+    // vibed's OWN mount namespace, so the grader can require the service to be in
+    // a DIFFERENT one (a confined unit is; an unconfined fork shares vibed's).
+    let own_ns_mnt = std::fs::read_link("/proc/self/ns/mnt")
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+
+    // INVARIANT (Fable 5): the FIXED binary + FIXED argv `["probe"]` + EMPTY
+    // stdin are what make this T1 defensible and the report trustworthy. A future
+    // mode that lets the agent influence any of these reopens the tier question
+    // (T2 minimum) and voids the "trusted helper => trusted stdout" reasoning.
     let out = crate::sandbox::spawn_transient(
         systemd_run_bin,
         &unit,
@@ -86,35 +104,65 @@ fn sandbox_probe_with(
         return Err(format!(
             "sandbox.probe: the transient service exited {:?} (diagnostics: {})",
             out.status,
-            out.stderr.trim()
+            truncate(out.stderr.trim(), 4096)
         ));
     }
 
     let report: Value = serde_json::from_str(out.stdout.trim())
         .map_err(|e| format!("sandbox.probe: helper did not emit a JSON report: {e}"))?;
 
-    let (confined, issues) = assess(class, &report);
+    // assess() trusts `report` BECAUSE it comes from the fixed trusted helper
+    // reading its own /proc. This pattern is valid for `probe` ONLY — the day a
+    // deploy/browser mode runs a real hostile CLI, its stdout is NOT trusted.
+    let (confined, issues) = assess(class, &report, own_ns_mnt.as_deref());
     Ok(json!({
         "class": class_name,
         "confined": confined,
         "issues": issues,
         "report": report,
-        "diagnostics": out.stderr.trim(),
+        "diagnostics": truncate(out.stderr.trim(), 4096),
     })
     .to_string())
 }
 
+/// Truncate to at most `max` bytes on a char boundary, marking elision, so a
+/// 256 KiB diagnostics stream never bloats an MCP response.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[{} bytes truncated]", &s[..end], s.len() - end)
+}
+
 /// Grade a probe report against what the profile class MUST produce. Returns
-/// `(confined, issues)`; `confined` is true only when every check passes.
-fn assess(class: ToolClass, r: &Value) -> (bool, Vec<String>) {
+/// `(confined, issues)`; `confined` is true only when every check passes. Every
+/// check is fail-closed: an absent or wrong-typed field is an issue, never a
+/// silent pass, so a partial or forged report cannot grade `confined: true`.
+///
+/// `own_ns_mnt` is vibed's own mount-namespace link, so we can require the
+/// service to sit in a DIFFERENT namespace.
+fn assess(class: ToolClass, r: &Value, own_ns_mnt: Option<&str>) -> (bool, Vec<String>) {
     let mut issues = Vec::new();
 
-    // Distinct DynamicUser uid — the bearing control (ADR-021 lock 2).
-    match r["uid"].as_u64() {
-        Some(u) if (DYNAMIC_UID_LO..=DYNAMIC_UID_HI).contains(&u) => {}
-        other => issues.push(format!(
-            "uid {other:?} is not in the DynamicUser range {DYNAMIC_UID_LO}..={DYNAMIC_UID_HI} — DynamicUser did not take"
-        )),
+    // Distinct DynamicUser uid (real AND effective) — the bearing control
+    // (ADR-021 lock 2). uid/euid 0 or the agent's fall outside the range.
+    let in_range =
+        |v: &Value| matches!(v.as_u64(), Some(u) if (DYNAMIC_UID_LO..=DYNAMIC_UID_HI).contains(&u));
+    if !in_range(&r["uid"]) {
+        issues.push(format!(
+            "uid {:?} is not in the DynamicUser range {DYNAMIC_UID_LO}..={DYNAMIC_UID_HI} — DynamicUser did not take",
+            r["uid"]
+        ));
+    }
+    if !in_range(&r["euid"]) {
+        issues.push(format!(
+            "euid {:?} is not in the DynamicUser range",
+            r["euid"]
+        ));
     }
     // A seccomp filter is installed (Seccomp: 2 = filter mode) — proves SystemCallFilter.
     if r["seccomp"].as_str() != Some("2") {
@@ -123,25 +171,53 @@ fn assess(class: ToolClass, r: &Value) -> (bool, Vec<String>) {
             r["seccomp"].as_str()
         ));
     }
-    // Every capability dropped (CapBnd all-zero) — proves CapabilityBoundingSet=.
+    // Every capability dropped (CapBnd AND CapEff all-zero) — proves CapabilityBoundingSet=.
     if !is_all_zero_caps(r["cap_bnd"].as_str()) {
         issues.push(format!(
             "CapBnd {:?} is not all-zero — capabilities were not dropped",
             r["cap_bnd"].as_str()
         ));
     }
-    // No new privileges, and the ephemeral HOME really took.
+    if !is_all_zero_caps(r["cap_eff"].as_str()) {
+        issues.push(format!(
+            "CapEff {:?} is not all-zero",
+            r["cap_eff"].as_str()
+        ));
+    }
+    // No new privileges, hardened umask, and the ephemeral HOME really took.
     if r["no_new_privs"].as_str() != Some("1") {
         issues.push(format!(
             "NoNewPrivs is {:?}, want \"1\"",
             r["no_new_privs"].as_str()
         ));
     }
+    if r["umask"].as_str() != Some("0077") {
+        issues.push(format!("Umask is {:?}, want \"0077\"", r["umask"].as_str()));
+    }
     if r["home_ephemeral"].as_bool() != Some(true) {
         issues.push(
             "home_ephemeral is not true — the tmpfs HOME did not take (uid/mode mismatch?)"
                 .to_string(),
         );
+    }
+    // A probe seals no credential: any credential name present is an anomaly.
+    match &r["credentials"] {
+        Value::Null => {}
+        Value::Array(a) if a.is_empty() => {}
+        other => issues.push(format!("credentials {other} present — a probe seals none")),
+    }
+    // The service must be in a DIFFERENT mount namespace than vibed (ProtectSystem/
+    // PrivateTmp guarantee one); sharing vibed's means an unconfined fork.
+    match (own_ns_mnt, r["ns_mnt"].as_str()) {
+        (Some(own), Some(m)) if m == own => issues.push(
+            "ns_mnt equals vibed's own — the service shares vibed's mount namespace (unconfined)"
+                .to_string(),
+        ),
+        (_, Some(m)) if m.starts_with("error:") => {
+            issues.push(format!("ns_mnt could not be read in the probe: {m}"))
+        }
+        (_, None) => issues.push("ns_mnt is missing from the report".to_string()),
+        _ => {}
     }
     // Behavioural namespace proof, per class: deploy denies all namespace
     // creation (EPERM), the browser must be allowed to create a user namespace.
@@ -310,5 +386,38 @@ mod tests {
         let err = sandbox_probe_with(&json!({"class": "wat"}), "/nonexistent", "/nonexistent")
             .expect_err("unknown class must be refused before spawning");
         assert!(err.contains("unknown class"));
+    }
+
+    #[test]
+    fn a_non_string_class_is_refused_not_defaulted() {
+        // Present-but-wrong-type must fail closed, not silently default to deploy.
+        let err = sandbox_probe_with(&json!({"class": 5}), "/nonexistent", "/nonexistent")
+            .expect_err("a non-string class must be refused");
+        assert!(err.contains("must be a string"), "{err}");
+    }
+
+    /// assess() is fail-closed: an EMPTY report (every field absent) grades not
+    /// confined, with an issue per missing check — a forged partial report can
+    /// never pass (Fable 5).
+    #[test]
+    fn assess_fails_closed_on_an_empty_report() {
+        let (confined, issues) = assess(
+            ToolClass::Deploy { needs_wx: false },
+            &json!({}),
+            Some("mnt:[4026531234]"),
+        );
+        assert!(!confined, "an empty report must never grade confined");
+        assert!(
+            issues.len() >= 8,
+            "every absent field must raise an issue: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn is_all_zero_caps_rejects_absent_and_nonzero() {
+        assert!(is_all_zero_caps(Some("0000000000000000")));
+        assert!(!is_all_zero_caps(None));
+        assert!(!is_all_zero_caps(Some("")));
+        assert!(!is_all_zero_caps(Some("000001ffffffffff")));
     }
 }
