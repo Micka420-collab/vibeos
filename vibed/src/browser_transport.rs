@@ -79,10 +79,144 @@ impl CdpChannel for PipeChannel {
     }
 }
 
+/// Argv **durci** de `chromium-headless` pour une session `browser.*` (ADR-022). Tous les
+/// flags sont **fixes** (aucune entrée agent n'atteint l'argv) ; `profile_dir` (profil
+/// **éphémère**, sans identifiants) et `proxy` (l'IP du proxy CONNECT qui évalue
+/// `[rule.domains]`) viennent de `vibed`, pas de l'agent.
+///
+/// **Deux flags ne sont JAMAIS émis** (invariant ADR-022, testé) : `--no-sandbox`
+/// (le sandbox userns de Chromium doit rester — c'est sa défense de couche 1) et
+/// `--remote-debugging-port` (le pilotage passe par le **pipe**, jamais par un port TCP
+/// qui exposerait CDP au réseau). L'ensemble d'argv étant **fermé**, un **test golden**
+/// le verrouille EXACTEMENT (plus fort qu'un denylist : échoue sur tout ajout futur).
+///
+/// **Ce qui garantit le confinement egress** (revue Fable 5) : c'est le **plancher réseau
+/// du sandbox** (`IPAddressDeny=any` + seul `127.66.0.1/32`, eBPF-cgroup dans le netns du
+/// navigateur, `sandbox.rs`), PAS `--proxy-server`. Les flags anti-contournement ci-dessus
+/// (WebRTC/QUIC, `<-loopback>`) sont de la **défense en profondeur** pour que l'argv porte
+/// son propre poids si jamais chromium tournait hors du sandbox.
+///
+/// **Invariants pour le lanceur (`run_browser`)** : `chromium_bin` DOIT être le binaire
+/// `headless_shell` (déjà headless — pas de `--headless` ; un `chromium` générique
+/// tenterait un GUI) ; et l'argv DOIT être passé à **`execve` comme vecteur**, jamais joint
+/// en chaîne shell (sinon un espace dans une valeur redeviendrait un flag).
+pub fn chromium_argv(chromium_bin: &str, profile_dir: &str, proxy: Option<&str>) -> Vec<String> {
+    let mut argv = vec![
+        chromium_bin.to_string(),
+        // Pilotage CDP par PIPE (fds 3/4), pas un port : zéro surface réseau CDP.
+        "--remote-debugging-pipe".to_string(),
+        // Profil éphémère, sans identifiants (ADR-022 supersède le profil persistant).
+        format!("--user-data-dir={profile_dir}"),
+        // Isolation par site pour du contenu multi-origine hostile (Spectre / cross-origin).
+        "--site-per-process".to_string(),
+        // Défense EN PROFONDEUR sous le plancher réseau du sandbox (IPAddressDeny=any) :
+        // couper les canaux qui contourneraient le proxy CONNECT au niveau chromium —
+        // WebRTC en UDP direct, et QUIC/HTTP3 (UDP qu'un proxy CONNECT ne tunnelise pas).
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string(),
+        "--disable-quic".to_string(),
+        // Fiabilité sous /dev/shm restreint (sinon crash des renderers sur pages lourdes).
+        "--disable-dev-shm-usage".to_string(),
+        // Coupe toute la télémétrie / le réseau de fond (+ DoH : pas de DNS direct hors proxy).
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+        "--disable-background-networking".to_string(),
+        "--disable-sync".to_string(),
+        "--disable-component-update".to_string(),
+        "--disable-domain-reliability".to_string(),
+        "--disable-breakpad".to_string(),
+        "--no-pings".to_string(),
+        "--disable-features=Translate,MediaRouter,OptimizationHints,DnsOverHttps".to_string(),
+    ];
+    if let Some(p) = proxy {
+        // Tout l'egress passe par le proxy CONNECT — Y COMPRIS la boucle locale : `<-loopback>`
+        // RETIRE la règle de contournement IMPLICITE de chromium pour localhost/loopback
+        // (une liste VIDE ne suffit pas). Se connecter au proxy à 127.66.0.1 n'est pas
+        // affecté : la liste régit les URLs de destination, pas le saut vers le proxy.
+        argv.push(format!("--proxy-server={p}"));
+        argv.push("--proxy-bypass-list=<-loopback>".to_string());
+    }
+    argv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::io::{FromRawFd, RawFd};
+
+    #[test]
+    fn chromium_argv_is_an_exact_golden_set() {
+        // L'ensemble étant FERMÉ (aucune entrée agent), on verrouille l'argv EXACT : plus
+        // fort qu'un denylist, ça échoue sur TOUT ajout futur (Fable 5).
+        let argv = chromium_argv("BIN", "PROF", None);
+        let expected = [
+            "BIN",
+            "--remote-debugging-pipe",
+            "--user-data-dir=PROF",
+            "--site-per-process",
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--disable-quic",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-component-update",
+            "--disable-domain-reliability",
+            "--disable-breakpad",
+            "--no-pings",
+            "--disable-features=Translate,MediaRouter,OptimizationHints,DnsOverHttps",
+        ];
+        assert_eq!(
+            argv.iter().map(String::as_str).collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn chromium_argv_never_emits_any_sandbox_or_cdp_defeating_flag() {
+        // Documentaire (le golden ci-dessus est la vraie garde) : aucune des formes qui
+        // cassent le sandbox ou exposent/déplacent CDP (Fable 5).
+        let argv = chromium_argv("bin", "/p", Some("http://127.66.0.1:8888"));
+        for forbidden in [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--no-zygote",
+            "--single-process",
+            "--disable-web-security",
+            "--disable-site-isolation-trials",
+        ] {
+            assert!(
+                !argv.iter().any(|a| a == forbidden),
+                "{forbidden} ne doit jamais être émis"
+            );
+        }
+        for prefix in ["--remote-debugging-port", "--remote-debugging-address"] {
+            assert!(
+                !argv.iter().any(|a| a.starts_with(prefix)),
+                "{prefix} ne doit jamais être émis (pipe uniquement)"
+            );
+        }
+    }
+
+    #[test]
+    fn chromium_argv_forces_all_egress_including_loopback_through_the_proxy() {
+        let argv = chromium_argv("bin", "/p", Some("http://127.66.0.1:8888"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "--proxy-server=http://127.66.0.1:8888"));
+        // `<-loopback>` retire le contournement implicite du loopback (une liste vide ne
+        // suffit pas — Fable 5).
+        assert!(argv.iter().any(|a| a == "--proxy-bypass-list=<-loopback>"));
+        // Anti-contournement au niveau chromium présents.
+        assert!(argv.iter().any(|a| a == "--disable-quic"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
+        // Sans proxy, pas de flag proxy.
+        assert!(!chromium_argv("bin", "/p", None)
+            .iter()
+            .any(|a| a.starts_with("--proxy-server")));
+    }
 
     /// Crée un pipe unidirectionnel `(read, write)` **possédé** via `libc::pipe`. L'unique
     /// `unsafe` du transport vit ici, au point où `pipe(2)` produit les fds bruts.
