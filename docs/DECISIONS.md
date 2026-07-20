@@ -1362,6 +1362,12 @@ instruction** — quel que soit le tier des clics.
 **Statut** : **DÉCIDÉ pour v1** (décision d'implémentation prise en autonomie ; ouverte à
 l'override de Micka). Résout la seule micro-décision keystone qu'ADR-022 avait laissée
 implicite et qui **bloque toute la couche d'exécution** (`run_browser`, câblage dispatch).
+**Durci après une revue adversariale Fable 5 (2026-07-21)** : verdict *SOUND pour v1* (le choix
+batch survit, aucune option ratée), mais 4 surclamations/trous corrigés ci-dessous — la
+gouvernance batch est un **échange** (pas un gain), l'enforcement domaine est le **proxy** (pas
+le check par-navigate), l'état d'action doit distinguer **`indeterminate`** (double-POST), et
+l'approbation T2 doit énumérer les causes par action — plus 3 renforts d'implémentation (screening
+`fill`, étapes `assert`, bornes de batch).
 
 **Le problème.** ADR-019 est **process-par-appel** : chaque outil gouverné spawne une unité
 transitoire jetable. Mais `browser.navigate` puis `browser.read` sont **deux appels MCP
@@ -1400,26 +1406,73 @@ travail authentifié atterrit — et ce jour-là elle arrive **avec** le patron 
 2. **IPC à sens unique inchangée** : un `control_payload` (le batch d'actions) descend, des
    **résultats bornés** remontent — **exactement** la forme `run_deploy`/`run_cli` (le batch
    EST le payload de contrôle que le mode `run_browser` du helper lit sur stdin).
-3. **Gouvernance améliorée, pas dégradée** : le tier du batch = **max** des tiers de ses verbes
-   (un `submit` → batch **T2**, approbation humaine sur **le plan entier**, pas un verbe isolé —
-   l'humain voit la séquence complète, meilleure lisibilité qu'une approbation par-verbe).
-   `[rule.domains]` est évalué pour **chaque** `navigate` du batch ; un hôte hors-allowlist
-   escalade tout le batch (catch-all T2). L'audit enregistre le batch comme une transaction.
+3. **Gouvernance : un ÉCHANGE, pas un gain net (Fable 5).** Le tier du batch = **max** des tiers
+   de ses verbes (un `submit` → batch **T2**). Le batch **gagne** la visibilité de *plan* mais
+   **perd** la visibilité d'*état* : un `submit` T2 est approuvé **avant** que son `navigate` ait
+   tourné, donc l'humain approuve une action contre un état de page que **personne** — ni lui ni
+   l'agent — n'a encore vu ; il approuve une *intention*, plus une *action* (en per-verbe,
+   l'approbation arrivait **après** les `read`, l'état sous les yeux). Acceptable v1 (formulaires
+   publics, enjeu bas) **à deux garde-fous obligatoires** :
+   - **l'approbation T2 affiche le PLAN INTÉGRAL** — chaque action, ses valeurs de `fill`, tous
+     les domaines visités — pas un « batch T2 » opaque ;
+   - **le payload d'approbation énumère les CAUSES d'escalade PAR ACTION** (tier + raison :
+     `submit` ? domaine hors-allowlist, lequel ?). Le `max` est correct comme *plancher* mais
+     **insuffisant comme présentation** : sans énumération, un batch escaladé pour **deux** causes
+     (un `submit` **et** un `navigate` hors-liste) n'en montre qu'une, et le batching devient un
+     mécanisme d'**enfouissement d'escalades**.
+
+**L'enforcement du domaine est le PROXY, pas le check par-navigate (Fable 5).** Évaluer
+`[rule.domains]` sur les args de `navigate` dans `vibed` est un **lint advisory**, **pas**
+l'enforcement : un `click` sur un lien, une **redirection 302**, changent de domaine **sans**
+`navigate` — invisibles de ce check. Le contrôle réel est le **proxy CONNECT par-requête**
+(ADR-022) + le snapshot de politique compilé descendu dans le helper (ADR-019 §2). Corollaire
+**multiplié par le batch** : l'invariant catch-all d'ADR-022 (un prédicat `[rule.domains]` est
+contournable par l'ordre des règles) ne laisse plus passer un *verbe* T1 sur domaine hostile mais
+un **batch entier** en T1 silencieux ; la politique navigateur livrée ne doit donc porter
+**aucun** catch-all `browser.*` permissif sans contrainte de domaine.
 
 **Limite assumée (honnête).** Le batch **ne peut pas** réagir en cours de route : l'agent doit
 planifier la séquence **avant** de voir ce qu'un `read` retourne. Pour agir sur ce qu'il vient
 de lire, il resoumet un **second batch** — qui **recharge** la page (chromium neuf), donc l'état
 non idempotent (post-login, panier multi-étapes) est **perdu**. C'est acceptable **parce que**
-ce cas = flux authentifié/stateful = hors périmètre v1 (ci-dessus). Le jour où ce n'est plus
-acceptable, c'est le signal de construire la session persistante — **pas** de bricoler C.
+ce cas = flux authentifié/stateful = hors périmètre v1 (ci-dessus). **Cas dangereux à nommer
+(Fable 5)** : tout formulaire à **jeton CSRF par session** (la majorité, même publics) rend
+« lire au batch 1, soumettre au batch 2 » impossible (session neuve → jeton invalide) — donc le
+**seul** chemin vers un `submit` est **aveugle dans le même batch**, précisément sur le verbe T2
+où la vérification importerait. La réponse **n'est PAS** la session persistante (B/D déguisé) mais
+des **étapes `assert` déclaratives** (ci-dessous). Le jour où même ça ne suffit plus, c'est le
+signal de construire la session persistante — **pas** de bricoler C.
 
-**Conséquence pour l'implémentation.** Le mode `run_browser` du helper lit un **batch d'actions
-validées** (chaque action déjà passée par `plan_action`) sur son stdin, lance chromium
-(`chromium_argv`), fait **une fois** `attach_page` → un `sessionId`, puis exécute les actions
-**en séquence** via `run_action(session, action, &page)` contre la **même** page, agrège les
-résultats bornés et rend un JSON. Une action qui échoue **arrête** le batch (fail-closed) et rend
-les résultats partiels + l'erreur. `browser.evaluate` reste exclu ; le binding par-objet reste
-l'invariant.
+**Conséquence pour l'implémentation (invariants, dont durcissements Fable 5).** Le mode
+`run_browser` du helper lit un **batch d'actions validées** (chacune passée par `plan_action`) sur
+son stdin, lance chromium (`chromium_argv`), fait **une fois** `attach_page` → un `sessionId`,
+puis exécute les actions **en séquence** via `run_action(session, action, &page)` contre la
+**même** page, agrège des résultats bornés et rend un JSON. Invariants **obligatoires** :
+
+- **État d'action à TROIS valeurs — `completed` / `failed` / `indeterminate`** (jamais un binaire
+  « partiel + erreur », ambigu là où c'est dangereux). Tout **T2** ayant **dépassé le point de
+  dispatch réseau** (le POST est parti, la réponse a timeout) est **`indeterminate`**, jamais
+  `failed` : le rendre `failed` inviterait l'agent à re-soumettre → **double POST**/webhook tiré
+  deux fois sur un formulaire non idempotent. **Retry automatique d'un batch contenant du T2 =
+  INTERDIT.**
+- **Audit PAR ACTION dans la transaction**, corrélé aux logs du proxy par un **batch-id propagé**
+  (sinon les chaînes de redirection résolues à runtime sont invisibles de l'audit).
+- **Screening des valeurs de `fill` au plan (Fable 5)** : matcher chaque valeur contre le matériel
+  secret atteignable par l'agent (env, patterns de tokens) → **deny ou escalade T2**. C'est la
+  seule mise en application de l'invariant ADR-022 « jamais un secret via `browser.fill` », qui
+  n'a aujourd'hui **aucun** enforcement ; le batch rend ce contrôle bon marché (toutes les valeurs
+  sont visibles avant le spawn).
+- **Étapes `assert` déclaratives dans le schéma d'actions** (« ce sélecteur existe », « le texte
+  de X matche Y », « l'URL courante matche Z ») qui **abortent fail-closed** si non satisfaites.
+  Pré-approuvées par l'humain **dans le plan**, exécutées par le helper, **zéro IPC retour** :
+  c'est la vérification-avant-`submit` **sans** réactivité (réponse au CSRF ci-dessus).
+- **Bornes anti-« processus long » (Fable 5)** : la revendication « chromium jeté » s'érode avec la
+  taille du batch (200 actions = chromium hostile vivant longtemps dans une unité approuvée une
+  fois). **Cap dur d'actions par batch** (petit — ~10–20), **`RuntimeMaxSec`** sur l'unité, et les
+  « résultats bornés » doivent borner l'**agrégat** remonté, pas seulement chaque action.
+
+Une action qui échoue **arrête** le batch (fail-closed) et rend les résultats jusque-là + l'état
+de l'action fautive. `browser.evaluate` reste exclu ; le binding par-objet reste l'invariant.
 
 ## ADR-021 — `deploy.*` gouverné : mettre en production sans jamais donner le token à l'agent — *proposé (2026-07-19, autonomie week-end), à trancher*
 
