@@ -211,12 +211,30 @@ fn validate_value(val: &str) -> Result<String, String> {
 /// exigent le **binding CDP par-objet** du sélecteur/valeur (`DOM.querySelector` par
 /// paramètre → `Input.dispatch*`/`Runtime.callFunctionOn` avec le nœud en `arguments`,
 /// jamais d'interpolation — invariant ADR-022), arrivent à l'incrément suivant.
+///
+/// À porter par l'incrément transport (Fable 5) : (1) toutes les commandes utilisent
+/// ici `session_id: None` (la cible navigateur) ; le vrai chromium exige le `sessionId`
+/// de la **page** attachée pour `Page.*`/`Runtime.*` (sans lui il refuse tout — donc
+/// fail-closed, inoffensif tant qu'inerte) : le threading du sessionId doit être conçu,
+/// pas bricolé. (2) La **synchronisation sur le chargement** (`Page.loadEventFired`
+/// filtré sur le `frameId` renvoyé) doit atterrir AVANT le câblage live — sinon un
+/// `read` juste après un `navigate` peut capturer la page PRÉCÉDENTE (intégrité
+/// d'attribution ; le cas de la redirection hors-allowlist, lui, est bloqué à l'egress
+/// par le proxy, pas ici — bon découpage).
 pub(crate) fn run_action<C: CdpChannel>(
     session: &mut CdpSession<C>,
     action: &BrowserAction,
 ) -> Result<Value, String> {
     match action {
-        BrowserAction::Navigate { url, .. } => {
+        BrowserAction::Navigate { host, url } => {
+            // Ré-assertion de cohérence (promesse de l'en-tête) : l'hôte que la
+            // gouvernance a vu (host, via host_of) DOIT être celui de l'URL exécutée.
+            // Tient par construction (plan_action est le seul constructeur), mais le
+            // type pub(crate) permettrait un Navigate incohérent d'un futur appelant,
+            // et l'audit attribuerait alors la nav au mauvais hôte (Fable 5).
+            if crate::domain::host_of(url).as_deref() != Some(host.as_str()) {
+                return Err("browser.navigate: incohérence hôte/URL — refusé".to_string());
+            }
             // Page.enable (pour les events de chargement à venir) puis Page.navigate.
             // `url` est un PARAMÈTRE CDP, jamais interpolé ; son hôte a déjà passé
             // `[rule.domains]` en amont. (La synchronisation sur le chargement complet —
@@ -239,17 +257,39 @@ pub(crate) fn run_action<C: CdpChannel>(
                 }),
                 None,
             )?;
+            // FAIL-CLOSED (Fable 5) : une page hostile peut faire LEVER l'expression
+            // (getters piégés sur documentElement/outerHTML) → CDP répond « succès »
+            // avec `exceptionDetails` et un `result` SANS `value`. Sans ce contrôle on
+            // renverrait Ok({html:""}) = CLOAKING : la page se présente vide à l'agent
+            // qui audite tout en s'affichant normalement à l'humain, et la décision
+            // suivante s'appuie sur une observation forgée.
+            if r.get("exceptionDetails").is_some() {
+                return Err(
+                    "browser.read: l'évaluation a levé une exception côté page — refusé"
+                        .to_string(),
+                );
+            }
             let html = r
                 .get("result")
                 .and_then(|x| x.get("value"))
                 .and_then(Value::as_str)
-                .unwrap_or_default();
+                .ok_or_else(|| {
+                    "browser.read: résultat CDP sans chaîne 'value' — refusé".to_string()
+                })?;
             // Contenu de page = ENTRÉE HOSTILE, renvoyé comme donnée opaque.
             Ok(json!({ "html": html }))
         }
         BrowserAction::Screenshot => {
             let r = session.call("Page.captureScreenshot", json!({ "format": "png" }), None)?;
-            let data = r.get("data").and_then(Value::as_str).unwrap_or_default();
+            // Fail-closed : une donnée absente/vide/non-chaîne est une erreur, pas une
+            // capture « vide » silencieuse (Fable 5).
+            let data = r
+                .get("data")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    "browser.screenshot: réponse CDP sans données PNG — refusé".to_string()
+                })?;
             Ok(json!({ "screenshot_png_base64": data }))
         }
         BrowserAction::Click { .. } | BrowserAction::Fill { .. } | BrowserAction::Submit { .. } => {
@@ -378,6 +418,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("incrément suivant"));
+    }
+
+    #[test]
+    fn read_fails_closed_on_a_page_side_exception_no_cloaking() {
+        // Page hostile : Runtime.evaluate répond « succès » avec exceptionDetails et sans
+        // value → on doit refuser, PAS renvoyer un html vide (cloaking).
+        let chan = FakeCdp::new(vec![cdp_frame(json!({
+            "id": 1,
+            "result": {"result": {"type": "object"}, "exceptionDetails": {"text": "Uncaught"}}
+        }))]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(&mut s, &BrowserAction::Read)
+            .unwrap_err()
+            .contains("exception"));
+    }
+
+    #[test]
+    fn read_fails_closed_when_the_value_is_missing_or_not_a_string() {
+        let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {"result": {}}}))]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(&mut s, &BrowserAction::Read)
+            .unwrap_err()
+            .contains("sans chaîne 'value'"));
+    }
+
+    #[test]
+    fn screenshot_fails_closed_on_missing_data() {
+        let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {}}))]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(&mut s, &BrowserAction::Screenshot)
+            .unwrap_err()
+            .contains("sans données PNG"));
+    }
+
+    #[test]
+    fn navigate_refuses_a_host_url_mismatch() {
+        // Un Navigate incohérent (host ne correspond pas à l'URL) est refusé avant tout
+        // appel CDP — l'audit ne peut pas être trompé sur l'hôte réellement atteint.
+        let chan = FakeCdp::new(vec![]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Navigate {
+                host: "github.com".into(),
+                url: "https://evil.example/x".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("incohérence hôte/URL"), "{err}");
     }
 
     #[test]
