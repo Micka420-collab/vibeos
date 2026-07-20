@@ -220,6 +220,10 @@ fn validate_value(val: &str) -> Result<String, String> {
 /// `page` vient de `vibed`/du transport (jamais de l'agent) et est du JSON opaque du pair —
 /// porté comme paramètre CDP, jamais interpolé.
 ///
+/// **Invariant à ré-asserter au transport (Fable 5)** : `run_browser` — l'appelant unique —
+/// DOIT passer le `sessionId` de l'attach de SA propre session ; sinon l'audit attribuerait
+/// l'action à la mauvaise page. Non vérifiable ici (`page` est opaque du pair), d'où l'invariant.
+///
 /// Reste à porter par l'incrément live (Fable 5) : la **synchronisation sur le chargement**
 /// (`Page.loadEventFired` filtré sur le `frameId` renvoyé) doit atterrir AVANT le câblage
 /// live — sinon un `read` juste après un `navigate` peut capturer la page PRÉCÉDENTE
@@ -230,6 +234,12 @@ pub(crate) fn run_action<C: CdpChannel>(
     action: &BrowserAction,
     page: &str,
 ) -> Result<Value, String> {
+    // Un sessionId de page vide n'est jamais légitime (`attach_page` rend une chaîne non
+    // vide) : refuser tôt donne une erreur vibed claire plutôt qu'un refus chromium
+    // cryptique en aval (Fable 5).
+    if page.is_empty() {
+        return Err("browser: run_action sans sessionId de page — refusé".to_string());
+    }
     match action {
         BrowserAction::Navigate { host, url } => {
             // Ré-assertion de cohérence (promesse de l'en-tête) : l'hôte que la
@@ -422,6 +432,12 @@ mod tests {
         let mut s = CdpSession::new(chan);
         let out = run_action(&mut s, &BrowserAction::Screenshot, "PAGE-SID").unwrap();
         assert_eq!(out["screenshot_png_base64"], "aGVsbG8=");
+        // Golden : la capture cible la PAGE (sessionId threadé) — verrouillé comme les
+        // autres trames pour qu'une régression future ne repasse pas ce site en None.
+        let sent = s.into_channel().sent;
+        let shot: Value = serde_json::from_slice(&sent[0][..sent[0].len() - 1]).unwrap();
+        assert_eq!(shot["method"], "Page.captureScreenshot");
+        assert_eq!(shot["sessionId"], "PAGE-SID");
     }
 
     #[test]
@@ -437,6 +453,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("incrément suivant"));
+    }
+
+    #[test]
+    fn an_empty_page_session_id_is_refused_before_any_command() {
+        // Garde-fou : un sessionId de page vide (jamais produit par attach_page) est refusé
+        // en tête, avec une erreur vibed claire, avant toute émission CDP (Fable 5).
+        let chan = FakeCdp::new(vec![]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(&mut s, &BrowserAction::Read, "").unwrap_err();
+        assert!(err.contains("sans sessionId de page"), "{err}");
+        assert!(
+            s.into_channel().sent.is_empty(),
+            "aucune commande ne doit partir sans sessionId de page"
+        );
     }
 
     #[test]
@@ -487,6 +517,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("incohérence hôte/URL"), "{err}");
+        // Preuve DIRECTE : aucune trame n'a été émise avant le refus (pas seulement
+        // « inbox vide ⇒ ç'aurait échoué autrement »).
+        assert!(
+            s.into_channel().sent.is_empty(),
+            "aucune commande CDP ne doit partir avant le refus host/URL"
+        );
     }
 
     #[test]
