@@ -204,6 +204,39 @@ pub struct DomainConstraints {
     pub only: Option<Vec<String>>,
 }
 
+/// One allowed deploy target inside `[rule.deploy]`: an immutable provider +
+/// target-id pair (ADR-021 lock 1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployAllow {
+    /// `fly` | `vercel` | `railway`.
+    pub provider: String,
+    /// IMMUTABLE target id (Fly app-id, Vercel project-id, Railway service-id) —
+    /// never a display name (renameable → confusable). Its identity is relative
+    /// to the org of the sealed token, which the agent cannot swap.
+    pub target: String,
+}
+
+/// `[rule.deploy]` sub-table: the deploy-target allow-list (ADR-021 lock 1).
+///
+/// # A VERDICT, not a predicate — and the ONLY gate that can grant a deploy
+///
+/// `deploy.*` acts OUTSIDE, with a cloud token, irreversibly. So unlike the
+/// `[rule.domains]` predicate (off-list → try the next rule), this is a
+/// **verdict** like `[rule.services].allowed`: a deploy whose `(provider,
+/// target)` is not in `allowed` is DENIED on the spot, before the tier floor.
+/// And a deploy-bearing call under a rule that carries NO `[rule.deploy]` is
+/// refused too (see `apply_rule`) — so no laxer catch-all rule can ever grant a
+/// deploy by rule ordering (the bypass Fable 5 flagged for ADR-021). Listing
+/// every allowed pair in ONE rule keeps the verdict and still supports several
+/// providers/targets.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployConstraints {
+    /// The exhaustive allow-list. A deploy call must match one pair EXACTLY.
+    pub allowed: Vec<DeployAllow>,
+}
+
 /// One canonical policy rule. Unknown extra keys are ignored (informational
 /// fields like `description` are welcome in policy files), but the required
 /// fields and the T2/T3 approval floor are enforced at load time.
@@ -225,6 +258,8 @@ pub struct Rule {
     pub services: Option<ServiceConstraints>,
     #[serde(default)]
     pub domains: Option<DomainConstraints>,
+    #[serde(default)]
+    pub deploy: Option<DeployConstraints>,
 }
 
 /// On-disk shape of one policy file (see module docs for the full schema).
@@ -263,7 +298,19 @@ impl fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
-/// Non-tool context of a call, used to enforce path/service constraints.
+/// A deploy call's target as the policy sees it: the provider and immutable
+/// target id, from a `deploy.*` tool's arguments (see `derive_deploy` in
+/// mcp.rs). `Some` for EVERY deploy-bearing call — even one whose args are
+/// missing (then the fields are empty and the `[rule.deploy]` verdict refuses
+/// it), so a deploy with no establishable target can never slip past the
+/// allow-list. `None` for any non-deploy tool.
+#[derive(Debug, Clone, Copy)]
+pub struct DeployTarget<'a> {
+    pub provider: &'a str,
+    pub target: &'a str,
+}
+
+/// Non-tool context of a call, used to enforce path/service/deploy constraints.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CallContext<'a> {
     /// Lexically normalized absolute path (see `glob::normalize_path`),
@@ -280,6 +327,10 @@ pub struct CallContext<'a> {
     /// unparseable URL falls through to the untrusted rule instead of
     /// borrowing a trusted rule's tier. See `rule_domain_applies`.
     pub domain: Option<&'a str>,
+    /// Deploy provider + target, for a `deploy.*` call. `None` for non-deploy
+    /// tools; `Some` (possibly with empty fields) for every deploy call — the
+    /// `[rule.deploy]` verdict then requires an exact allow-list match.
+    pub deploy: Option<DeployTarget<'a>>,
 }
 
 /// Immutable-after-load rule set. Rebuilt on daemon restart
@@ -462,6 +513,26 @@ fn apply_rule(rule: &Rule, registry_tier: Tier, ctx: CallContext<'_>) -> Decisio
                     }
                 }
             }
+            // Deploy verdict (ADR-021 lock 1): a `deploy.*` call is granted ONLY
+            // by a rule that carries `[rule.deploy]` and whose allow-list holds
+            // this exact `(provider, target)` pair. Denied HERE, before the tier
+            // floor, so an off-list (or empty) target never reaches approval AND
+            // no laxer rule (one without `[rule.deploy]`) can grant a deploy by
+            // rule ordering. Targets are matched verbatim (immutable ids).
+            if let Some(dt) = ctx.deploy {
+                match rule.deploy.as_ref() {
+                    None => return Decision::Deny,
+                    Some(constraints) => {
+                        let ok = constraints
+                            .allowed
+                            .iter()
+                            .any(|a| a.provider == dt.provider && a.target == dt.target);
+                        if !ok {
+                            return Decision::Deny;
+                        }
+                    }
+                }
+            }
             // Tier floor: a rule can never lower the intrinsic tier of a tool,
             // and T2/T3 always require a human in the loop.
             let effective_tier = rule.tier.max(registry_tier);
@@ -531,6 +602,60 @@ fn parse_and_validate(src: &str) -> Result<Vec<Rule>, FileError> {
                 )));
             }
         }
+        // A `[rule.deploy]` verdict that allowed nothing (or listed an unknown
+        // provider / empty target) would silently grant or block deploys in ways
+        // the operator never intended. Refuse to start — same fail-closed stance
+        // as the domain allow-list above (ADR-021 lock 1).
+        if let Some(deploy) = rule.deploy.as_ref() {
+            if deploy.allowed.is_empty() {
+                return Err(FileError::Invalid(format!(
+                    "rule '{}': empty '[rule.deploy].allowed' — a deploy verdict \
+                     that grants nothing; list at least one (provider, target)",
+                    rule.id
+                )));
+            }
+            for a in &deploy.allowed {
+                if !matches!(a.provider.as_str(), "fly" | "vercel" | "railway") {
+                    return Err(FileError::Invalid(format!(
+                        "rule '{}': unknown deploy provider {:?} (expected fly, \
+                         vercel or railway)",
+                        rule.id, a.provider
+                    )));
+                }
+                if a.target.trim().is_empty() {
+                    return Err(FileError::Invalid(format!(
+                        "rule '{}': empty deploy target for provider {:?} (use the \
+                         IMMUTABLE id, never a display name)",
+                        rule.id, a.provider
+                    )));
+                }
+            }
+        }
+        // A `[rule.deploy]` allow rule MUST be T2+ (Fable 5, defence in depth):
+        // deploy acts OUTSIDE with a cloud token, so the human-approval floor must
+        // apply. Without this, the day a `deploy.*` tool is registered, a
+        // mis-tiered rule could grant a LISTED target with no human in the loop —
+        // the floor would rest entirely on the tool's registry tier.
+        if rule.deploy.is_some() && rule.action == Action::Allow && rule.tier < Tier::T2 {
+            return Err(FileError::Invalid(format!(
+                "rule '{}': '[rule.deploy]' with action=allow requires tier T2+ \
+                 (deploy acts outside with a cloud token; the human-approval floor \
+                 must apply)",
+                rule.id
+            )));
+        }
+        // `[rule.deploy]` and `[rule.domains]` can never both be meaningful: a
+        // deploy tool carries no host (`derive_deploy` sets no domain), so the
+        // domain scope would silently make the whole rule dead. Refuse it — same
+        // "an allow-list that quietly grants nothing" stance as above (Fable 5).
+        if rule.deploy.is_some() && rule.domains.is_some() {
+            return Err(FileError::Invalid(format!(
+                "rule '{}': carries both '[rule.deploy]' and '[rule.domains]' — a \
+                 deploy tool has no host, so the domain scope would make the rule \
+                 silently inapplicable; split them into separate rules",
+                rule.id
+            )));
+        }
     }
     Ok(file.rule)
 }
@@ -563,7 +688,125 @@ mod tests {
         path: None,
         service: None,
         domain: None,
+        deploy: None,
     };
+
+    /// A deploy call context for `(provider, target)`.
+    fn deploy_ctx<'a>(provider: &'a str, target: &'a str) -> CallContext<'a> {
+        CallContext {
+            deploy: Some(DeployTarget { provider, target }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn deploy_verdict_grants_only_listed_pairs() {
+        let e = engine(
+            r#"
+            [[rule]]
+            id = "deploy"
+            tools = ["deploy.apply", "deploy.plan"]
+            tier = "T2"
+            action = "allow"
+            approval = "human"
+            [rule.deploy]
+            allowed = [
+              { provider = "fly", target = "app-A" },
+              { provider = "vercel", target = "proj-X" },
+            ]
+            "#,
+        );
+        // A listed pair reaches the T2 approval floor (never Allow outright), and
+        // ONE rule covers several providers.
+        assert_eq!(
+            e.evaluate("deploy.apply", Some(Tier::T2), deploy_ctx("fly", "app-A")),
+            Decision::RequireApproval
+        );
+        assert_eq!(
+            e.evaluate(
+                "deploy.plan",
+                Some(Tier::T2),
+                deploy_ctx("vercel", "proj-X")
+            ),
+            Decision::RequireApproval
+        );
+        // Off-list target, off-list provider, and an empty (missing-arg) target
+        // are all DENIED by the verdict, before the tier floor.
+        assert_eq!(
+            e.evaluate("deploy.apply", Some(Tier::T2), deploy_ctx("fly", "app-B")),
+            Decision::Deny
+        );
+        assert_eq!(
+            e.evaluate(
+                "deploy.apply",
+                Some(Tier::T2),
+                deploy_ctx("railway", "app-A")
+            ),
+            Decision::Deny
+        );
+        assert_eq!(
+            e.evaluate("deploy.apply", Some(Tier::T2), deploy_ctx("fly", "")),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn a_deploy_under_a_rule_without_deploy_constraints_is_denied() {
+        // A broad allow rule carrying NO [rule.deploy] must never grant a deploy
+        // — no bypass by rule ordering (ADR-021 lock 1).
+        let e = engine(
+            r#"
+            [[rule]]
+            id = "broad"
+            tools = ["deploy.*", "*"]
+            tier = "T2"
+            action = "allow"
+            approval = "human"
+            "#,
+        );
+        assert_eq!(
+            e.evaluate("deploy.apply", Some(Tier::T2), deploy_ctx("fly", "app-A")),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn deploy_rule_load_validation_is_fail_closed() {
+        let base = |dep: &str| {
+            format!(
+                "[[rule]]\nid=\"d\"\ntools=[\"deploy.apply\"]\ntier=\"T2\"\n\
+                 action=\"allow\"\napproval=\"human\"\n[rule.deploy]\n{dep}"
+            )
+        };
+        assert!(parse_err(&base("allowed=[]")).contains("empty '[rule.deploy].allowed'"));
+        assert!(
+            parse_err(&base("allowed=[{provider=\"aws\", target=\"x\"}]"))
+                .contains("unknown deploy provider")
+        );
+        assert!(
+            parse_err(&base("allowed=[{provider=\"fly\", target=\"\"}]"))
+                .contains("empty deploy target")
+        );
+        // An unknown key in the pair is refused (deny_unknown_fields).
+        assert!(parse_err(&base(
+            "allowed=[{provider=\"fly\", target=\"x\", region=\"eu\"}]"
+        ))
+        .contains("unknown"));
+        // A [rule.deploy] allow rule below T2 is refused — the human floor MUST
+        // apply to a cloud deploy (Fable 5, defence in depth).
+        assert!(parse_err(
+            "[[rule]]\nid=\"d\"\ntools=[\"deploy.apply\"]\ntier=\"T1\"\naction=\"allow\"\n\
+             [rule.deploy]\nallowed=[{provider=\"fly\", target=\"x\"}]"
+        )
+        .contains("requires tier T2+"));
+        // A rule carrying both deploy and domains is refused (dead-rule trap).
+        assert!(parse_err(
+            "[[rule]]\nid=\"d\"\ntools=[\"deploy.apply\"]\ntier=\"T2\"\naction=\"allow\"\n\
+             approval=\"human\"\n[rule.deploy]\nallowed=[{provider=\"fly\", target=\"x\"}]\n\
+             [rule.domains]\nonly=[\"x.com\"]"
+        )
+        .contains("both"));
+    }
 
     fn host_ctx(host: &str) -> CallContext<'_> {
         CallContext {
