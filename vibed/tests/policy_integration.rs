@@ -24,6 +24,7 @@ const NO_CTX: CallContext<'_> = CallContext {
     path: None,
     service: None,
     domain: None,
+    deploy: None,
 };
 
 #[test]

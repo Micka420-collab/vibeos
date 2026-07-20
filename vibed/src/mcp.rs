@@ -426,6 +426,15 @@ async fn handle_tools_call(
     let raw_url = args.get("url").and_then(Value::as_str);
     let domain_owned = derive_domain(&name, raw_url);
     let domain = domain_owned.as_deref();
+    let raw_provider = args.get("provider").and_then(Value::as_str);
+    let raw_target = args.get("target").and_then(Value::as_str);
+    let deploy_owned = derive_deploy(&name, raw_provider, raw_target);
+    let deploy = deploy_owned
+        .as_ref()
+        .map(|(p, t)| crate::policy::DeployTarget {
+            provider: p,
+            target: t,
+        });
 
     // Human-readable, non-secret target recorded in the audit trail so an
     // action's subject (which file / unit / package) is recoverable in
@@ -529,6 +538,7 @@ async fn handle_tools_call(
         path: normalized_path.as_deref(),
         service,
         domain,
+        deploy,
     };
     let decision = policy.evaluate(&name, tier, ctx);
 
@@ -1116,6 +1126,40 @@ fn derive_domain(tool: &str, raw_url: Option<&str>) -> Option<String> {
     crate::domain::host_of(raw_url?)
 }
 
+/// Does this tool carry a deploy `(provider, target)` the policy governs?
+/// Same reasoning as `unit_bearing`/`url_bearing`: a `provider`/`target` on a
+/// tool that has no business deploying is caller-supplied noise and must never
+/// reach a `[rule.deploy]` verdict — otherwise an agent appends
+/// `"provider": "fly", "target": "…"` to an unrelated call to borrow a deploy
+/// rule's tier. Only `deploy.*` tools bear a deploy target.
+pub(crate) fn deploy_bearing(tool: &str) -> bool {
+    tool.starts_with("deploy.")
+}
+
+/// The `(provider, target)` a `deploy.*` call targets, AS THE POLICY SEES IT.
+/// Twin of `derive_service`/`derive_domain`: the ONE derivation both the real
+/// decision (`handle_tools_call`) and the dry-run hint call, so they cannot
+/// drift.
+///
+/// Returns `Some` for EVERY deploy-bearing tool — even one whose `provider`/
+/// `target` argument is missing, in which case the field is the empty string.
+/// That is deliberate: an empty target matches no `[rule.deploy]` allow-list
+/// entry, so the verdict DENIES a deploy with no establishable target rather
+/// than letting it slip past (fail-closed). `None` only for non-deploy tools.
+fn derive_deploy(
+    tool: &str,
+    raw_provider: Option<&str>,
+    raw_target: Option<&str>,
+) -> Option<(String, String)> {
+    if !deploy_bearing(tool) {
+        return None;
+    }
+    Some((
+        raw_provider.unwrap_or_default().to_string(),
+        raw_target.unwrap_or_default().to_string(),
+    ))
+}
+
 fn list_tools() -> Vec<Value> {
     tool_catalog()
         .into_iter()
@@ -1230,10 +1274,17 @@ fn policy_check(args: &Value, policy: &PolicyEngine) -> Result<String, String> {
     // "require_approval", and the daemon then denied that very call).
     let service_owned = derive_service(tool, target);
     let domain_owned = derive_domain(tool, target);
+    // The dry-run hint takes ONE `target`, not the (provider, target) a deploy
+    // needs, so it does not model the `[rule.deploy]` verdict: `deploy: None`.
+    // Harmless — deploy tools are T2, so the hint stays `require_approval`; the
+    // real path derives the pair and enforces the verdict + approval floor. Per
+    // this function's contract a hint may only ever be laxer, never let a T2
+    // call through unapproved.
     let ctx = CallContext {
         path: normalized.as_deref(),
         service: service_owned.as_deref(),
         domain: domain_owned.as_deref(),
+        deploy: None,
     };
     let decision = match policy.evaluate(tool, tier, ctx) {
         Decision::Allow => "allow",
@@ -2110,6 +2161,35 @@ mod tests {
             derive_service("svc.restart", Some("../etc/passwd")).as_deref(),
             Some("../etc/passwd")
         );
+    }
+
+    #[test]
+    fn derive_deploy_marks_every_deploy_call_and_no_other() {
+        // A deploy tool ALWAYS carries a target — even with missing args, so the
+        // [rule.deploy] verdict can refuse an empty (unestablished) target rather
+        // than let it slip past the allow-list.
+        assert_eq!(
+            derive_deploy("deploy.apply", Some("fly"), Some("app-A")),
+            Some(("fly".to_string(), "app-A".to_string()))
+        );
+        assert_eq!(
+            derive_deploy("deploy.plan", None, None),
+            Some((String::new(), String::new()))
+        );
+        // A smuggled provider/target on a NON-deploy tool is caller noise: it must
+        // never reach a [rule.deploy] verdict (cannot borrow a deploy rule's tier).
+        assert_eq!(
+            derive_deploy("svc.restart", Some("fly"), Some("app-A")),
+            None
+        );
+        assert_eq!(derive_deploy("fs.read", Some("fly"), Some("app-A")), None);
+        assert_eq!(
+            derive_deploy("browser.navigate", Some("fly"), Some("x")),
+            None
+        );
+        // deploy_bearing agrees.
+        assert!(deploy_bearing("deploy.apply") && deploy_bearing("deploy.plan"));
+        assert!(!deploy_bearing("svc.restart") && !deploy_bearing("browser.navigate"));
     }
 
     #[test]

@@ -415,6 +415,7 @@ fn recheck_policy_canonical(
         path: Some(canonical),
         service: None,
         domain: None,
+        deploy: None,
     };
     match policy.evaluate(tool, tier, ctx) {
         Decision::Allow => Ok(()),
