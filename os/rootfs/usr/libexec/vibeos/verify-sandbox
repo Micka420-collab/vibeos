@@ -1,0 +1,104 @@
+#!/usr/bin/python3
+"""verify-sandbox — prove the ADR-019 sandbox confines, on THIS booted host.
+
+Calls the governed ``sandbox.probe`` tool over vibed's MCP socket for both
+profile classes (deploy, browser) and prints a PASS/FAIL verdict. Read-only: it
+runs the confinement self-test, changes nothing.
+
+``confined: false`` means the hardening profile did NOT take on this
+kernel/config — the thing to fix BEFORE trusting deploy.* or browser.* to the
+same transient-service sandbox. This is the on-target check ADR-019/021/022 call
+for: the daemon side is unit-tested, but whether systemd/SELinux/the kernel
+actually confine the helper can only be observed on real hardware.
+
+Run as a user vibed's policy admits (``sandbox.probe`` is T1-allow). Override the
+socket with VIBED_SOCKET for a dev run. Exit: 0 all confined, 1 a class failed,
+2 could not reach/parse vibed.
+"""
+
+import json
+import os
+import socket
+import sys
+
+SOCKET = os.environ.get("VIBED_SOCKET", "/run/vibed/mcp.sock")
+PROTOCOL_VERSION = "2024-11-05"
+
+
+def interpret(resp):
+    """Return ``(ok, human_detail)`` for one sandbox.probe JSON-RPC response."""
+    if "error" in resp:
+        err = resp["error"]
+        msg = err.get("message", err) if isinstance(err, dict) else err
+        return False, f"RPC error: {msg}"
+    result = resp.get("result", {})
+    content = result.get("content", [])
+    text = content[0].get("text", "") if content else ""
+    if result.get("isError"):
+        return False, f"tool refused/failed: {text}"
+    try:
+        report = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False, f"unparseable tool output: {text[:200]!r}"
+    if report.get("confined") is True:
+        return True, "confined (distinct uid, seccomp filter, caps dropped, namespaces as expected)"
+    issues = report.get("issues") or []
+    return False, "NOT confined — " + ("; ".join(issues) if issues else "no reason given")
+
+
+def main():
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(60)
+        sock.connect(SOCKET)
+    except OSError as exc:
+        print(f"verify-sandbox: cannot connect to {SOCKET}: {exc}", file=sys.stderr)
+        print("  is vibed running, and are you allowed to reach its socket?", file=sys.stderr)
+        return 2
+    conn = sock.makefile("rw", encoding="utf-8", newline="\n")
+
+    def call(method, params, req_id):
+        conn.write(json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}))
+        conn.write("\n")
+        conn.flush()
+        line = conn.readline()
+        if not line:
+            print("verify-sandbox: vibed closed the connection", file=sys.stderr)
+            sys.exit(2)
+        return json.loads(line)
+
+    init = call(
+        "initialize",
+        {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "verify-sandbox", "version": "1"},
+        },
+        1,
+    )
+    if "error" in init:
+        print(f"verify-sandbox: initialize failed: {init['error']}", file=sys.stderr)
+        return 2
+    # A notification (no id) — vibed sends no response.
+    conn.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}))
+    conn.write("\n")
+    conn.flush()
+
+    all_ok = True
+    for req_id, cls in enumerate(("deploy", "browser"), start=10):
+        resp = call("tools/call", {"name": "sandbox.probe", "arguments": {"class": cls}}, req_id)
+        ok, detail = interpret(resp)
+        all_ok = all_ok and ok
+        print(f"[{'PASS' if ok else 'FAIL'}] sandbox.probe class={cls}: {detail}")
+
+    print()
+    if all_ok:
+        print("verify-sandbox: the ADR-019 sandbox CONFINES on this host.")
+        return 0
+    print("verify-sandbox: the sandbox did NOT fully confine — see the issues above.", file=sys.stderr)
+    print("  Do NOT wire deploy.*/browser.* onto this sandbox until it passes.", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
