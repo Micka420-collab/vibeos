@@ -138,6 +138,55 @@ pub fn chromium_argv(chromium_bin: &str, profile_dir: &str, proxy: Option<&str>)
     argv
 }
 
+/// Crée une page vierge et s'y **attache**, renvoyant le `sessionId` que le pilotage des
+/// pages (`Page.*`/`Runtime.*`) doit porter (protocole « flat »).
+///
+/// Sur `--remote-debugging-pipe`, la connexion initiale est la cible **navigateur** ; sans
+/// ce `sessionId`, le vrai `chromium` **refuse** toute commande de page (finding Fable 5
+/// sur `run_action`, qui utilisait `session_id: None`). `run_browser` appellera ceci une
+/// fois, puis passera le `sessionId` à chaque `session.call` de la BrowserAction.
+///
+/// **Contrat sur `Err` (Fable 5)** : un échec ⇒ **jeter la session ET l'unité transitoire**,
+/// jamais réessayer `attach_page` sur la même session. Le poison de [`crate::cdp::CdpSession`]
+/// ne couvre que le chemin **protocole** ; une erreur applicative (ou un `sessionId`/`targetId`
+/// absent) laisse la session saine mais peut déjà avoir créé une cible orpheline `about:blank`
+/// — un réessai en fuirait une de plus. La cible orpheline meurt de toute façon avec l'unité
+/// (`RuntimeMaxSec`/`MemoryMax`), donc pas de `Target.closeTarget` compensatoire (qui pourrait
+/// lui-même échouer/empoisonner — mauvais échange).
+///
+/// **Invariant mono-locataire (Fable 5, à tenir aux incréments live)** : un `chromium` par
+/// session, profil éphémère neuf, **une** page dans le contexte par défaut — donc pas d'autre
+/// cible avec qui partager cookies/stockage. Le jour où un `chromium` sert **plusieurs** tâches,
+/// `Target.createBrowserContext` (+ `Target.setAutoAttach` pour popups/OOPIF) devient
+/// **obligatoire**. `sessionId`/`targetId` sont du **JSON opaque du pair** : un `chromium`
+/// hostile peut mentir dessus (il ne fait que mal router SES propres commandes) — ne jamais les
+/// interpoler dans un shell/chemin/log non assaini en aval.
+pub fn attach_page<C: crate::cdp::CdpChannel>(
+    session: &mut crate::cdp::CdpSession<C>,
+) -> Result<String, String> {
+    let created = session.call(
+        "Target.createTarget",
+        serde_json::json!({ "url": "about:blank" }),
+        None,
+    )?;
+    let target_id = created
+        .get("targetId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "browser: Target.createTarget sans targetId — refusé".to_string())?;
+    // `flatten: true` = protocole plat : les messages de la page portent un `sessionId`
+    // sur la MÊME connexion (pas de socket séparé).
+    let attached = session.call(
+        "Target.attachToTarget",
+        serde_json::json!({ "targetId": target_id, "flatten": true }),
+        None,
+    )?;
+    attached
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "browser: Target.attachToTarget sans sessionId — refusé".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +342,146 @@ mod tests {
             .call("Page.enable", serde_json::json!({}), None)
             .unwrap();
         assert_eq!(result, serde_json::json!({"ok": true}));
+        peer.join().unwrap();
+    }
+
+    /// Lit une trame CDP NUL-délimitée sur `pr` (octet par octet, comme un vrai pair
+    /// qui n'a pas de cadre supérieur) et la désérialise. Sert les faux chromium.
+    fn read_cdp_frame(pr: &mut File) -> serde_json::Value {
+        let mut frame = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = pr.read(&mut byte).unwrap();
+            assert_eq!(n, 1, "pair CDP : EOF avant la fin de trame");
+            if byte[0] == 0 {
+                break;
+            }
+            frame.push(byte[0]);
+        }
+        serde_json::from_slice(&frame).expect("trame de commande JSON valide")
+    }
+
+    #[test]
+    fn attach_page_creates_a_target_then_attaches_and_returns_the_session_id() {
+        // Faux « chromium » sur de VRAIS pipes : répond à la séquence EXACTE d'attach_page
+        // — Target.createTarget → {targetId}, puis Target.attachToTarget (flat, portant CE
+        // targetId) → {sessionId}. Prouve que create+attach s'assemblent sans chromium et
+        // que le targetId est bien propagé de la 1re commande à la 2de.
+        use crate::cdp::CdpSession;
+
+        let (agent_r, peer_w) = os_pipe(); // chromium→agent
+        let (peer_r, agent_w) = os_pipe(); // agent→chromium
+
+        let peer = std::thread::spawn(move || {
+            let mut pr = File::from(peer_r);
+            let mut pw = File::from(peer_w);
+
+            // 1) createTarget sur about:blank, AU NIVEAU NAVIGATEUR (pas de sessionId) →
+            //    renvoie un targetId corrélé sur l'id émis.
+            let c1 = read_cdp_frame(&mut pr);
+            assert_eq!(c1["method"], "Target.createTarget");
+            assert_eq!(
+                c1["params"]["url"], "about:blank",
+                "create doit viser about:blank"
+            );
+            assert!(
+                c1.get("sessionId").is_none(),
+                "create doit rester au niveau navigateur"
+            );
+            let id1 = c1["id"].as_u64().unwrap();
+            pw.write_all(
+                format!("{{\"id\":{id1},\"result\":{{\"targetId\":\"T1\"}}}}\0").as_bytes(),
+            )
+            .unwrap();
+
+            // 2) attachToTarget — DOIT porter le targetId reçu et flatten:true (protocole plat),
+            //    et rester AU NIVEAU NAVIGATEUR (c'est lui qui établit la session de page).
+            let c2 = read_cdp_frame(&mut pr);
+            assert_eq!(c2["method"], "Target.attachToTarget");
+            assert_eq!(
+                c2["params"]["targetId"], "T1",
+                "attach doit cibler le targetId créé"
+            );
+            assert_eq!(
+                c2["params"]["flatten"], true,
+                "attach doit demander le protocole plat"
+            );
+            assert!(
+                c2.get("sessionId").is_none(),
+                "attach doit rester au niveau navigateur"
+            );
+            let id2 = c2["id"].as_u64().unwrap();
+            pw.write_all(
+                format!("{{\"id\":{id2},\"result\":{{\"sessionId\":\"S1\"}}}}\0").as_bytes(),
+            )
+            .unwrap();
+        });
+
+        let mut session = CdpSession::new(PipeChannel::from_fds(agent_w, agent_r));
+        let sid = attach_page(&mut session).unwrap();
+        assert_eq!(sid, "S1");
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn attach_page_refuses_an_attach_without_a_session_id() {
+        // Fail-closed SYMÉTRIQUE du test createTarget : la cible est créée (targetId T1) mais
+        // attachToTarget répond SANS sessionId → attach_page doit échouer sur la 2de étape,
+        // jamais renvoyer une session vide. Couvre la branche « sessionId — refusé ».
+        use crate::cdp::CdpSession;
+
+        let (agent_r, peer_w) = os_pipe();
+        let (peer_r, agent_w) = os_pipe();
+
+        let peer = std::thread::spawn(move || {
+            let mut pr = File::from(peer_r);
+            let mut pw = File::from(peer_w);
+            let c1 = read_cdp_frame(&mut pr);
+            assert_eq!(c1["method"], "Target.createTarget");
+            let id1 = c1["id"].as_u64().unwrap();
+            pw.write_all(
+                format!("{{\"id\":{id1},\"result\":{{\"targetId\":\"T1\"}}}}\0").as_bytes(),
+            )
+            .unwrap();
+            let c2 = read_cdp_frame(&mut pr);
+            assert_eq!(c2["method"], "Target.attachToTarget");
+            let id2 = c2["id"].as_u64().unwrap();
+            pw.write_all(format!("{{\"id\":{id2},\"result\":{{}}}}\0").as_bytes())
+                .unwrap(); // pas de sessionId
+        });
+
+        let mut session = CdpSession::new(PipeChannel::from_fds(agent_w, agent_r));
+        let err = attach_page(&mut session).unwrap_err();
+        assert!(
+            err.contains("sessionId"),
+            "doit refuser sans sessionId : {err}"
+        );
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn attach_page_refuses_a_create_target_without_a_target_id() {
+        // Fail-closed : un pair qui répond à createTarget SANS targetId (createTarget id=1
+        // déterministe) doit faire échouer attach_page AVANT tout attach — jamais deviner.
+        use crate::cdp::CdpSession;
+
+        let (agent_r, peer_w) = os_pipe();
+        let (peer_r, agent_w) = os_pipe();
+
+        let peer = std::thread::spawn(move || {
+            let mut pr = File::from(peer_r);
+            let mut pw = File::from(peer_w);
+            let c1 = read_cdp_frame(&mut pr);
+            assert_eq!(c1["method"], "Target.createTarget");
+            pw.write_all(b"{\"id\":1,\"result\":{}}\0").unwrap(); // pas de targetId
+        });
+
+        let mut session = CdpSession::new(PipeChannel::from_fds(agent_w, agent_r));
+        let err = attach_page(&mut session).unwrap_err();
+        assert!(
+            err.contains("targetId"),
+            "doit refuser sans targetId : {err}"
+        );
         peer.join().unwrap();
     }
 }
