@@ -196,7 +196,7 @@ FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 #
 # Pour re-résoudre le digest courant :
 #   skopeo inspect --format '{{.Digest}}' docker://quay.io/fedora/fedora-kinoite:44
-FROM quay.io/fedora/fedora-kinoite:44@sha256:892ab9609ef5a5475ca7abfcf74eade113a5bbbea77f6485ec58a015c202865a
+FROM quay.io/fedora/fedora-kinoite:44@sha256:4ff9e301fb55acad6b95de96626d61f68f3e46c47cd27b029e1a99572d153893
 
 # Version de l'image, injectée par la CI depuis le tag (`v0.2.1-dev` -> `0.2.1-dev`).
 #
@@ -217,7 +217,7 @@ LABEL org.opencontainers.image.title="VibeOS" \
       org.opencontainers.image.description="AI-native, security-first, immutable Linux distribution for vibecoding" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.source="https://github.com/Micka420-collab/vibeos" \
-      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:892ab9609ef5a5475ca7abfcf74eade113a5bbbea77f6485ec58a015c202865a"
+      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:4ff9e301fb55acad6b95de96626d61f68f3e46c47cd27b029e1a99572d153893"
 
 # TARGETARCH is auto-populated by podman/buildah when building with --platform
 # (amd64 | arm64). Defaulted to amd64 for plain single-arch local builds.
@@ -617,13 +617,25 @@ RUN set -eux \
 #    présente comme immuable et vérifiable. `noscripts` n'altère aucun fichier.
 #    Transaction séparée : tsflags s'applique à TOUTE la transaction, les autres
 #    paquets gardent leurs scriptlets.
+#
+#    kernel-devel via koji en repli : akmod DOIT builder contre le kernel-devel
+#    EXACT du kernel du base. Les dépôts stables LAGGENT derrière un base
+#    fraîchement bumpé — un bump de digest peut tirer un kernel dont le
+#    kernel-devel n'est pas encore miroité (« No match for argument:
+#    kernel-devel-<ver> »). Koji a tout build par NVRA : on tente le dépôt, puis
+#    on retombe sur koji. Sans ça, tout bump vers un base à kernel plus récent
+#    casse l'étage NVIDIA (constaté 2026-07-20 : base 4ff9e301 = kernel 7.1.4-200,
+#    dépôts à 7.1.3-201, kernel-devel-7.1.4-200 présent sur koji mais pas miroité).
 # =============================================================================
 RUN set -eu; \
     if [ "${TARGETARCH}" != "amd64" ] || [ "${NVIDIA_ENABLED}" != "1" ]; then \
         echo "NVIDIA layer skipped (TARGETARCH=${TARGETARCH}, NVIDIA_ENABLED=${NVIDIA_ENABLED})"; \
         exit 0; \
     fi; \
-    KERNEL_VERSION="$(rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' | tail -n 1)"; \
+    KVER="$(rpm -q kernel --qf '%{VERSION}\n' | tail -n 1)"; \
+    KREL="$(rpm -q kernel --qf '%{RELEASE}\n' | tail -n 1)"; \
+    KARCH="$(rpm -q kernel --qf '%{ARCH}\n' | tail -n 1)"; \
+    KERNEL_VERSION="${KVER}-${KREL}.${KARCH}"; \
     echo "Building NVIDIA kmod for kernel ${KERNEL_VERSION}"; \
     dnf -y install \
         "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-44.noarch.rpm" \
@@ -631,9 +643,12 @@ RUN set -eu; \
     dnf -y install --setopt=install_weak_deps=False \
         --setopt=tsflags=noscripts \
         akmod-nvidia; \
-    dnf -y install --setopt=install_weak_deps=False \
-        xorg-x11-drv-nvidia-cuda \
-        "kernel-devel-${KERNEL_VERSION}"; \
+    if ! dnf -y install --setopt=install_weak_deps=False "kernel-devel-${KERNEL_VERSION}"; then \
+        echo "kernel-devel ${KERNEL_VERSION} not in repos (mirror lag) — fetching from koji"; \
+        dnf -y install --setopt=install_weak_deps=False \
+            "https://kojipkgs.fedoraproject.org/packages/kernel/${KVER}/${KREL}/${KARCH}/kernel-devel-${KVER}-${KREL}.${KARCH}.rpm"; \
+    fi; \
+    dnf -y install --setopt=install_weak_deps=False xorg-x11-drv-nvidia-cuda; \
     akmods --force --kernels "${KERNEL_VERSION}" --kmod nvidia; \
     find "/usr/lib/modules/${KERNEL_VERSION}" -name 'nvidia*.ko*' | grep -q . \
         || { echo "FATAL: NVIDIA kmod was not built/installed"; exit 1; }; \
