@@ -947,6 +947,22 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"class": {"type": "string", "enum": ["deploy", "browser"]}}}),
         ),
         (
+            "deploy.plan",
+            Tier::T2,
+            "Read a deployment's current state (READ-ONLY), governed. Runs the \
+             provider CLI's status/inspect command inside the ADR-019 sandbox with a \
+             sealed READ-ONLY token, and returns its output. Gated by a [rule.deploy] \
+             verdict (which (provider, target) is allowed) + human approval (T2). \
+             Denied until the operator adds a [rule.deploy] rule and provisions the \
+             sealed token + egress CIDRs. 'provider': fly|vercel|railway ; 'target': \
+             the IMMUTABLE id (Fly app-name, Vercel prj_…, Railway project-id)",
+            json!({"type": "object", "required": ["provider", "target"],
+            "properties": {
+                "provider": {"type": "string", "enum": ["fly", "vercel", "railway"]},
+                "target": {"type": "string"}
+            }}),
+        ),
+        (
             "log.read",
             Tier::T0,
             "Read the last N lines (default 50, hard cap 200) of ONE systemd unit's \
@@ -1208,6 +1224,7 @@ fn execute_tool(
         "svc.restart" => crate::tools::svc::svc_restart(args),
         "svc.status" => crate::tools::svc::svc_status(args),
         "sandbox.probe" => crate::tools::sandbox_tool::sandbox_probe(args),
+        "deploy.plan" => crate::tools::deploy::deploy_plan(args),
         "log.read" => crate::tools::log::log_read(args),
         "sectools.list" => crate::tools::sectools::sectools_list(args),
         "fs.list" => crate::tools::fs::fs_list(args, policy, caller),

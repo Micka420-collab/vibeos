@@ -605,8 +605,191 @@ pub mod helper {
     pub fn run(mode: &str) -> Result<String, String> {
         match mode {
             "probe" => Ok(probe_report()),
-            other => Err(format!("unknown vibed-tool mode {other:?} (known: probe)")),
+            "deploy" => run_deploy(),
+            other => Err(format!(
+                "unknown vibed-tool mode {other:?} (known: probe, deploy)"
+            )),
         }
+    }
+
+    /// The command `deploy` runs, sent by root `vibed` on this helper's stdin.
+    /// `vibed` is the sole writer of that channel (it holds the `systemd-run`
+    /// pipe), so the request is trusted; the CLI it names, however, is HOSTILE.
+    #[derive(serde::Deserialize)]
+    struct DeployRequest {
+        /// Absolute CLI binary path (chosen by vibed from the provider).
+        binary: String,
+        /// argv AFTER the binary. NEVER carries the token (ADR-021 lock 1).
+        argv: Vec<String>,
+        /// Env var the CLI reads the token from.
+        token_env: String,
+        /// Credential filename under `$CREDENTIALS_DIRECTORY` holding the sealed
+        /// token for this target.
+        cred_name: String,
+    }
+
+    /// `deploy` mode: run a deploy CLI's read-only command inside the confined
+    /// service and return its BOUNDED output as DATA. The CLI is HOSTILE — its
+    /// stdout is captured, never trusted or interpreted (unlike `probe`).
+    ///
+    /// fd hygiene (Fable 5): the control payload is read fully from OUR stdin
+    /// FIRST; the CLI is then spawned with stdin CLOSED (it can never see the
+    /// residual payload), an env cleared to exactly `{token_env: <sealed token>,
+    /// HOME: <ephemeral>}` (the token comes from `$CREDENTIALS_DIRECTORY`, NEVER
+    /// argv), and captured stdout/stderr — it inherits none of our descriptors.
+    fn run_deploy() -> Result<String, String> {
+        use std::io::Read;
+        // The control channel is vibed (trusted), but cap the read defensively.
+        let mut payload = String::new();
+        std::io::stdin()
+            .take(1 << 20)
+            .read_to_string(&mut payload)
+            .map_err(|e| format!("deploy: reading control payload: {e}"))?;
+        let req: DeployRequest = serde_json::from_str(payload.trim())
+            .map_err(|e| format!("deploy: malformed control payload: {e}"))?;
+        let creds = std::env::var("CREDENTIALS_DIRECTORY")
+            .map_err(|_| "deploy: no $CREDENTIALS_DIRECTORY (token not sealed in?)".to_string())?;
+        // HOME is set by the unit (`Environment=HOME=…`); its absence is an
+        // impossible branch — fail closed rather than hand the CLI `HOME=""`.
+        let home = std::env::var("HOME")
+            .map_err(|_| "deploy: no $HOME in the transient unit".to_string())?;
+        run_cli(&req, &creds, &home)
+    }
+
+    /// Backend of [`run_deploy`] with the credentials dir + HOME injected, so the
+    /// exec path is testable against a fake CLI and a scratch credstore.
+    fn run_cli(req: &DeployRequest, creds_dir: &str, home: &str) -> Result<String, String> {
+        use std::process::{Command, Stdio};
+        // The binary MUST be an absolute path — never a name resolved via PATH
+        // (murky under `env_clear`; Fable 5). The spawn layer pins it to an
+        // allow-listed CLI path.
+        if !std::path::Path::new(&req.binary).is_absolute() {
+            return Err(format!(
+                "deploy: binary must be an absolute path: {:?}",
+                req.binary
+            ));
+        }
+        // Credstore filename must be a bare name, never a path.
+        if req.cred_name.is_empty() || req.cred_name.contains('/') || req.cred_name.contains("..") {
+            return Err(format!(
+                "deploy: invalid credential name {:?}",
+                req.cred_name
+            ));
+        }
+        // Defence in depth — NOT the primary read-only control (that is the
+        // read-only-scoped sealed token + the [rule.deploy] verdict): refuse an
+        // obviously-mutating first subcommand. An INCOMPLETE deny-list by nature;
+        // only a read-only token is the real end-to-end guarantee.
+        if let Some(sub) = req.argv.first() {
+            const MUTATING: &[&str] = &[
+                "deploy", "up", "redeploy", "launch", "rm", "remove", "destroy", "delete", "scale",
+                "restart", "secrets", "env", "create", "add",
+            ];
+            if MUTATING.iter().any(|m| sub == m) {
+                return Err(format!(
+                    "deploy.plan: refusing a mutating subcommand {sub:?} (read-only only)"
+                ));
+            }
+        }
+        let token_path = std::path::Path::new(creds_dir).join(&req.cred_name);
+        let token = std::fs::read_to_string(&token_path).map_err(|e| {
+            format!(
+                "deploy: cannot read sealed token {}: {e}",
+                token_path.display()
+            )
+        })?;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err("deploy: sealed token is empty".to_string());
+        }
+        // Run the CLI: cleared env + token + ephemeral HOME, stdin CLOSED, output
+        // captured. `Command` never shell-splits, so argv reaches the CLI verbatim.
+        // TLS still works: fly (Go), vercel (Node) and railway (rustls) all find
+        // CA roots without SSL_CERT_* — via compiled paths or an embedded store —
+        // and `/etc` stays readable under ProtectSystem=strict (Fable 5, verify on
+        // target). Residual exfil: the raw-echo-to-stdout/stderr axis is REDACTED
+        // below (a hostile CLI cannot hand the agent its own token that way); a
+        // re-encoded or DNS-tunnelled leak remains, bounded by the read-only TOKEN
+        // SCOPE — the real guarantee, never this helper alone.
+        let mut child = Command::new(&req.binary)
+            .args(&req.argv)
+            .env_clear()
+            .env(&req.token_env, &token)
+            .env("HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("deploy: cannot exec {}: {e}", req.binary))?;
+        // `.env` already copied the token into the child. We keep our copy a moment
+        // longer — only to REDACT it out of the CLI's own stdout/stderr below — then
+        // drop it. See the redaction note before the `Ok(...)`.
+
+        // Bounded capture (Fable 5): reuse the module's `read_capped` so a
+        // flooding CLI gives a deterministic error, not a noisy cgroup OOM.
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let out_h = std::thread::spawn(move || super::read_capped(stdout, 4 * 1024 * 1024));
+        let err_h = std::thread::spawn(move || super::read_capped(stderr, 256 * 1024));
+        let out = out_h
+            .join()
+            .map_err(|_| "deploy: stdout reader panicked".to_string())?
+            .map_err(|e| format!("deploy: reading CLI stdout: {e}"))?;
+        let err = err_h
+            .join()
+            .map_err(|_| "deploy: stderr reader panicked".to_string())?
+            .map_err(|e| format!("deploy: reading CLI stderr: {e}"))?;
+        let overflow = out.1 || err.1;
+        if overflow {
+            let _ = child.kill();
+        }
+        let status = child
+            .wait()
+            .map_err(|e| format!("deploy: reaping the CLI: {e}"))?;
+        if overflow {
+            return Err("deploy: CLI output exceeded cap — killed and refused".to_string());
+        }
+        // Belt-and-suspenders (Fable 5): a hostile CLI could echo its own token to
+        // stdout/stderr to hand the agent the credential. Redact every RAW
+        // occurrence of the token here — where the helper still holds it and vibed
+        // never will — before the output leaves this process. This closes only the
+        // raw-echo axis (not a re-encoded or DNS-tunnelled leak); the real bound
+        // stays the read-only token scope. Redact, THEN drop our copy.
+        let stdout = redact(&out.0, token.as_bytes());
+        let stderr = redact(&err.0, token.as_bytes());
+        drop(token);
+        // The CLI output is DATA, not a trusted result channel: lossy is fine, and
+        // vibed bounds the size again on its side (spawn_transient's cap).
+        Ok(serde_json::json!({
+            "exit": status.code(),
+            "stdout": String::from_utf8_lossy(&stdout),
+            "stderr": String::from_utf8_lossy(&stderr),
+        })
+        .to_string())
+    }
+
+    /// Replace every RAW occurrence of `secret` in `data` with a redaction
+    /// marker, so a hostile deploy CLI cannot exfiltrate its own token by echoing
+    /// it to stdout/stderr. Byte-exact only — a re-encoded (base64, hex…) or
+    /// tunnelled leak is out of scope; this is defense-in-depth atop the read-only
+    /// token scope, not a substitute for it. Empty `secret` is a no-op.
+    fn redact(data: &[u8], secret: &[u8]) -> Vec<u8> {
+        const MARK: &[u8] = b"[redacted]";
+        if secret.is_empty() || data.len() < secret.len() {
+            return data.to_vec();
+        }
+        let mut out = Vec::with_capacity(data.len());
+        let mut i = 0;
+        while i < data.len() {
+            if data[i..].starts_with(secret) {
+                out.extend_from_slice(MARK);
+                i += secret.len();
+            } else {
+                out.push(data[i]);
+                i += 1;
+            }
+        }
+        out
     }
 
     /// Gather this process's confinement facts as JSON. Reads only its own
@@ -722,6 +905,27 @@ pub mod helper {
         use super::*;
 
         #[test]
+        fn redact_scrubs_every_raw_occurrence_of_the_token() {
+            let token = b"fo1_secret-TOKEN.value";
+            // A hostile CLI echoes the token — twice, adjacent to real output.
+            let hostile = b"before fo1_secret-TOKEN.value middle fo1_secret-TOKEN.value end";
+            let cleaned = redact(hostile, token);
+            let s = String::from_utf8(cleaned).unwrap();
+            assert_eq!(s, "before [redacted] middle [redacted] end");
+            assert!(!s.contains("fo1_secret-TOKEN.value"));
+            // Back-to-back occurrences (no gap) are both scrubbed.
+            let glued = b"fo1_secret-TOKEN.valuefo1_secret-TOKEN.value";
+            assert_eq!(
+                String::from_utf8(redact(glued, token)).unwrap(),
+                "[redacted][redacted]"
+            );
+            // No token present => byte-identical passthrough.
+            assert_eq!(redact(b"clean output", token), b"clean output");
+            // Empty secret is a no-op (never turns every gap into a marker).
+            assert_eq!(redact(b"abc", b""), b"abc");
+        }
+
+        #[test]
         fn probe_report_is_valid_json_with_strong_confinement_keys() {
             let out = run("probe").expect("probe mode runs");
             let v: serde_json::Value = serde_json::from_str(&out).expect("probe emits valid JSON");
@@ -752,12 +956,167 @@ pub mod helper {
 
         #[test]
         fn unknown_mode_fails_closed() {
-            assert!(
-                run("deploy").is_err(),
-                "unimplemented mode must fail closed"
-            );
+            assert!(run("browse").is_err(), "an unknown mode must fail closed");
             assert!(run("").is_err());
             assert!(run("../etc/passwd").is_err());
+        }
+
+        /// `run_cli` execs the CLI with the sealed token in ITS ENV (never argv),
+        /// passes argv verbatim, and captures the (hostile) output as data.
+        #[cfg(unix)]
+        #[test]
+        fn run_cli_passes_token_by_env_never_argv_and_captures_output() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("vibed-deploy-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            // Fake CLI: prints its argv and the token env var, so the test can prove
+            // the token arrived via env and the argv arrived verbatim.
+            let cli = dir.join("fakecli");
+            std::fs::write(
+                &cli,
+                "#!/bin/sh\necho \"ARGV:$*\"\necho \"TOK:$FLY_API_TOKEN\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(dir.join("deploy-token"), "secret-xyz\n").unwrap();
+
+            let req = DeployRequest {
+                binary: cli.to_string_lossy().into_owned(),
+                argv: vec!["status".to_string(), "-a".to_string(), "my-app".to_string()],
+                token_env: "FLY_API_TOKEN".to_string(),
+                cred_name: "deploy-token".to_string(),
+            };
+            let creds = dir.to_string_lossy().into_owned();
+            // Retry the TEST-ONLY ETXTBSY race on the just-written fake.
+            let out = (|| {
+                for _ in 0..50 {
+                    match run_cli(&req, &creds, "/run/vibed-tool/x") {
+                        Err(e) if e.contains("Text file busy") => {
+                            std::thread::sleep(std::time::Duration::from_millis(20))
+                        }
+                        other => return other,
+                    }
+                }
+                run_cli(&req, &creds, "/run/vibed-tool/x")
+            })()
+            .expect("run_cli succeeds");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["exit"], 0);
+            let stdout = v["stdout"].as_str().unwrap();
+            assert!(
+                stdout.contains("ARGV:status -a my-app"),
+                "argv verbatim: {stdout}"
+            );
+            // The child received the token via env (its TOK line is non-empty),
+            // but the helper REDACTED the raw value on the way out — a hostile CLI
+            // cannot exfiltrate its own token by echoing it to stdout (Fable 5).
+            assert!(
+                stdout.contains("TOK:[redacted]"),
+                "token delivered via env, then redacted: {stdout}"
+            );
+            assert!(
+                !stdout.contains("secret-xyz"),
+                "raw token must never leave the helper: {stdout}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn run_cli_rejects_a_credential_path_traversal() {
+            let req = DeployRequest {
+                binary: "/bin/true".to_string(),
+                argv: vec![],
+                token_env: "X".to_string(),
+                cred_name: "../etc/passwd".to_string(),
+            };
+            assert!(run_cli(&req, "/tmp", "/tmp")
+                .unwrap_err()
+                .contains("invalid credential name"));
+        }
+
+        #[test]
+        fn run_cli_refuses_a_relative_binary_and_a_mutating_subcommand() {
+            let req = |bin: &str, sub: &str| DeployRequest {
+                binary: bin.to_string(),
+                argv: if sub.is_empty() {
+                    vec![]
+                } else {
+                    vec![sub.to_string()]
+                },
+                token_env: "X".to_string(),
+                cred_name: "deploy-token".to_string(),
+            };
+            // Relative binary => refused (no murky PATH resolution).
+            assert!(run_cli(&req("flyctl", "status"), "/tmp", "/tmp")
+                .unwrap_err()
+                .contains("absolute path"));
+            // A mutating first subcommand => refused (defence in depth).
+            for m in ["deploy", "up", "destroy", "scale", "secrets"] {
+                assert!(
+                    run_cli(&req("/usr/bin/flyctl", m), "/tmp", "/tmp")
+                        .unwrap_err()
+                        .contains("mutating subcommand"),
+                    "must refuse {m}"
+                );
+            }
+        }
+
+        /// `env_clear` really strips the parent env: only HOME + the token var
+        /// (plus what `sh` itself sets) reach the CLI — a canary leaks nothing.
+        #[cfg(unix)]
+        #[test]
+        fn run_cli_clears_the_parent_env() {
+            use std::os::unix::fs::PermissionsExt;
+            std::env::set_var("VIBED_LEAK_CANARY", "leaked");
+            let dir = std::env::temp_dir().join(format!("vibed-denv-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let cli = dir.join("envcli");
+            std::fs::write(&cli, "#!/bin/sh\nenv\n").unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(dir.join("deploy-token"), "sekret\n").unwrap();
+            let req = DeployRequest {
+                binary: cli.to_string_lossy().into_owned(),
+                argv: vec![],
+                token_env: "FLY_API_TOKEN".to_string(),
+                cred_name: "deploy-token".to_string(),
+            };
+            let creds = dir.to_string_lossy().into_owned();
+            let out = (|| {
+                for _ in 0..50 {
+                    match run_cli(&req, &creds, "/run/vibed-tool/x") {
+                        Err(e) if e.contains("Text file busy") => {
+                            std::thread::sleep(std::time::Duration::from_millis(20))
+                        }
+                        other => return other,
+                    }
+                }
+                run_cli(&req, &creds, "/run/vibed-tool/x")
+            })()
+            .expect("runs");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let env = v["stdout"].as_str().unwrap();
+            // The token var IS set in the child's env (delivery), but its value is
+            // redacted out of the returned stdout (Fable 5 exfil hardening).
+            assert!(
+                env.contains("FLY_API_TOKEN=[redacted]"),
+                "token var present, value redacted: {env}"
+            );
+            assert!(
+                !env.contains("sekret"),
+                "raw token must not leave the helper: {env}"
+            );
+            assert!(
+                env.contains("HOME=/run/vibed-tool/x"),
+                "home present: {env}"
+            );
+            assert!(
+                !env.contains("VIBED_LEAK_CANARY"),
+                "parent env must be cleared: {env}"
+            );
+            std::env::remove_var("VIBED_LEAK_CANARY");
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

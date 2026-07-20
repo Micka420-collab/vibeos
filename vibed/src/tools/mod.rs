@@ -4,6 +4,7 @@
 //! in `mcp.rs`; each `tools::<family>` module holds the pure implementations for
 //! one family, with its own tests.
 
+pub(crate) mod deploy;
 pub(crate) mod fs;
 pub(crate) mod log;
 pub(crate) mod memory;
