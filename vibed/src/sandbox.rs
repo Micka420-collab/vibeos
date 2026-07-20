@@ -605,8 +605,90 @@ pub mod helper {
     pub fn run(mode: &str) -> Result<String, String> {
         match mode {
             "probe" => Ok(probe_report()),
-            other => Err(format!("unknown vibed-tool mode {other:?} (known: probe)")),
+            "deploy" => run_deploy(),
+            other => Err(format!(
+                "unknown vibed-tool mode {other:?} (known: probe, deploy)"
+            )),
         }
+    }
+
+    /// The command `deploy` runs, sent by root `vibed` on this helper's stdin.
+    /// `vibed` is the sole writer of that channel (it holds the `systemd-run`
+    /// pipe), so the request is trusted; the CLI it names, however, is HOSTILE.
+    #[derive(serde::Deserialize)]
+    struct DeployRequest {
+        /// Absolute CLI binary path (chosen by vibed from the provider).
+        binary: String,
+        /// argv AFTER the binary. NEVER carries the token (ADR-021 lock 1).
+        argv: Vec<String>,
+        /// Env var the CLI reads the token from.
+        token_env: String,
+        /// Credential filename under `$CREDENTIALS_DIRECTORY` holding the sealed
+        /// token for this target.
+        cred_name: String,
+    }
+
+    /// `deploy` mode: run a deploy CLI's read-only command inside the confined
+    /// service and return its BOUNDED output as DATA. The CLI is HOSTILE — its
+    /// stdout is captured, never trusted or interpreted (unlike `probe`).
+    ///
+    /// fd hygiene (Fable 5): the control payload is read fully from OUR stdin
+    /// FIRST; the CLI is then spawned with stdin CLOSED (it can never see the
+    /// residual payload), an env cleared to exactly `{token_env: <sealed token>,
+    /// HOME: <ephemeral>}` (the token comes from `$CREDENTIALS_DIRECTORY`, NEVER
+    /// argv), and captured stdout/stderr — it inherits none of our descriptors.
+    fn run_deploy() -> Result<String, String> {
+        use std::io::Read;
+        let mut payload = String::new();
+        std::io::stdin()
+            .read_to_string(&mut payload)
+            .map_err(|e| format!("deploy: reading control payload: {e}"))?;
+        let req: DeployRequest = serde_json::from_str(payload.trim())
+            .map_err(|e| format!("deploy: malformed control payload: {e}"))?;
+        let creds = std::env::var("CREDENTIALS_DIRECTORY")
+            .map_err(|_| "deploy: no $CREDENTIALS_DIRECTORY (token not sealed in?)".to_string())?;
+        let home = std::env::var("HOME").unwrap_or_default();
+        run_cli(&req, &creds, &home)
+    }
+
+    /// Backend of [`run_deploy`] with the credentials dir + HOME injected, so the
+    /// exec path is testable against a fake CLI and a scratch credstore.
+    fn run_cli(req: &DeployRequest, creds_dir: &str, home: &str) -> Result<String, String> {
+        use std::process::{Command, Stdio};
+        // The sealed token (credstore filename must be a bare name, never a path).
+        if req.cred_name.is_empty() || req.cred_name.contains('/') || req.cred_name.contains("..") {
+            return Err(format!(
+                "deploy: invalid credential name {:?}",
+                req.cred_name
+            ));
+        }
+        let token_path = std::path::Path::new(creds_dir).join(&req.cred_name);
+        let token = std::fs::read_to_string(&token_path).map_err(|e| {
+            format!(
+                "deploy: cannot read sealed token {}: {e}",
+                token_path.display()
+            )
+        })?;
+        // Run the CLI: cleared env + token + ephemeral HOME, stdin CLOSED, output
+        // captured. `Command` never shell-splits, so argv reaches the CLI verbatim.
+        let out = Command::new(&req.binary)
+            .args(&req.argv)
+            .env_clear()
+            .env(&req.token_env, token.trim())
+            .env("HOME", home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("deploy: cannot exec {}: {e}", req.binary))?;
+        // The CLI output is DATA, not a trusted result channel: lossy is fine, and
+        // vibed bounds the size on its side (spawn_transient's cap).
+        Ok(serde_json::json!({
+            "exit": out.status.code(),
+            "stdout": String::from_utf8_lossy(&out.stdout),
+            "stderr": String::from_utf8_lossy(&out.stderr),
+        })
+        .to_string())
     }
 
     /// Gather this process's confinement facts as JSON. Reads only its own
@@ -752,12 +834,79 @@ pub mod helper {
 
         #[test]
         fn unknown_mode_fails_closed() {
-            assert!(
-                run("deploy").is_err(),
-                "unimplemented mode must fail closed"
-            );
+            assert!(run("browse").is_err(), "an unknown mode must fail closed");
             assert!(run("").is_err());
             assert!(run("../etc/passwd").is_err());
+        }
+
+        /// `run_cli` execs the CLI with the sealed token in ITS ENV (never argv),
+        /// passes argv verbatim, and captures the (hostile) output as data.
+        #[cfg(unix)]
+        #[test]
+        fn run_cli_passes_token_by_env_never_argv_and_captures_output() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("vibed-deploy-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            // Fake CLI: prints its argv and the token env var, so the test can prove
+            // the token arrived via env and the argv arrived verbatim.
+            let cli = dir.join("fakecli");
+            std::fs::write(
+                &cli,
+                "#!/bin/sh\necho \"ARGV:$*\"\necho \"TOK:$FLY_API_TOKEN\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(dir.join("deploy-token"), "secret-xyz\n").unwrap();
+
+            let req = DeployRequest {
+                binary: cli.to_string_lossy().into_owned(),
+                argv: vec!["status".to_string(), "-a".to_string(), "my-app".to_string()],
+                token_env: "FLY_API_TOKEN".to_string(),
+                cred_name: "deploy-token".to_string(),
+            };
+            let creds = dir.to_string_lossy().into_owned();
+            // Retry the TEST-ONLY ETXTBSY race on the just-written fake.
+            let out = (|| {
+                for _ in 0..50 {
+                    match run_cli(&req, &creds, "/run/vibed-tool/x") {
+                        Err(e) if e.contains("Text file busy") => {
+                            std::thread::sleep(std::time::Duration::from_millis(20))
+                        }
+                        other => return other,
+                    }
+                }
+                run_cli(&req, &creds, "/run/vibed-tool/x")
+            })()
+            .expect("run_cli succeeds");
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(v["exit"], 0);
+            let stdout = v["stdout"].as_str().unwrap();
+            assert!(
+                stdout.contains("ARGV:status -a my-app"),
+                "argv verbatim: {stdout}"
+            );
+            assert!(stdout.contains("TOK:secret-xyz"), "token via env: {stdout}");
+            // The token is in the env line, NEVER in the argv line.
+            let argv_line = stdout.lines().find(|l| l.starts_with("ARGV:")).unwrap();
+            assert!(
+                !argv_line.contains("secret-xyz"),
+                "token must never reach argv: {argv_line}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn run_cli_rejects_a_credential_path_traversal() {
+            let req = DeployRequest {
+                binary: "/bin/true".to_string(),
+                argv: vec![],
+                token_env: "X".to_string(),
+                cred_name: "../etc/passwd".to_string(),
+            };
+            assert!(run_cli(&req, "/tmp", "/tmp")
+                .unwrap_err()
+                .contains("invalid credential name"));
         }
     }
 }
