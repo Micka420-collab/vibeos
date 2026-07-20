@@ -97,6 +97,16 @@ fn shipped_default_policy_canonical_decisions() {
         "sandbox.probe (T1) must be allowed by the shipped policy"
     );
 
+    // deploy.plan is T2 and DENIED by the shipped policy: it carries NO
+    // [rule.deploy] rule, so a deploy is refused until the operator adds one with
+    // their allowed (provider, target) pairs and provisions the sealed token +
+    // egress. Fail-closed for the most dangerous capability.
+    assert_eq!(
+        engine.evaluate("deploy.plan", Some(Tier::T2), NO_CTX),
+        Decision::Deny,
+        "deploy.plan must be DENIED by the shipped policy (no [rule.deploy] rule)"
+    );
+
     // Agent observability tools are T0 read-only and MUST be allowed by the
     // shipped policy — otherwise the HUD roster / reasoning discovery is dead
     // behind the catch-all default-deny.
