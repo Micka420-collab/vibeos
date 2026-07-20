@@ -1083,6 +1083,19 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                 "target": {"type": "string"}
             }}),
         ),
+        (
+            "policy.capabilities",
+            Tier::T0,
+            "Read the governed capability surface as a JSON manifest DERIVED from the \
+             loaded policy: each rule's tools, tier, action, approval mode, and target \
+             constraints (allowed paths/services/domains, deploy targets). Lets the \
+             agent PLAN in reality instead of discovering limits by refusal. INDICATIVE \
+             only — the authoritative decision is always the per-call evaluation \
+             (first-match, tier floor, [rule.domains] predicate, [rule.deploy] verdict, \
+             context constraints); anything no allow rule covers is default-denied. \
+             Read-only, takes no arguments.",
+            json!({"type": "object", "properties": {}}),
+        ),
     ]
 }
 
@@ -1234,6 +1247,7 @@ fn execute_tool(
         "agent.sessions" => agent_sessions(),
         "agents.list" => agents_list(args, caller, audit_dir),
         "policy.check" => policy_check(args, policy),
+        "policy.capabilities" => crate::tools::policy_tool::capabilities(policy),
         _ => Err(format!("unknown tool: {name}")),
     }
 }
