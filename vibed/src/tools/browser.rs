@@ -208,11 +208,20 @@ fn validate_value(val: &str) -> Result<String, String> {
 /// Les 6 verbes sont couverts. Aucune entrée agent n'est interpolée dans du JS :
 /// - `navigate`/`read`/`screenshot` : URL en paramètre CDP, expressions `Runtime.evaluate`
 ///   CONSTANTES ;
-/// - `click`/`fill`/`submit` : **binding CDP par-objet** (invariant ADR-022) — le
-///   sélecteur est un **paramètre** de `DOM.querySelector`, la valeur d'un `fill` est un
-///   **argument** de `Runtime.callFunctionOn` (fonction JS CONSTANTE), le clic vise des
-///   **coordonnées numériques** issues de `DOM.getBoxModel`. Le sélecteur/la valeur
-///   n'atteignent JAMAIS une source `evaluate`/`functionDeclaration`.
+/// - `click`/`fill`/`submit` : le sélecteur est un **paramètre** de `DOM.querySelector`,
+///   la valeur d'un `fill` est un **argument** de `Runtime.callFunctionOn` (fonction JS
+///   CONSTANTE). Le sélecteur/la valeur n'atteignent JAMAIS une source
+///   `evaluate`/`functionDeclaration`.
+///
+/// ⚠️ Nuance (Fable 5) : `fill`/`submit` **agissent sur le nœud résolu** (`objectId` via
+/// `callFunctionOn`) — binding par-objet complet. `click`, lui, ne résout le nœud que
+/// pour en tirer des **coordonnées** (`DOM.getBoxModel`) puis dispatche à (x,y) : c'est
+/// un binding **plus faible** — le navigateur délivre le clic à l'élément **hit-testé
+/// topmost** à ces coordonnées, pas forcément au nœud résolu (une page hostile peut
+/// superposer un overlay = clickjacking ciblé). Partiellement inhérent à cliquer sur une
+/// page hostile ; la vérification hit-test (`DOM.getNodeForLocation` == nœud résolu, ou
+/// un de ses descendants) est à ajouter **avant le câblage live** (elle exige un test
+/// contre le vrai chromium — descendants d'un bouton, etc.).
 ///
 /// À porter par l'incrément transport (Fable 5) : (1) toutes les commandes utilisent
 /// ici `session_id: None` (la cible navigateur) ; le vrai chromium exige le `sessionId`
@@ -321,7 +330,7 @@ pub(crate) fn run_action<C: CdpChannel>(
             // valeur voyage comme ARGUMENT `arguments[0].value`, JAMAIS interpolée dans la
             // source. Remplace la valeur ET émet 'input' (pour que les frameworks JS la
             // voient).
-            session.call(
+            let r = session.call(
                 "Runtime.callFunctionOn",
                 json!({
                     "objectId": object_id,
@@ -331,6 +340,15 @@ pub(crate) fn run_action<C: CdpChannel>(
                 }),
                 None,
             )?;
+            // Fail-closed (Fable 5, comme `read`) : une fonction qui lève renvoie un
+            // « succès » CDP portant `exceptionDetails` — sans ce contrôle l'agent
+            // croirait avoir rempli le champ et enchaînerait (« mot de passe saisi →
+            // submit ») sur un faux signal.
+            if r.get("exceptionDetails").is_some() {
+                return Err(
+                    "browser.fill: la saisie a levé une exception côté page — refusé".to_string(),
+                );
+            }
             Ok(json!({ "filled": selector }))
         }
         BrowserAction::Submit { selector } => {
@@ -338,7 +356,7 @@ pub(crate) fn run_action<C: CdpChannel>(
             let object_id = resolve_object(session, node)?;
             // Fonction CONSTANTE, AUCUN argument (`this` = le formulaire résolu).
             // requestSubmit() déclenche la validation HTML5 ; submit() est le repli.
-            session.call(
+            let r = session.call(
                 "Runtime.callFunctionOn",
                 json!({
                     "objectId": object_id,
@@ -348,6 +366,12 @@ pub(crate) fn run_action<C: CdpChannel>(
                 }),
                 None,
             )?;
+            if r.get("exceptionDetails").is_some() {
+                return Err(
+                    "browser.submit: la soumission a levé une exception côté page — refusé"
+                        .to_string(),
+                );
+            }
             Ok(json!({ "submitted": selector }))
         }
     }
@@ -404,9 +428,17 @@ fn box_center(bm: &Value) -> Result<(f64, f64), String> {
     if content.len() < 8 {
         return Err("browser: box model 'content' incomplet".to_string());
     }
-    let n = |i: usize| content[i].as_f64().unwrap_or(0.0);
-    let x = (n(0) + n(2) + n(4) + n(6)) / 4.0;
-    let y = (n(1) + n(3) + n(5) + n(7)) / 4.0;
+    // Fail-closed (Fable 5) : une coordonnée non-numérique/non-finie est refusée, pas
+    // coercée en 0.0 — sinon un box model piégé ferait cliquer le coin (0,0) du viewport
+    // (ce que la page y a peint).
+    let coord = |i: usize| -> Result<f64, String> {
+        content[i]
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| "browser: coordonnée de box model non-finie — refusé".to_string())
+    };
+    let x = (coord(0)? + coord(2)? + coord(4)? + coord(6)?) / 4.0;
+    let y = (coord(1)? + coord(3)? + coord(5)? + coord(7)?) / 4.0;
     Ok((x, y))
 }
 
@@ -557,13 +589,23 @@ mod tests {
             .find(|c| c["method"] == "Runtime.callFunctionOn")
             .unwrap();
         assert_eq!(cf["params"]["arguments"][0]["value"], value);
-        // AUCUNE functionDeclaration ne contient le sélecteur, la valeur, ni le payload
-        // — preuve qu'il n'y a PAS d'interpolation (invariant ADR-022).
+        // AUCUN champ de source JS (`functionDeclaration` OU `expression`) ne contient le
+        // sélecteur, la valeur, ni le payload — preuve qu'il n'y a PAS d'interpolation
+        // (invariant ADR-022). On teste les DEUX champs pour attraper une régression qui
+        // ferait passer un payload par `Runtime.evaluate` (Fable 5).
         for c in &sent {
-            if let Some(fd) = c["params"]["functionDeclaration"].as_str() {
-                assert!(!fd.contains(selector), "sélecteur interpolé : {fd}");
-                assert!(!fd.contains(value), "valeur interpolée : {fd}");
-                assert!(!fd.contains("__pwned"), "payload dans le JS : {fd}");
+            for field in ["functionDeclaration", "expression"] {
+                if let Some(src) = c["params"][field].as_str() {
+                    assert!(
+                        !src.contains(selector),
+                        "sélecteur interpolé dans {field} : {src}"
+                    );
+                    assert!(
+                        !src.contains(value),
+                        "valeur interpolée dans {field} : {src}"
+                    );
+                    assert!(!src.contains("__pwned"), "payload dans {field} : {src}");
+                }
             }
         }
     }
@@ -652,6 +694,50 @@ mod tests {
             .unwrap()
             .contains("requestSubmit"));
         assert_eq!(cf["params"]["arguments"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn fill_fails_closed_on_a_page_side_exception() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 42}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "OBJ"}}})),
+            cdp_frame(
+                json!({"id": 4, "result": {"result": {}, "exceptionDetails": {"text": "boom"}}}),
+            ),
+        ]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(
+            &mut s,
+            &BrowserAction::Fill {
+                selector: "#x".into(),
+                value: "v".into()
+            }
+        )
+        .unwrap_err()
+        .contains("exception"));
+    }
+
+    #[test]
+    fn click_fails_closed_on_a_non_finite_box_coordinate() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 42}})),
+            cdp_frame(json!({"id": 3, "result": {}})), // scrollIntoViewIfNeeded
+            // Coin non-numérique : refusé, pas de clic (0,0).
+            cdp_frame(
+                json!({"id": 4, "result": {"model": {"content": ["x", "y", 0, 0, 0, 0, 0, 0]}}}),
+            ),
+        ]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "b".into()
+            }
+        )
+        .unwrap_err()
+        .contains("non-finie"));
     }
 
     #[test]
