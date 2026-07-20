@@ -7,5 +7,6 @@
 pub(crate) mod fs;
 pub(crate) mod log;
 pub(crate) mod memory;
+pub(crate) mod sandbox_tool;
 pub(crate) mod sectools;
 pub(crate) mod svc;

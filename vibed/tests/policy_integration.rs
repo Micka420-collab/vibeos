@@ -86,6 +86,16 @@ fn shipped_default_policy_canonical_decisions() {
         "memory.append (T1) must be allowed by the shipped policy"
     );
 
+    // sandbox.probe: the ADR-019 confinement self-test is T1 and MUST be allowed
+    // by the shipped policy — otherwise the tool is dead behind the catch-all
+    // default-deny (it has no target/service, so no context is needed to reach
+    // its rule). This is the regression the missing rule would have shipped.
+    assert_eq!(
+        engine.evaluate("sandbox.probe", Some(Tier::T1), NO_CTX),
+        Decision::Allow,
+        "sandbox.probe (T1) must be allowed by the shipped policy"
+    );
+
     // Agent observability tools are T0 read-only and MUST be allowed by the
     // shipped policy — otherwise the HUD roster / reasoning discovery is dead
     // behind the catch-all default-deny.

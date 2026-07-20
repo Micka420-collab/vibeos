@@ -916,6 +916,18 @@ fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"unit": {"type": "string"}}}),
         ),
         (
+            "sandbox.probe",
+            Tier::T1,
+            "Prove the ADR-019 sandbox confines: spawns a transient hardened systemd \
+             service running the low-privilege vibed-tool helper, captures its \
+             /proc/self confinement report, and GRADES it against the chosen profile \
+             (returns confined:true/false + the failing checks). Benign self-test — no \
+             credential, no network beyond the deny-floor, no target, ephemeral. \
+             'class': \"deploy\" (strict, default) or \"browser\" (relaxed for Chromium)",
+            json!({"type": "object",
+                   "properties": {"class": {"type": "string", "enum": ["deploy", "browser"]}}}),
+        ),
+        (
             "log.read",
             Tier::T0,
             "Read the last N lines (default 50, hard cap 200) of ONE systemd unit's \
@@ -1142,6 +1154,7 @@ fn execute_tool(
         .to_string()),
         "svc.restart" => crate::tools::svc::svc_restart(args),
         "svc.status" => crate::tools::svc::svc_status(args),
+        "sandbox.probe" => crate::tools::sandbox_tool::sandbox_probe(args),
         "log.read" => crate::tools::log::log_read(args),
         "sectools.list" => crate::tools::sectools::sectools_list(args),
         "fs.list" => crate::tools::fs::fs_list(args, policy, caller),
