@@ -8,18 +8,22 @@
 //! au niveau `navigate` dans `vibed` n'est qu'un lint : un `click` ou une redirection 302
 //! changent de domaine sans repasser par lui — Fable 5).
 //!
-//! **Ce module est PUR** (sans réseau, testable isolément) : il **parse** la ligne de requête
-//! CONNECT d'un client **hostile** ([`parse_connect_target`]) et rend le **verdict**
-//! `[rule.domains]` par requête ([`connect_decision`] → tunnel / refus). Le **relais**
-//! bidirectionnel (I/O), la **forme** du proxy (processus dédié vs thread du helper ; netns) et
-//! **d'où vient l'allowlist approuvée** sont des incréments ultérieurs (décision de forme « à
-//! trancher » d'ADR-022) — l'allowlist est prise en paramètre ici, form-agnostique.
+//! **Cœur logique pur** (testable isolément) : parse la ligne CONNECT d'un client **hostile**
+//! ([`parse_connect_target`]), rend le **verdict** `[rule.domains]` ([`connect_decision`] →
+//! tunnel / refus), et filtre les IP internes ([`is_internal_ip`], anti-SSRF/rebinding). Le
+//! **relais I/O** ([`serve_connection`] : dial-sûr avec épinglage d'IP + splice bidirectionnel)
+//! sert UNE connexion. Le **listener**, l'entrée `run_proxy` (mode helper) et la **forme** du proxy
+//! (processus/netns : `chromium` restreint à l'IP du proxy, proxy avec egress Internet) — la
+//! décision de forme « à trancher » d'ADR-022 — sont l'incrément suivant. **D'où vient l'allowlist
+//! approuvée** est pris en paramètre, form-agnostique.
 //!
 //! **Contrat CONNECT** (RFC 9110 §9.3.6) : la ligne de requête est `CONNECT authority HTTP/1.1`
 //! où `authority = host:port`, le **port est obligatoire**, et il n'y a **jamais** de schéma
 //! ni de chemin. Tout écart d'un `chromium` hostile est **fail-closed**.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 /// Longueur maximale de la ligne de requête CONNECT (anti-DoS ; une autorité DNS légitime
 /// tient largement dessous — un FQDN fait au plus 253 octets).
@@ -135,6 +139,17 @@ const RESPONSE_FORBIDDEN: &[u8] = b"HTTP/1.1 403 Forbidden\r\nConnection: close\
 /// ligne, le corps de l'échange CONNECT EST le tunnel brut : plus aucun en-tête, les octets sont
 /// relayés tels quels dans les deux sens. Le status 2xx DOIT précéder tout octet applicatif.
 const RESPONSE_TUNNEL_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+/// Réponse écrite au client quand le **dial de la cible échoue** (injoignable ou IP interne
+/// refusée). RFC 9110 §9.3.6 : jamais de `200` optimiste — la cible n'a pas répondu.
+const RESPONSE_BAD_GATEWAY: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n";
+
+/// Taille max de l'en-tête CONNECT lu avant le tunnel (ligne de requête + en-têtes + ligne vide).
+/// Un `chromium` légitime envoie ~200 octets ; 8 KiB borne un pair hostile qui n'enverrait jamais
+/// le `\r\n\r\n` terminal.
+const MAX_REQUEST_HEAD: usize = 8 * 1024;
+/// Timeout de connexion à la cible — borne un dial qui pend (cible qui n'accepte jamais). Le
+/// garde-fou ultime reste le `RuntimeMaxSec` de l'unité transitoire durcie (ADR-019/022).
+const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Le motif d'un refus CONNECT. Porte la **cause** (400 syntaxe / 403 politique), pas les octets :
 /// le rendu octets vit dans [`tunnel_handshake`], de sorte qu'un refus **ne peut structurellement
@@ -297,9 +312,155 @@ fn is_internal_v6(v6: Ipv6Addr) -> bool {
         || (first == 0x2001 && s[1] == 0x0db8) // 2001:db8::/32 documentation
 }
 
+/// Lit l'en-tête de la requête CONNECT — jusqu'au `\r\n\r\n` terminal, borné à `max` octets.
+/// Lecture **octet par octet** (pas de `BufReader`) pour NE PAS aspirer les octets du tunnel qui
+/// suivent l'en-tête : après le `200`, le corps de l'échange EST le tunnel brut, il ne doit pas
+/// être pré-lu. Fail-closed : EOF avant la fin, ou dépassement de `max` (pair qui n'envoie jamais
+/// la ligne vide) → `Err`.
+fn read_request_head<R: Read>(r: &mut R, max: usize) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    loop {
+        if buf.len() >= max {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proxy: en-tête CONNECT trop long — refusé",
+            ));
+        }
+        if r.read(&mut byte)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "proxy: EOF avant la fin de l'en-tête CONNECT",
+            ));
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            return Ok(buf);
+        }
+    }
+}
+
+/// Vrai si TOUTES les adresses résolues sont externes (aucune interne). **Fail-closed** : la
+/// présence d'UNE SEULE adresse interne fait rejeter tout le dial — un domaine public légitime ne
+/// résout jamais vers de l'interne ; un mélange `[publique, interne]` est un signal de
+/// rebinding/SSRF (Fable 5), l'attaquant ne doit pas espérer que le dial tombe sur l'interne. Liste
+/// vide → faux (rien à dialer).
+fn all_addrs_external(addrs: &[SocketAddr]) -> bool {
+    !addrs.is_empty() && addrs.iter().all(|a| !is_internal_ip(a.ip()))
+}
+
+/// Résout `host:port`, REFUSE si une seule adresse est interne ([`all_addrs_external`]), puis
+/// **ÉPINGLE** la première adresse validée et s'y connecte (timeout borné). L'IP connectée EST
+/// celle validée — **aucune re-résolution** entre le check et le dial, ce qui ferme la fenêtre de
+/// DNS-rebinding (une 2e résolution pourrait renvoyer une IP interne).
+fn dial_safe(host: &str, port: u16) -> io::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
+    if !all_addrs_external(&addrs) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("proxy: {host} résout vers une IP interne — refusé (anti-rebinding)"),
+        ));
+    }
+    // `addrs` non vide (garanti par all_addrs_external) → index 0 sûr.
+    TcpStream::connect_timeout(&addrs[0], DIAL_TIMEOUT)
+}
+
+/// Relaie les octets dans les DEUX sens entre le client (`chromium`) et l'upstream jusqu'à
+/// fermeture. Un thread par sens ; sur EOF d'un sens, `shutdown(Write)` de l'autre pair
+/// (**half-close**) pour qu'il draine sa réponse sans couper le sens inverse. Tampon borné
+/// (`io::copy`). Tunnel **BRUT** — aucun octet interprété (le proxy ne voit jamais le clair TLS,
+/// ADR-022). Le `RuntimeMaxSec` de l'unité borne un pair qui ne fermerait jamais.
+fn splice(client: TcpStream, upstream: TcpStream) -> io::Result<()> {
+    let mut client_read = client.try_clone()?;
+    let mut upstream_write = upstream.try_clone()?;
+    // Sens 1 (thread) : client → upstream.
+    let t = std::thread::spawn(move || {
+        let _ = io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(Shutdown::Write);
+    });
+    // Sens 2 (thread courant) : upstream → client.
+    let mut upstream_read = upstream;
+    let mut client_write = client;
+    let _ = io::copy(&mut upstream_read, &mut client_write);
+    let _ = client_write.shutdown(Shutdown::Write);
+    let _ = t.join();
+    Ok(())
+}
+
+/// Sert UNE connexion cliente (`chromium` **hostile**) : lit l'en-tête CONNECT (borné), rend le
+/// verdict `[rule.domains]`, et soit ouvre le tunnel (**dial-sûr → `200` → splice**), soit écrit
+/// le refus (400/403) et ferme. **Dial D'ABORD** (RFC 9110 §9.3.6 : le `200` signale que
+/// l'établissement A réussi ; un dial raté → `502`, jamais de `200` optimiste). Fail-closed
+/// partout — toute erreur ferme la connexion sans tunnel.
+pub fn serve_connection(mut client: TcpStream, allowed: &[String]) -> io::Result<()> {
+    let head = read_request_head(&mut client, MAX_REQUEST_HEAD)?;
+    let (response, target) = tunnel_handshake(connect_decision(&head, allowed));
+    let Some((host, port)) = target else {
+        // Refus (400/403) : écrire la réponse puis fermer. Jamais de tunnel.
+        let _ = client.write_all(response);
+        let _ = client.flush();
+        return Ok(());
+    };
+    match dial_safe(&host, port) {
+        Ok(upstream) => {
+            // `response` est ici `RESPONSE_TUNNEL_ESTABLISHED` (bras Tunnel) — écrit APRÈS le dial.
+            client.write_all(response)?;
+            client.flush()?;
+            splice(client, upstream)
+        }
+        Err(_) => {
+            // Cible injoignable OU IP interne refusée (anti-rebinding) → 502, jamais de 200.
+            let _ = client.write_all(RESPONSE_BAD_GATEWAY);
+            let _ = client.flush();
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_request_head_stops_at_the_blank_line_without_eating_the_tunnel() {
+        use std::io::Cursor;
+        // S'arrête EXACTEMENT au `\r\n\r\n` — les octets du tunnel qui suivent ne sont PAS consommés.
+        let mut c =
+            Cursor::new(b"CONNECT x.com:443 HTTP/1.1\r\nHost: x.com\r\n\r\nTUNNEL".to_vec());
+        let head = read_request_head(&mut c, 8192).unwrap();
+        assert_eq!(
+            &head[..],
+            b"CONNECT x.com:443 HTTP/1.1\r\nHost: x.com\r\n\r\n"
+        );
+        let mut rest = Vec::new();
+        Read::read_to_end(&mut c, &mut rest).unwrap();
+        assert_eq!(&rest[..], b"TUNNEL", "le tunnel ne doit pas être pré-lu");
+        // EOF avant la fin → Err.
+        let mut c2 = Cursor::new(b"CONNECT x.com:443 HTTP/1.1\r\n".to_vec());
+        assert!(read_request_head(&mut c2, 8192).is_err());
+        // Dépassement de la borne (pair qui n'envoie jamais la ligne vide) → Err.
+        let mut c3 = Cursor::new(vec![b'a'; 100]);
+        assert!(read_request_head(&mut c3, 32)
+            .unwrap_err()
+            .to_string()
+            .contains("trop long"));
+    }
+
+    #[test]
+    fn all_addrs_external_is_fail_closed_on_any_internal_addr() {
+        let sa = |s: &str| s.parse::<SocketAddr>().unwrap();
+        // Toutes externes → OK.
+        assert!(all_addrs_external(&[sa("8.8.8.8:443"), sa("1.1.1.1:443")]));
+        // Une SEULE interne → tout refusé (anti-rebinding, l'attaquant ne choisit pas l'IP dialée).
+        assert!(!all_addrs_external(&[
+            sa("8.8.8.8:443"),
+            sa("127.0.0.1:443")
+        ]));
+        assert!(!all_addrs_external(&[sa("10.0.0.1:443")]));
+        assert!(!all_addrs_external(&[sa("[64:ff9b::7f00:1]:443")])); // NAT64 → loopback
+                                                                      // Vide → faux (rien à dialer).
+        assert!(!all_addrs_external(&[]));
+    }
 
     #[test]
     fn is_internal_ip_rejects_every_ssrf_and_rebinding_target() {
