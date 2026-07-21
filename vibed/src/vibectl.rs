@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::{approval, audit, mcp, reasoning, supervisor};
+use crate::{approval, audit, mcp, mode, reasoning, supervisor};
 
 /// Current effective uid, parsed from `/proc/self/status` (no libc), for the
 /// `granted_by` field of an approval and the `require_root` check. `None` if it
@@ -145,6 +145,63 @@ pub fn deny(id: &str) -> (Value, bool) {
     match approval::deny(Path::new(approval::APPROVAL_DIR), id) {
         Ok(()) => (json!({"denied": id}), true),
         Err(e) => (json!({"error": e.to_string(), "id": id}), false),
+    }
+}
+
+/// `vibectl mode status` — the current operating mode (ADR-027). Read-only, for
+/// anyone: the mode is not a secret (it is literally what the danger panel
+/// shows). Never mutates.
+pub fn mode_status() -> Value {
+    mode::status(Path::new(mode::MODE_PATH), now_epoch_secs())
+}
+
+/// `vibectl mode open [--minutes N] [--reason R]` — the OUT-OF-BAND HUMAN unlock
+/// of autonomous/open mode (ADR-027). Root only — the same `require_root` gate
+/// as `approve`, because this IS a blanket approval of the T2/T3 floor for a
+/// bounded window. An agent can never reach this: it is a `vibectl` command run
+/// by the operator, and the mode file is root-only + on vibed's write denylist.
+/// Returns `(report, ok)`; the report carries a loud warning by design.
+pub fn mode_open(minutes: Option<u64>, reason: Option<&str>) -> (Value, bool) {
+    let euid = current_euid();
+    if let Err(e) = require_root(euid) {
+        return (e, false);
+    }
+    let secs = minutes
+        .map(|m| m.saturating_mul(60))
+        .unwrap_or(mode::OPEN_DEFAULT_SECS);
+    match mode::set_open(
+        Path::new(mode::MODE_PATH),
+        secs,
+        euid,
+        now_epoch_secs(),
+        reason,
+    ) {
+        Ok(record) => (
+            json!({
+                "mode": "open",
+                "record": record,
+                "warning": "AUTONOMOUS / OPEN MODE ACTIVE — the AI can act on the system \
+                            WITHOUT per-action approval (T2/T3 auto-granted) until this window \
+                            expires or you run `vibectl mode governed`. Every call is still \
+                            audited; the mode file, the audit trail and the kill-switch stay \
+                            out of the agent's reach.",
+            }),
+            true,
+        ),
+        Err(e) => (json!({"error": e.to_string()}), false),
+    }
+}
+
+/// `vibectl mode governed` — the KILL-SWITCH (ADR-027): revert to the governed
+/// default immediately, ending autonomous mode. Root only. Idempotent.
+pub fn mode_governed() -> (Value, bool) {
+    let euid = current_euid();
+    if let Err(e) = require_root(euid) {
+        return (e, false);
+    }
+    match mode::set_governed(Path::new(mode::MODE_PATH), euid, now_epoch_secs()) {
+        Ok(record) => (json!({"mode": "governed", "record": record}), true),
+        Err(e) => (json!({"error": e.to_string()}), false),
     }
 }
 

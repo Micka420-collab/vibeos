@@ -18,9 +18,13 @@
 > en suite de session : **caches incrémentaux** sur les chemins sondés par le HUD
 > (queue d'audit, fold mémoire, têtes de sessions) + digest d'audit unique par appel.
 > Puis **IA citoyenne** : `agent.activity` (T0, [ADR-026](docs/DECISIONS.md)) — le
-> citoyen relit ses propres actes (refus compris), surface 18 → 19, **332 tests
-> verts**. La mesure sur cible reste machine-gated. *(Précédent : 2026-07-19,
-> trousse SaaS complète dev→prod — [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
+> citoyen relit ses propres actes (refus compris), surface 18 → 19. Puis **mode
+> autonome / ouvert** ([ADR-027](docs/DECISIONS.md), fondation) : déverrouillage
+> humain hors-bande (`vibectl mode open`), T2/T3 auto-accordés en fenêtre bornée,
+> panneau danger + kill-switch + audit `*_open_mode`, no-self-escalation — **340
+> tests verts**, 19ᵉ invariant selfcheck `operating-mode`. La mesure sur cible reste
+> machine-gated. *(Précédent : 2026-07-19, trousse SaaS complète dev→prod —
+> [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
 
 ## Vue d'ensemble
 
@@ -155,6 +159,14 @@
   - **Têtes de sessions (`agent.sessions`) mémoïsées** : la première ligne d'un fichier append-only est immuable — son `ts_unix` n'est plus relu à chaque sonde (jusqu'à 200 open+read+parse évités par sonde) ; une tête absente (fichier déchiré) n'est jamais mise en cache et reste re-tentée.
   - **Digest d'audit calculé une fois par appel** (`record_with_digest` + `OnceLock` partagé) : les deux records d'un même appel (`started` + final) portaient déjà le même digest mais re-sérialisaient chacun tout l'arbre d'arguments (jusqu'à ~1 Mio pour `fs.write`).
   - **331 tests verts** (dont 7 nouveaux : incrémentalité, troncature, ligne déchirée, invalidation du fold, stabilité des têtes, parité des digests) ; clippy -D warnings (2 configs), log-hygiene, fmt OK ; compteurs des 4 README recalés 299 → 331.
+
+- **2026-07-21 (suite de session) — mode autonome / ouvert ([ADR-027](docs/DECISIONS.md), fondation livrée)** — sur demande de Micka : un mode où l'IA agit **seule** (T2/T3 sans approbation par action), avec **panneau danger**, bâti *à la manière du projet* plutôt que naïvement.
+  - **Module `mode`** : deux états (`governed` défaut / `open`), enregistrement root-only `/var/lib/vibeos/mode.json` (sur la denylist d'**écriture** intégrée — `fs.write` ne peut jamais le forger), lecture **fail-safe** (tout cas incertain ⇒ governed), **auto-expiration** vérifiée à chaque évaluation, plafond dur 24 h.
+  - **Câblage politique** : en mode ouvert, un `RequireApproval` (T2/T3) est **auto-accordé** — audité avec l'issue distincte `started_open_mode`/`ok_open_mode` — **hors du réacteur** (même `spawn_blocking` que la vérif de grant). N'affecte **jamais** un `deny` explicite, le default-deny, ni la denylist intégrée (audit, mode, politique, secrets).
+  - **Déverrouillage HUMAIN hors-bande** : `vibectl mode open [--minutes N] [--reason R]` (root, même `require_root` qu'`approve`) ; **kill-switch** `vibectl mode governed` ; `vibectl mode status`. L'IA peut *demander*, jamais s'auto-escalader (invariant n°1).
+  - **Panneau danger (données livrées)** : `os.status` porte `mode { mode, danger, remaining_secs, set_by_uid, reason }` (le HUD le sonde déjà) ; **19ᵉ invariant selfcheck `operating-mode`** (open = PASS signalé fort). Bandeau Plasma/Quickshell = présentation, à venir.
+  - **Sur-couches conçues, non livrées** (ADR-027) : auto-planification crons/battements de cœur **révocables**, usage d'apps (sur `browser.*`/Wayland), auto-modification via `os.propose` (racine immuable → nouvelle image, ADR-024).
+  - **340 tests verts** (dont module `mode` : fail-safe, fenêtre, clamp, kill-switch, statut, perms 0600 ; + 2 e2e : auto-grant audité `*_open_mode` & deny inchangé, `os.status`.mode danger) ; clippy -D warnings (2 configs), fmt, log-hygiene, shellcheck OK. Docs : ADR-027, BOOT-VALIDATION (19 checks), 4 README (compteur → 340, 19 invariants).
 
 - **2026-07-21 (suite de session) — IA citoyenne : `agent.activity` (T0, [ADR-026](docs/DECISIONS.md))** — le citoyen relit ses **propres actes**. Deuxième brique après `policy.capabilities` (ADR-023) : là où celle-ci donne la carte *statique* des droits et `agent.thinking` la biographie des *pensées*, `agent.activity` rend la biographie des *actes* — les appels gouvernés récents de l'appelant, du plus récent au plus ancien, **refus compris** (`deny`/`require_approval`), pour apprendre par l'expérience les frontières que le manifeste ne décrit qu'en théorie. **Confiné par uid** (SO_PEERCRED), fenêtre + nombre de lignes bornés, réutilise le cache incrémental de la queue d'audit ; **aucune fuite nouvelle** (même donnée qu'`agents.list` pour son propre uid — que `agents.list` excluait justement). Règle ajoutée à `agent-observability` (T0 allow) ; surface d'outils 18 → **19**. **332 tests verts** (dont 2 nouveaux : confinement/chronologie/refus, tier T0) ; test d'intégration de politique étendu ; docs recalées (ADR-026, 4 README).
 

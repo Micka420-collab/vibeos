@@ -168,7 +168,16 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
 /// the governed write path (scope-based, no path argument, so this path
 /// denylist cannot and need not apply to it) — and the policy itself is not
 /// agent-writable.
-const BUILTIN_DENY_WRITE: &[&str] = &["/etc/vibeos/policy.d/**", "/var/lib/vibeos/memory/**"];
+const BUILTIN_DENY_WRITE: &[&str] = &[
+    "/etc/vibeos/policy.d/**",
+    "/var/lib/vibeos/memory/**",
+    // The operating-mode record (ADR-027). An agent must NEVER be able to flip
+    // itself into open mode via fs.write — the unlock is a human, out-of-band
+    // `vibectl mode open` only. This is belt-and-suspenders (fs.write is already
+    // confined to the caller's home, and the file is root-only), kept explicit
+    // because it is the no-self-escalation invariant the whole model rests on.
+    "/var/lib/vibeos/mode.json",
+];
 
 /// Returns the matched pattern when `path` (already normalized) hits the
 /// built-in denylist. `write` selects the additional write-only entries.
@@ -209,6 +218,11 @@ pub async fn handle_connection(
     // require_approval -> approve -> grant-consumed -> Allow chain is exercisable
     // over the real socket without touching `/var/lib/vibeos`.
     approval_dir: std::path::PathBuf,
+    // Operating-mode record (ADR-027). Production passes `crate::mode::MODE_PATH`;
+    // tests inject a scratch path so the open-mode auto-grant is exercisable over
+    // the real socket. Read-only here — the daemon never WRITES it (only the
+    // out-of-band `vibectl mode` operator action does).
+    mode_path: std::path::PathBuf,
 ) {
     info!(
         "MCP client connected (uid={:?} gid={:?} pid={:?})",
@@ -263,8 +277,16 @@ pub async fn handle_connection(
         let response = match serde_json::from_str::<Request>(line) {
             Ok(request) => {
                 let is_notification = request.id.is_none();
-                let response =
-                    dispatch(request, &policy, &audit, &limiter, caller, &approval_dir).await;
+                let response = dispatch(
+                    request,
+                    &policy,
+                    &audit,
+                    &limiter,
+                    caller,
+                    &approval_dir,
+                    &mode_path,
+                )
+                .await;
                 if is_notification {
                     None
                 } else {
@@ -339,6 +361,7 @@ async fn dispatch(
     limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
     approval_dir: &std::path::Path,
+    mode_path: &std::path::Path,
 ) -> Value {
     debug!("dispatch method={}", request.method);
     let id = request.id.unwrap_or(Value::Null);
@@ -368,6 +391,7 @@ async fn dispatch(
                 limiter,
                 caller,
                 approval_dir,
+                mode_path,
             )
             .await
         }
@@ -375,6 +399,12 @@ async fn dispatch(
     }
 }
 
+// The call pipeline threads the per-connection environment (policy, audit,
+// limiter, approval store, mode store) alongside the per-call (id, params,
+// caller). Grouping the five environment refs into a struct would trade one
+// honest signature for an indirection the whole file would then read through;
+// the governed surface is small and stable, so the flat signature stays.
+#[allow(clippy::too_many_arguments)]
 async fn handle_tools_call(
     id: Value,
     params: Value,
@@ -383,6 +413,7 @@ async fn handle_tools_call(
     limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
     approval_dir: &std::path::Path,
+    mode_path: &std::path::Path,
 ) -> Value {
     let name = params
         .get("name")
@@ -557,41 +588,56 @@ async fn handle_tools_call(
     //
     // The blocking std::fs of the approval store runs on a blocking thread
     // (spawn_blocking), exactly like `execute_tool` below — never on the reactor.
-    let consumed = if matches!(decision, Decision::RequireApproval) {
+    // Both blocking store reads happen together, off the reactor, ONLY for a
+    // T2/T3 RequireApproval: (1) is there a fresh one-shot human grant, and — if
+    // not — (2) is OPEN MODE active (ADR-027)? A human grant is more specific
+    // (it names the approver), so it wins; open mode is the blanket, bounded,
+    // human-unlocked fallback. Neither ever runs for a Deny: an explicit deny
+    // rule, the default-deny, and the built-in denylist were all decided ABOVE
+    // and open mode cannot revive them — it only lifts the approval FLOOR.
+    let (consumed, open_mode) = if matches!(decision, Decision::RequireApproval) {
         let name_g = name.clone();
         let target_g = target.clone();
         let uid_g = caller.uid;
         let now_g = now_epoch_secs();
         let dir_g = approval_dir.to_path_buf();
+        let mode_g = mode_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            crate::approval::check_and_consume_grant(
+            let grant = crate::approval::check_and_consume_grant(
                 &dir_g,
                 &name_g,
                 target_g.as_deref(),
                 uid_g,
                 now_g,
-            )
+            );
+            // Consult open mode only when no human grant applied.
+            let open = grant.is_none() && crate::mode::is_open(&mode_g, now_g);
+            (grant, open)
         })
         .await
-        .unwrap_or(None) // a panic in the blocking task -> no grant (fail-closed)
+        .unwrap_or((None, false)) // a panic -> no grant, not open (fail-closed)
     } else {
-        None
+        (None, false)
     };
-    let approved = consumed.is_some();
+    let human_approved = consumed.is_some();
+    let approved = human_approved || open_mode;
     let decision = if approved { Decision::Allow } else { decision };
     let suffix = consumed
         .as_ref()
         .map(|c| approver_suffix(c.approver_uid))
         .unwrap_or_default();
-    let started_outcome = if approved {
-        format!("started_approved{suffix}")
+    // Distinct audit outcomes so the trail never conflates the three paths:
+    // a human one-shot approval, an autonomous open-mode auto-grant, or a plain
+    // allowed call. Open-mode calls are always attributable AS open-mode.
+    let (started_outcome, ok_outcome) = if human_approved {
+        (
+            format!("started_approved{suffix}"),
+            format!("ok_approved{suffix}"),
+        )
+    } else if open_mode {
+        ("started_open_mode".to_string(), "ok_open_mode".to_string())
     } else {
-        "started".to_string()
-    };
-    let ok_outcome = if approved {
-        format!("ok_approved{suffix}")
-    } else {
-        "ok".to_string()
+        ("started".to_string(), "ok".to_string())
     };
 
     match decision {
@@ -651,6 +697,7 @@ async fn handle_tools_call(
             let policy_exec = Arc::clone(policy);
             let caller_exec = caller;
             let audit_dir_exec = audit.dir().to_path_buf();
+            let mode_path_exec = mode_path.to_path_buf();
             // Tool bodies use blocking std::fs; keep the reactor responsive.
             let executed = tokio::task::spawn_blocking(move || {
                 execute_tool(
@@ -659,6 +706,7 @@ async fn handle_tools_call(
                     &policy_exec,
                     caller_exec,
                     &audit_dir_exec,
+                    &mode_path_exec,
                 )
             })
             .await;
@@ -1258,9 +1306,10 @@ fn execute_tool(
     policy: &PolicyEngine,
     caller: Caller,
     audit_dir: &std::path::Path,
+    mode_path: &std::path::Path,
 ) -> Result<String, String> {
     match name {
-        "os.status" => os_status(),
+        "os.status" => os_status(mode_path),
         "fs.read" => crate::tools::fs::fs_read(args, policy, caller),
         "fs.write" => crate::tools::fs::fs_write(args, policy, caller),
         "pkg.install" => Ok(json!({
@@ -1846,7 +1895,7 @@ fn agent_activity(
     .to_string())
 }
 
-fn os_status() -> Result<String, String> {
+fn os_status(mode_path: &std::path::Path) -> Result<String, String> {
     let uptime_seconds = std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|s| s.split_whitespace().next().map(str::to_string))
@@ -1859,12 +1908,17 @@ fn os_status() -> Result<String, String> {
     });
     let (mem_total_kb, mem_available_kb) = read_meminfo();
     let mounts = read_mounts();
+    // Operating mode (ADR-027) — the DANGER PANEL feed. The HUD polls os.status,
+    // so shipping the mode here means a live "AUTONOMOUS / OPEN MODE" banner with
+    // zero new tool. Read-only, fail-safe (governed on any uncertainty).
+    let mode = crate::mode::status(mode_path, now_epoch_secs());
     Ok(json!({
         "uptime_seconds": uptime_seconds,
         "loadavg_1_5_15": loadavg,
         "mem_total_kb": mem_total_kb,
         "mem_available_kb": mem_available_kb,
         "mounts": mounts,
+        "mode": mode,
         "note": "std-only approximation: free disk space needs statvfs (libc), \
                  so v0.1 reports mounted block devices without usage figures"
     })

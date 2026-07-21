@@ -182,6 +182,11 @@ fn usage() -> ExitCode {
          \x20 vibectl approvals list        pending T2/T3 human-approval requests\n\
          \x20 vibectl approve <ID>          grant a pending request (root)\n\
          \x20 vibectl deny <ID>             reject a pending request (root)\n\
+         \x20 vibectl mode status           current operating mode (governed|open, ADR-027)\n\
+         \x20 vibectl mode open [--minutes N] [--reason R]\n\
+         \x20                               UNLOCK autonomous/open mode (root): T2/T3 auto-granted,\n\
+         \x20                               bounded window, still audited — DANGER\n\
+         \x20 vibectl mode governed         kill-switch: revert to governed now (root)\n\
          \x20 vibectl agent run [--budget 8h] [--calls N] [--session ID] [--provider P] -- <cmd...>\n\
          \x20                               run a CLI under budget, tapping its reasoning (ADR-012)\n\
          \x20 vibectl agent stop <SESSION>  operator kill-switch for a running session\n\
@@ -279,6 +284,52 @@ fn main() -> ExitCode {
             } else {
                 ExitCode::FAILURE
             }
+        }
+        ["mode", "status"] => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&vibectl::mode_status()).unwrap_or_default()
+            );
+            ExitCode::SUCCESS
+        }
+        ["mode", "open", rest @ ..] => {
+            let mut minutes = None;
+            let mut reason = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--minutes" => match rest.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                        Some(m) => {
+                            minutes = Some(m);
+                            i += 2;
+                        }
+                        None => {
+                            eprintln!("mode open: --minutes expects a positive integer");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    "--reason" => match rest.get(i + 1) {
+                        Some(r) => {
+                            reason = Some(*r);
+                            i += 2;
+                        }
+                        None => {
+                            eprintln!("mode open: --reason expects a value");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    other => {
+                        eprintln!("mode open: unexpected argument '{other}'");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            let (report, ok) = vibectl::mode_open(minutes, reason);
+            emit(report, ok)
+        }
+        ["mode", "governed"] => {
+            let (report, ok) = vibectl::mode_governed();
+            emit(report, ok)
         }
         ["agent", sub @ ..] => agent_dispatch(sub),
         ["-h"] | ["--help"] | ["help"] => {

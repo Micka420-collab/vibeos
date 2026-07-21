@@ -200,6 +200,7 @@ async fn main() -> std::io::Result<()> {
                             limiter,
                             caller,
                             std::path::PathBuf::from(vibed::approval::APPROVAL_DIR),
+                            vibed::mode::default_path(),
                         ));
                     }
                     Err(e) => {

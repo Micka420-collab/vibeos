@@ -10,6 +10,7 @@ pub mod cdp;
 pub mod domain;
 pub mod glob;
 pub mod mcp;
+pub mod mode;
 pub mod policy;
 pub mod proxy;
 pub mod ratelimit;

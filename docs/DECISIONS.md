@@ -1779,3 +1779,52 @@ Arguments optionnels `window_seconds` (défaut 3600, max 3600) et `limit`
 - La surface d'outils passe de 18 à 19 (T0). Règle de politique : ajouté à la règle
   `agent-observability` (T0 allow, confiné par uid) ; le test d'intégration qui
   charge la vraie politique le vérifie.
+
+---
+
+## ADR-027 — Mode autonome / ouvert : une clé humaine hors-bande, un noyau irréductible — *décidé & livré (fondation ; sur-couches à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** Le *mécanisme* du mode ouvert est livré et testé ; les capacités qu'il porte (auto-planification par crons/battements de cœur, usage d'applications, auto-modification de l'image) sont conçues ci-dessous mais restent des incréments suivants. Demande de Micka : *« un mode autonome de l'IA dans l'OS avec un panneau affichant danger — l'IA prend des décisions seule, peut s'ajouter des crons/battements de cœur, modifier tout l'OS, un mode ouvert 100 % autorisé qui déverrouille les accès pour qu'elle s'auto-améliore, télécharge/ouvre/utilise des apps comme un humain. »*
+
+### Contexte
+
+Tout VibeOS repose sur l'inverse : default-deny, plancher d'approbation humaine T2/T3, un agent qui ne peut **jamais** approuver sa propre escalade (invariant n°1, `docs/ARCHITECTURE.md` §8). Le mode ouvert est la **relaxation délibérée et bornée** de ce plancher — « l'IA agit seule sur le système sans demander à chaque geste » — sans jeter ce qui rend la relaxation *réversible et traçable*. Deux réalités cadrent d'emblée ce qui est possible :
+
+- **La racine est immuable** (bootc/OSTree, `/usr` en lecture seule). « Modifier tout l'OS » à chaud est **physiquement impossible** ; l'auto-modification réelle est le chemin `os.propose` → analyse au build → **nouvelle image** signée → reboot atomique (ADR-024, en attente de ratification). Le mode ouvert ne change pas cette physique ; il est la *fondation gouvernée* sur laquelle ce chemin s'assoira.
+- **L'auto-déverrouillage briserait tout.** Un mode que l'IA active elle-même = une IA qui entre dans son propre god-mode. C'est le seul principe sans lequel la sécurité de l'OS n'a plus aucun sens.
+
+### Décision
+
+Un **mode d'exploitation** à deux états, matérialisé par un enregistrement root-only (`/var/lib/vibeos/mode.json`, sur la denylist d'ÉCRITURE intégrée — `fs.write` ne peut jamais le forger) :
+
+- **`governed`** (défaut) : le plancher T2/T3 exige un grant humain à usage unique (inchangé).
+- **`open`** : un `RequireApproval` (T2/T3) est **auto-satisfait** — l'agent installe des paquets, redémarre des services, écrit des fichiers, déploie, lance des outils, **sans approbation par action**. C'est ce qui transforme « un assistant qui doit demander » en « un opérateur autonome », pour une fenêtre bornée.
+
+**Le noyau irréductible — ce que le mode ouvert ne fait PAS, par construction, pour qu'« ouvert » ne devienne jamais « aller sans retour » :**
+
+1. **Le déverrouillage est une action HUMAINE hors-bande.** Seul `vibectl mode open` (root, présent physiquement) écrit l'enregistrement `open` ; c'est le **même `require_root`** que `vibectl approve`, car c'est bien une approbation en bloc du plancher. L'agent peut *demander* le mode, jamais se l'accorder.
+2. **L'audit reste actif.** Chaque appel est audité ; les appels en mode ouvert portent l'issue distincte **`started_open_mode`/`ok_open_mode`** (jamais confondus avec une approbation humaine `ok_approved(by_uid=N)` ni un `ok` ordinaire). L'autonomie n'est pas l'absence de traces.
+3. **Le kill-switch reste à l'humain.** `vibectl mode governed` revient au défaut **immédiatement**, et le mode **auto-expire** après sa fenêtre bornée (vérifié à chaque évaluation — pas de tâche de fond, aucun moyen de « rester coincé »). Plafond dur : `OPEN_MAX_SECS = 24 h` (une durée aberrante est *clampée*, pas honorée).
+4. **Le mode ouvert ne lève que le PLANCHER de tier.** Un `deny` explicite, le default-deny absolu (outil inconnu) et la **denylist intégrée** (journal d'audit, store d'approbation, CE fichier de mode, `policy.d/`, identifiants) sont décidés **AVANT** le tier et restent en vigueur. Le mode ouvert auto-accorde l'approbation ; il ne dissout pas les gardes qui préservent la trace, le kill-switch et les secrets — sinon l'agent pourrait effacer ses traces ou verrouiller l'opérateur dehors, exactement l'irréversibilité que ce design interdit.
+
+**Panneau danger (livré, côté données) :** `os.status` (T0) porte un bloc `mode { mode, danger, remaining_secs, set_by_uid, reason }` — le HUD le sonde déjà, donc « MODE AUTONOME / OUVERT ACTIF » s'affiche en direct sans nouvel outil ; le selfcheck ajoute l'invariant `operating-mode` (open = PASS mais signalé fort). Le bandeau visuel Plasma/Quickshell est la couche de présentation (incrément suivant, comme le dialogue d'approbation).
+
+**Fail-safe :** l'état puissant exige un enregistrement `open` valide et non expiré. Fichier absent, illisible, malformé, autre valeur, ou expiré ⇒ `governed`. Le défaut sûr gagne dans **tous** les cas incertains.
+
+### Sur-couches conçues ici, livrées ensuite (chacune s'assoit sur ce mode + son audit)
+
+- **Auto-planification (crons / battements de cœur)** : un outil gouverné laissant l'agent, *en mode ouvert*, poser une unité `systemd` timer/`cron` **sous un namespace réservé** (`vibeos-agent-*`), bornée, auditée, et **révoquée au retour en `governed`** (sinon un timer survivrait au kill-switch — la trappe à éviter absolument). T2 minimum.
+- **Auto-amélioration (modifier l'OS)** : `os.propose` (ADR-024) → analyse d'image au build → nouvelle image signée. Le mode ouvert auto-approuve la *proposition*, jamais l'application directe sur la racine immuable.
+- **Usage d'applications comme un humain** : télécharger/ouvrir/piloter des apps — bâti sur le substrat navigateur gouverné (`browser.*`, ADR-022) et une future automatisation du bureau (Wayland), chaque action tiérée et auditée.
+
+### Alternatives considérées
+
+- **« 100 % déverrouiller, denylist comprise »** : rejeté — laisser l'agent réécrire le journal d'audit et le fichier de mode, c'est lui donner de quoi effacer ses traces et neutraliser le kill-switch : « mode ouvert » deviendrait « machine perdue sans retour ». Le noyau irréductible est ce qui garde le mode *réversible*.
+- **Auto-déverrouillage par l'IA** : rejeté — viole l'invariant n°1 (pas d'auto-escalade). Une action humaine unique suffit ; ensuite l'IA est autonome pour toute la fenêtre.
+- **Pas de plafond / pas d'expiration** : rejeté — un mode puissant sans borne temporelle finit par rester allumé par oubli. Fenêtre bornée + auto-expiration + kill-switch.
+
+### Conséquences
+
+- L'IA **peut** fonctionner en autonomie réelle (T2/T3 sans demander) quand l'humain tourne la clé — ce qui était demandé — tout en gardant l'audit, le kill-switch et le panneau danger que l'humain a demandés *aussi*.
+- Le selfcheck passe de 18 à 19 invariants (`operating-mode`). Aucun nouvel **outil** MCP (la surface reste 19) : le mode change *comment* un `RequireApproval` se résout, il n'ajoute pas d'outil ; `os.status` gagne un champ.
+- Résiduel assumé : le bandeau visuel, l'auto-planification révocable, l'usage d'apps et l'auto-modification via `os.propose` sont conçus ici mais **non encore livrés** ; l'effet réel du mode sur cible reste **machine-gated** (aucune ISO bootée).
