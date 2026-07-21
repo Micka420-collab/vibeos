@@ -19,6 +19,8 @@
 //! où `authority = host:port`, le **port est obligatoire**, et il n'y a **jamais** de schéma
 //! ni de chemin. Tout écart d'un `chromium` hostile est **fail-closed**.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 /// Longueur maximale de la ligne de requête CONNECT (anti-DoS ; une autorité DNS légitime
 /// tient largement dessous — un FQDN fait au plus 253 octets).
 const MAX_REQUEST_LINE: usize = 512;
@@ -221,9 +223,137 @@ pub fn tunnel_handshake(decision: ConnectDecision) -> (&'static [u8], Option<(St
     }
 }
 
+/// Un IP est-il **interne** — donc INTERDIT comme cible de dial du relais ? Défense
+/// anti-SSRF / anti-DNS-rebinding (browser audit, forward-looking) : `parse_connect_target`
+/// valide le **nom**, mais c'est le relais qui **résout le DNS et dial** — un domaine allowlisté
+/// dont le DNS résout (ou *rebind* entre deux requêtes) vers `169.254.169.254` / `127.0.0.1` / une
+/// IP RFC1918 défait l'allowlist par-domaine et atteint l'infra interne. Le relais DOIT rejeter
+/// toute IP résolue interne **et** épingler l'IP entre la décision et le dial. Le plancher réseau
+/// du sandbox ne protège que `chromium`, pas le processus proxy qui, lui, atteint l'Internet.
+///
+/// **Fail-closed** (on préfère refuser trop) — couvre :
+/// - **IPv4** : `0/8` (this host), `10/8`·`172.16/12`·`192.168/16` (privé), `127/8` (loopback),
+///   `100.64/10` (CGNAT / tailnet), `169.254/16` (link-local, dont la métadonnée cloud
+///   `169.254.169.254`), `192.0.0/24` (IETF), `198.18/15` (benchmarking), `224/4`+`240/4`
+///   (multicast/réservé/broadcast).
+/// - **IPv6** : `::`/`::1` et tout préfixe tout-zéro, `ff00::/8` (multicast), `fe80::/10`
+///   (link-local), `fc00::/7` (ULA), `2001:db8::/32` (doc), et les formes **IPv4-mapped/compat**
+///   (`::ffff:a.b.c.d`, `::a.b.c.d`) **ré-évaluées sur le v4 embarqué** — sinon un rebind vers
+///   `::ffff:127.0.0.1` passerait.
+pub fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_internal_v4(v4),
+        IpAddr::V6(v6) => is_internal_v6(v6),
+    }
+}
+
+fn is_internal_v4(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    let (a, b) = (o[0], o[1]);
+    a == 0                                       // 0.0.0.0/8 « this host »
+        || a == 10                               // 10.0.0.0/8
+        || a == 127                              // 127.0.0.0/8 loopback
+        || (a == 100 && (64..=127).contains(&b)) // 100.64.0.0/10 CGNAT
+        || (a == 169 && b == 254)                // 169.254.0.0/16 link-local (métadonnée cloud)
+        || (a == 172 && (16..=31).contains(&b))  // 172.16.0.0/12
+        || (a == 192 && b == 168)                // 192.168.0.0/16
+        || (a == 192 && b == 0 && o[2] == 0)     // 192.0.0.0/24 IETF
+        || (a == 198 && (b == 18 || b == 19))    // 198.18.0.0/15 benchmarking
+        || a >= 224 // 224/4 multicast + 240/4 réservé + 255.255.255.255 broadcast
+}
+
+fn is_internal_v6(v6: Ipv6Addr) -> bool {
+    // IPv4-mapped/compat (`::ffff:a.b.c.d`, `::a.b.c.d`, dont `::`/`::1`) → ré-évalue sur le v4
+    // embarqué : un rebind vers `::ffff:127.0.0.1` doit être attrapé par le check v4.
+    if let Some(v4) = v6.to_ipv4() {
+        return is_internal_v4(v4);
+    }
+    let s = v6.segments();
+    let first = s[0];
+    first == 0                                    // ::/16 et préfixes tout-zéro non mappés
+        || (first & 0xff00) == 0xff00             // ff00::/8 multicast
+        || (first & 0xffc0) == 0xfe80             // fe80::/10 link-local
+        || (first & 0xfe00) == 0xfc00             // fc00::/7 ULA
+        || (first == 0x2001 && s[1] == 0x0db8) // 2001:db8::/32 documentation
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_internal_ip_rejects_every_ssrf_and_rebinding_target() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let v4 = |s: &str| IpAddr::V4(s.parse::<Ipv4Addr>().unwrap());
+        // INTERNES — DOIVENT être refusés comme cible de dial.
+        for ip in [
+            "0.0.0.0",
+            "0.1.2.3", // 0/8
+            "10.0.0.1",
+            "10.255.255.255", // 10/8
+            "127.0.0.1",
+            "127.1.2.3", // loopback
+            "100.64.0.1",
+            "100.100.0.1",
+            "100.127.255.255", // CGNAT 100.64/10
+            "169.254.169.254",
+            "169.254.0.1", // link-local + métadonnée cloud
+            "172.16.0.1",
+            "172.31.255.255", // 172.16/12
+            "192.168.0.1",
+            "192.168.255.1", // 192.168/16
+            "192.0.0.1",     // 192.0.0/24
+            "198.18.0.1",
+            "198.19.255.255", // 198.18/15
+            "224.0.0.1",
+            "239.1.2.3", // multicast
+            "240.0.0.1",
+            "255.255.255.255", // réservé / broadcast
+        ] {
+            assert!(is_internal_ip(v4(ip)), "{ip} doit être interne");
+        }
+        // EXTERNES — DOIVENT être autorisés (bornes JUSTE hors des plages internes).
+        for ip in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "140.82.121.4", // publics
+            "100.63.255.255",
+            "100.128.0.1", // hors CGNAT 100.64/10
+            "172.15.255.255",
+            "172.32.0.1", // hors 172.16/12
+            "192.167.255.255",
+            "192.169.0.1", // hors 192.168/16
+            "198.17.255.255",
+            "198.20.0.1", // hors 198.18/15
+            "192.0.1.1",  // hors 192.0.0/24
+        ] {
+            assert!(!is_internal_ip(v4(ip)), "{ip} doit être externe");
+        }
+        // IPv6.
+        let v6 = |s: &str| IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+        for ip in [
+            "::1",
+            "::", // loopback / unspecified
+            "fe80::1",
+            "fe80::abcd", // link-local
+            "fc00::1",
+            "fd12:3456::1", // ULA
+            "ff02::1",      // multicast
+            "2001:db8::1",  // documentation
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",        // IPv4-mapped privé/loopback (rebinding !)
+            "::ffff:169.254.169.254", // IPv4-mapped métadonnée
+        ] {
+            assert!(is_internal_ip(v6(ip)), "{ip} doit être interne");
+        }
+        for ip in [
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "::ffff:8.8.8.8", // IPv4-mapped PUBLIC → autorisé
+        ] {
+            assert!(!is_internal_ip(v6(ip)), "{ip} doit être externe");
+        }
+    }
 
     #[test]
     fn parses_a_valid_connect_and_lowercases_the_host() {
