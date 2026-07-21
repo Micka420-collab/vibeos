@@ -641,6 +641,81 @@ pub(crate) struct BrowserBatch {
     pub steps: Vec<BrowserAction>,
 }
 
+/// Le tier d'une action déjà planifiée (miroir de [`verb_tier`] côté [`BrowserAction`]) : seul
+/// `submit` mute par une soumission de formulaire gouvernée T2 ; tout le reste est T1. Match
+/// **exhaustif** (Fable 5, F3) : un futur variant `BrowserAction` (download, evaluate…) casse le
+/// build ici plutôt que de tomber silencieusement en T1.
+fn action_tier(a: &BrowserAction) -> Tier {
+    match a {
+        BrowserAction::Submit { .. } => Tier::T2,
+        BrowserAction::Navigate { .. }
+        | BrowserAction::Read
+        | BrowserAction::Screenshot
+        | BrowserAction::Click { .. }
+        | BrowserAction::Fill { .. } => Tier::T1,
+    }
+}
+
+/// **Tier effectif d'un batch = le MAX des tiers de ses verbes** (ADR-022 : gouvernance
+/// par-capacité). Un batch purement lecture (`navigate`/`read`/`screenshot`/`click`/`fill`) reste
+/// T1 ; dès qu'il contient un `submit`, il passe T2 (approbation humaine). Un batch vide n'existe
+/// pas (refusé par [`parse_batch`]) ; défaut T1 par prudence.
+pub(crate) fn batch_tier(batch: &BrowserBatch) -> Tier {
+    batch
+        .steps
+        .iter()
+        .map(action_tier)
+        .max()
+        .unwrap_or(Tier::T1)
+}
+
+/// Les hosts (canoniques, via [`crate::domain::host_of`] dans [`plan_action`]) des étapes
+/// `navigate` d'un batch, **triés et dédupliqués**. Sert (a) au lint `[rule.domains]` par-host
+/// (défense en profondeur ; le proxy CONNECT reste le vrai gate par-requête) et (b) de **clé de
+/// grant d'approbation** (M4 : une approbation lie CES hosts, jamais un blanc-seing tous-domaines).
+pub(crate) fn batch_domains(batch: &BrowserBatch) -> Vec<String> {
+    let mut hosts: Vec<String> = batch
+        .steps
+        .iter()
+        .filter_map(|a| match a {
+            BrowserAction::Navigate { host, .. } => Some(host.clone()),
+            _ => None,
+        })
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// Exécution côté vibed-root de `browser.run`, APRÈS la gouvernance (tier effectif, lint
+/// `[rule.domains]`, approbation M4 — toutes faites en amont dans `mcp.rs`). Re-valide le batch
+/// (source de vérité unique [`parse_batch`], la même que le helper ré-exécute) et rend le **plan
+/// gouverné**.
+///
+/// ⚠️ **Substrat d'exécution à venir (on-target)** : le spawn du helper `browser` dans une unité
+/// transitoire durcie (classe `Browser`) nécessite encore (1) le **relais du proxy CONNECT** —
+/// l'I/O tunnel ; sans lui `chromium` n'a **aucun** egress (décision de forme process/netns « à
+/// trancher » d'ADR-022) — et (2) un **profil éphémère écrivable** fourni par la classe sandbox
+/// (`--user-data-dir`). Tant que ces deux briques manquent, on rend un statut EXPLICITE
+/// (`executed: false`) plutôt qu'un spawn qui échouerait à l'aveugle ou un faux succès.
+pub(crate) fn run_governed(args: &Value) -> Result<String, String> {
+    let batch = parse_batch(args)?;
+    let tier = batch_tier(&batch);
+    let domains = batch_domains(&batch);
+    Ok(json!({
+        "browser": "governed",
+        "executed": false,
+        "reason": "substrat d'exécution à venir : relais du proxy CONNECT (egress) + profil \
+                   éphémère écrivable de la classe sandbox Browser",
+        "plan": {
+            "steps_total": batch.steps.len(),
+            "tier": tier.as_str(),
+            "domains": domains,
+        },
+    })
+    .to_string())
+}
+
 /// Clés JSON autorisées pour un verbe donné, ou `None` si le verbe est inconnu (auquel cas on
 /// laisse [`plan_action`] produire l'erreur « verbe inconnu » claire, sans la masquer).
 fn allowed_step_keys(verb: &str) -> Option<&'static [&'static str]> {
@@ -1348,6 +1423,71 @@ mod tests {
         // browser.evaluate n'est PAS dans la surface — exclu par construction.
         assert_eq!(verb_tier("evaluate"), None);
         assert_eq!(verb_tier("download"), None);
+    }
+
+    #[test]
+    fn batch_tier_is_the_max_of_verbs_and_domains_are_navigate_hosts() {
+        // Batch purement lecture → T1 ; domaines = hosts navigate triés + dédupliqués.
+        let ro = BrowserBatch {
+            steps: vec![
+                BrowserAction::Navigate {
+                    host: "b.com".into(),
+                    url: "https://b.com/".into(),
+                },
+                BrowserAction::Read,
+                BrowserAction::Navigate {
+                    host: "a.com".into(),
+                    url: "https://a.com/x".into(),
+                },
+                BrowserAction::Navigate {
+                    host: "a.com".into(),
+                    url: "https://a.com/y".into(),
+                },
+            ],
+        };
+        assert_eq!(batch_tier(&ro), Tier::T1);
+        assert_eq!(
+            batch_domains(&ro),
+            vec!["a.com".to_string(), "b.com".to_string()]
+        );
+
+        // Un `submit` escalade TOUT le batch à T2 (approbation humaine).
+        let rw = BrowserBatch {
+            steps: vec![
+                BrowserAction::Navigate {
+                    host: "a.com".into(),
+                    url: "https://a.com/".into(),
+                },
+                BrowserAction::Fill {
+                    selector: "#q".into(),
+                    value: "x".into(),
+                },
+                BrowserAction::Submit {
+                    selector: "form".into(),
+                },
+            ],
+        };
+        assert_eq!(batch_tier(&rw), Tier::T2);
+        assert_eq!(batch_domains(&rw), vec!["a.com".to_string()]);
+    }
+
+    #[test]
+    fn run_governed_revalidates_and_reports_the_plan_without_executing() {
+        let out = run_governed(&json!({
+            "steps": [
+                {"verb": "navigate", "url": "https://github.com/x"},
+                {"verb": "submit", "selector": "form"}
+            ]
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        // Jamais un faux succès : le substrat d'exécution manque encore.
+        assert_eq!(v["executed"], false);
+        assert_eq!(v["plan"]["steps_total"], 2);
+        assert_eq!(v["plan"]["tier"], "T2"); // le submit escalade
+        assert_eq!(v["plan"]["domains"], json!(["github.com"]));
+        // Batch invalide → Err (fail-closed, jamais un plan bidon).
+        assert!(run_governed(&json!({"steps": []})).is_err());
     }
 
     #[test]
