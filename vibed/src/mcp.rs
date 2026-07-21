@@ -335,7 +335,7 @@ where
 async fn dispatch(
     request: Request,
     policy: &Arc<PolicyEngine>,
-    audit: &AuditLog,
+    audit: &Arc<AuditLog>,
     limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
     approval_dir: &std::path::Path,
@@ -379,7 +379,7 @@ async fn handle_tools_call(
     id: Value,
     params: Value,
     policy: &Arc<PolicyEngine>,
-    audit: &AuditLog,
+    audit: &Arc<AuditLog>,
     limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
     approval_dir: &std::path::Path,
@@ -392,7 +392,11 @@ async fn handle_tools_call(
     if name.is_empty() {
         return error_response(id, -32602, "invalid params: missing tool name");
     }
-    let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+    // Shared, never deep-cloned again: the audit records (blocking pool) and
+    // the execution closure each take an `Arc` on the same parsed arguments —
+    // a `fs.write` payload close to MAX_LINE_BYTES used to be deep-cloned for
+    // the execution task on every allowed call.
+    let args = Arc::new(params.get("arguments").cloned().unwrap_or(Value::Null));
 
     // Extract and normalize the call context before any decision is made.
     let raw_path = args.get("path").and_then(Value::as_str);
@@ -410,7 +414,8 @@ async fn handle_tools_call(
                     Decision::Deny,
                     "blocked_invalid_path",
                     caller,
-                );
+                )
+                .await;
                 return tool_result(
                     id,
                     format!("policy: path '{raw}' is not an absolute, normalizable path"),
@@ -474,7 +479,8 @@ async fn handle_tools_call(
                 Decision::Deny,
                 "target_too_long",
                 caller,
-            );
+            )
+            .await;
             return tool_result(
                 id,
                 format!(
@@ -500,7 +506,8 @@ async fn handle_tools_call(
             Decision::Deny,
             "rate_limited",
             caller,
-        );
+        )
+        .await;
         return tool_result(
             id,
             format!(
@@ -524,7 +531,8 @@ async fn handle_tools_call(
                 Decision::Deny,
                 "blocked_builtin_denylist",
                 caller,
-            );
+            )
+            .await;
             return tool_result(
                 id,
                 format!("policy: path '{path}' is denied by the built-in denylist ({pattern})"),
@@ -611,7 +619,8 @@ async fn handle_tools_call(
                 decision,
                 "blocked",
                 caller,
-            );
+            )
+            .await;
             tool_result(id, format!("policy: tool '{name}' is denied"), true)
         }
         Decision::RequireApproval => {
@@ -645,7 +654,8 @@ async fn handle_tools_call(
                 decision,
                 "pending_approval",
                 caller,
-            );
+            )
+            .await;
             let tier_str = tier.map(Tier::as_str).unwrap_or("?");
             let how = match &request_id {
                 Some(rid) => format!(
@@ -670,7 +680,9 @@ async fn handle_tools_call(
                 decision,
                 &started_outcome,
                 caller,
-            ) {
+            )
+            .await
+            {
                 return tool_result(
                     id,
                     "audit log unavailable: refusing execution (fail-closed)".to_string(),
@@ -678,7 +690,7 @@ async fn handle_tools_call(
                 );
             }
             let tool_name = name.clone();
-            let tool_args = args.clone();
+            let tool_args = Arc::clone(&args);
             let policy_exec = Arc::clone(policy);
             let caller_exec = caller;
             let audit_dir_exec = audit.dir().to_path_buf();
@@ -703,7 +715,8 @@ async fn handle_tools_call(
                         decision,
                         &ok_outcome,
                         caller,
-                    );
+                    )
+                    .await;
                     // Feed the machine's own memory: record executed,
                     // state-changing actions as a reserved `tool_call` journal
                     // event (distinct from the forensic audit log). T0 reads and
@@ -722,7 +735,8 @@ async fn handle_tools_call(
                         decision,
                         &format!("error: {message}"),
                         caller,
-                    );
+                    )
+                    .await;
                     tool_result(id, message, true)
                 }
                 Err(join_error) => {
@@ -734,7 +748,8 @@ async fn handle_tools_call(
                         decision,
                         "panic",
                         caller,
-                    );
+                    )
+                    .await;
                     tool_result(id, format!("internal error: {join_error}"), true)
                 }
             }
@@ -814,16 +829,26 @@ fn try_journal_tool_call(name: &str, tier: Option<Tier>, target: Option<&str>, c
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let tier_str = tier.map(Tier::as_str).unwrap_or("?");
-    if let Err(e) = crate::tools::memory::journal_tool_call_at(
-        std::path::Path::new(MEMORY_DIR),
-        now,
-        name,
-        target,
-        tier_str,
-        caller,
-    ) {
-        warn!("memory journal (tool_call) write failed for '{name}': {e}");
-    }
+    let name = name.to_string();
+    let target = target.map(str::to_string);
+    // Fire-and-forget on the blocking pool, not awaited (the dropped
+    // JoinHandle detaches the task; it still runs): this append is best-effort
+    // by contract (see the call site — a failure never fails the
+    // already-succeeded call), and its open/write contends on APPEND_LOCK with
+    // memory.append writers running on blocking threads. Awaiting it inline
+    // would park a reactor worker on a mutex whose hold time is disk-bound.
+    drop(tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::tools::memory::journal_tool_call_at(
+            std::path::Path::new(MEMORY_DIR),
+            now,
+            &name,
+            target.as_deref(),
+            tier_str,
+            caller,
+        ) {
+            warn!("memory journal (tool_call) write failed for '{name}': {e}");
+        }
+    }));
 }
 
 /// Current unix time in whole seconds (0 on a clock error). Honest note: with
@@ -851,22 +876,47 @@ fn approver_suffix(approver_uid: Option<u32>) -> String {
     }
 }
 
-fn try_audit(
-    audit: &AuditLog,
+/// Append one audit record from the async path WITHOUT parking the reactor on
+/// disk I/O. `AuditLog::record` holds the chain mutex across an open, a write
+/// and a deliberate fsync — milliseconds on NVMe, tens on slower media — and it
+/// used to run directly on a tokio worker, serializing EVERY connection (the
+/// accept loop included) behind whichever call was fsync-ing. The write now
+/// runs on the blocking pool and is awaited to completion, so the fail-closed
+/// contract is untouched: callers still observe the record durably on disk (or
+/// a failure) before proceeding — only WHERE the wait happens moves. A panic in
+/// the audit task counts as an audit failure (fail-closed), like an I/O error.
+async fn try_audit(
+    audit: &Arc<AuditLog>,
     tool: &str,
-    args: &Value,
+    args: &Arc<Value>,
     target: Option<&str>,
     decision: Decision,
     outcome: &str,
     caller: Caller,
 ) -> bool {
-    match audit.record(tool, args, target, decision.as_str(), outcome, caller) {
-        Ok(()) => true,
-        Err(e) => {
-            warn!("audit write failed for tool '{tool}': {e}");
-            false
+    let audit = Arc::clone(audit);
+    let tool = tool.to_string();
+    let args = Arc::clone(args);
+    let target = target.map(str::to_string);
+    let outcome = outcome.to_string();
+    tokio::task::spawn_blocking(move || {
+        match audit.record(
+            &tool,
+            &args,
+            target.as_deref(),
+            decision.as_str(),
+            &outcome,
+            caller,
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("audit write failed for tool '{tool}': {e}");
+                false
+            }
         }
-    }
+    })
+    .await
+    .unwrap_or(false) // a panic in the audit task -> no audit (fail-closed)
 }
 
 // ---------------------------------------------------------------------------
@@ -874,7 +924,20 @@ fn try_audit(
 // ---------------------------------------------------------------------------
 
 /// (name, tier, description, input JSON Schema)
-fn tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
+///
+/// Built once and cached for the daemon's lifetime (the registry is immutable
+/// by construction). It used to be rebuilt — 18 tuples, each with a `json!`
+/// schema tree — on every `tool_tier` lookup, i.e. on every `tools/call` AND
+/// once per audit record walked by the `agents.list` roster loop, which the
+/// HUD polls continuously.
+fn tool_catalog() -> &'static [(&'static str, Tier, &'static str, Value)] {
+    static CATALOG: std::sync::OnceLock<Vec<(&'static str, Tier, &'static str, Value)>> =
+        std::sync::OnceLock::new();
+    CATALOG.get_or_init(build_tool_catalog)
+}
+
+/// The one-time construction behind `tool_catalog` — never call this directly.
+fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
     vec![
         (
             "os.status",
@@ -1200,7 +1263,7 @@ fn derive_deploy(
 
 fn list_tools() -> Vec<Value> {
     tool_catalog()
-        .into_iter()
+        .iter()
         .map(|(name, tier, description, input_schema)| {
             json!({
                 "name": name,
@@ -1979,6 +2042,15 @@ mod tests {
             None,
             "unknown tool has no tier => default-deny"
         );
+    }
+
+    #[test]
+    fn tool_catalog_is_built_once_and_cached() {
+        // Same allocation on every call: the registry (18 tuples, each with a
+        // json! schema tree) must never regress to being rebuilt per lookup —
+        // tool_tier runs on every tools/call and once per audit record walked
+        // by the agents.list roster loop.
+        assert!(std::ptr::eq(tool_catalog(), tool_catalog()));
     }
 
     #[test]
