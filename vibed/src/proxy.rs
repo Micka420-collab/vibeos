@@ -8,11 +8,12 @@
 //! au niveau `navigate` dans `vibed` n'est qu'un lint : un `click` ou une redirection 302
 //! changent de domaine sans repasser par lui — Fable 5).
 //!
-//! **Ce module (premier brick) est PUR** : il ne fait que **parser** la ligne de requête
-//! CONNECT d'un client **hostile** (`chromium` est traité comme hostile par ADR-022). Le
-//! **verdict** `[rule.domains]`, le **relais** bidirectionnel, et la **forme** du proxy
-//! (processus dédié vs thread du helper ; netns) sont des incréments ultérieurs (décision de
-//! forme « à trancher » d'ADR-022) — isolés ici pour tester le parsing sans réseau.
+//! **Ce module est PUR** (sans réseau, testable isolément) : il **parse** la ligne de requête
+//! CONNECT d'un client **hostile** ([`parse_connect_target`]) et rend le **verdict**
+//! `[rule.domains]` par requête ([`connect_decision`] → tunnel / refus). Le **relais**
+//! bidirectionnel (I/O), la **forme** du proxy (processus dédié vs thread du helper ; netns) et
+//! **d'où vient l'allowlist approuvée** sont des incréments ultérieurs (décision de forme « à
+//! trancher » d'ADR-022) — l'allowlist est prise en paramètre ici, form-agnostique.
 //!
 //! **Contrat CONNECT** (RFC 9110 §9.3.6) : la ligne de requête est `CONNECT authority HTTP/1.1`
 //! où `authority = host:port`, le **port est obligatoire**, et il n'y a **jamais** de schéma
@@ -120,6 +121,51 @@ pub fn parse_connect_target(request: &[u8]) -> Result<(String, u16), String> {
     }
 
     Ok((host, port))
+}
+
+/// Réponse HTTP renvoyée au client sur un refus (parse raté). Corps vide (`Connection: close`) :
+/// un `chromium` hostile connaît déjà la validité de SA requête, rien à lui apprendre.
+const RESPONSE_BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+/// Réponse HTTP sur un refus de politique (host hors-allowlist). Gouvernance transparente :
+/// l'allowlist n'est pas un secret vis-à-vis de l'agent.
+const RESPONSE_FORBIDDEN: &[u8] = b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
+
+/// La décision du proxy pour une requête CONNECT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectDecision {
+    /// Autorisé : le relais (incrément suivant) DOIT ouvrir un tunnel vers `(host, port)`, écrire
+    /// `HTTP/1.1 200 Connection Established\r\n\r\n` au client, puis relayer les octets.
+    Tunnel { host: String, port: u16 },
+    /// Refusé : le relais DOIT écrire `response` au client puis **fermer** — jamais de tunnel.
+    Reject { response: &'static [u8] },
+}
+
+/// Décide, pour la requête CONNECT d'un `chromium` **hostile** et l'allowlist **approuvée** de la
+/// session (les patterns `[rule.domains]` autorisés pour CETTE session), si le tunnel est permis.
+/// **Fail-closed** : parse raté → `Reject(400)` ; host hors-allowlist → `Reject(403)` ; sinon
+/// `Tunnel`. C'est ICI que l'enforcement domaine par-requête vit (le check `navigate` amont n'est
+/// qu'un lint : un `click`/302 change de domaine sans repasser par lui — Fable 5).
+///
+/// Le host est déjà validé/canonique (via [`parse_connect_target`] → `is_valid_host`), donc
+/// [`crate::domain::domain_matches_any`] voit la **même** forme que le lint `navigate` — pas de
+/// différentiel. **D'où vient `allowed`** (comment `vibed` descend l'allowlist approuvée au proxy)
+/// est la décision de forme « à trancher » d'ADR-022 — pris en paramètre ici, form-agnostique.
+pub fn connect_decision(request: &[u8], allowed: &[String]) -> ConnectDecision {
+    let (host, port) = match parse_connect_target(request) {
+        Ok(hp) => hp,
+        Err(_) => {
+            return ConnectDecision::Reject {
+                response: RESPONSE_BAD_REQUEST,
+            }
+        }
+    };
+    if crate::domain::domain_matches_any(allowed, &host) {
+        ConnectDecision::Tunnel { host, port }
+    } else {
+        ConnectDecision::Reject {
+            response: RESPONSE_FORBIDDEN,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +308,93 @@ mod tests {
         assert!(parse_connect_target(&giant)
             .unwrap_err()
             .contains("CRLF absent"));
+    }
+
+    // ----- connect_decision : verdict [rule.domains] par requête -----
+
+    fn req(authority: &str) -> Vec<u8> {
+        format!("CONNECT {authority} HTTP/1.1\r\n\r\n").into_bytes()
+    }
+
+    #[test]
+    fn connect_decision_tunnels_an_allowlisted_exact_host() {
+        let allowed = vec!["github.com".to_string()];
+        assert_eq!(
+            connect_decision(&req("github.com:443"), &allowed),
+            ConnectDecision::Tunnel {
+                host: "github.com".to_string(),
+                port: 443
+            }
+        );
+        // Casse insensible : le host est canonicalisé en minuscules avant le match.
+        assert_eq!(
+            connect_decision(&req("GitHub.com:443"), &allowed),
+            ConnectDecision::Tunnel {
+                host: "github.com".to_string(),
+                port: 443
+            }
+        );
+        // Un sous-domaine n'est PAS couvert par un pattern exact.
+        assert!(matches!(
+            connect_decision(&req("api.github.com:443"), &allowed),
+            ConnectDecision::Reject {
+                response: RESPONSE_FORBIDDEN
+            }
+        ));
+    }
+
+    #[test]
+    fn connect_decision_respects_anchored_subdomain_wildcards() {
+        let allowed = vec!["*.github.com".to_string()];
+        // Sous-domaine : autorisé.
+        assert!(matches!(
+            connect_decision(&req("api.github.com:443"), &allowed),
+            ConnectDecision::Tunnel { .. }
+        ));
+        // Apex NON couvert par `*.` (il faut lister les deux — invariant domain_match).
+        assert!(matches!(
+            connect_decision(&req("github.com:443"), &allowed),
+            ConnectDecision::Reject { .. }
+        ));
+        // Ancrage à droite : `evil-github.com` finit par `-github.com`, pas `.github.com`.
+        assert!(matches!(
+            connect_decision(&req("evil-github.com:443"), &allowed),
+            ConnectDecision::Reject { .. }
+        ));
+    }
+
+    #[test]
+    fn connect_decision_is_fail_closed_on_deny_and_on_malformed() {
+        // Host hors-allowlist → 403.
+        assert_eq!(
+            connect_decision(&req("evil.example:443"), &["github.com".to_string()]),
+            ConnectDecision::Reject {
+                response: RESPONSE_FORBIDDEN
+            }
+        );
+        // Allowlist VIDE → tout refusé (deny-par-défaut).
+        assert!(matches!(
+            connect_decision(&req("github.com:443"), &[]),
+            ConnectDecision::Reject {
+                response: RESPONSE_FORBIDDEN
+            }
+        ));
+        // Requête malformée (host non canonique / parse raté) → 400, jamais un tunnel.
+        assert_eq!(
+            connect_decision(
+                b"CONNECT 10.0.0.1:443 HTTP/1.1\r\n",
+                &["10.0.0.1".to_string()]
+            ),
+            ConnectDecision::Reject {
+                response: RESPONSE_BAD_REQUEST
+            }
+        );
+        // Même si le pattern « matcherait », un parse raté ferme AVANT le verdict (400).
+        assert!(matches!(
+            connect_decision(b"GET / HTTP/1.1\r\n", &["*.x.com".to_string()]),
+            ConnectDecision::Reject {
+                response: RESPONSE_BAD_REQUEST
+            }
+        ));
     }
 }
