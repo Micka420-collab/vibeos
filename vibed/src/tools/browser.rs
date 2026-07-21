@@ -562,13 +562,40 @@ pub(crate) const MAX_BATCH_STEPS: usize = 16;
 /// Borne de l'**agrégat** remonté (ADR-022 addendum, Fable 5) : borner chaque résultat ne
 /// suffit pas ; 16 lectures bâtiraient un JSON que le cap du pipe tronquerait salement. On
 /// arrête le batch dès que le cumul dépasse ce seuil ET qu'il reste des étapes (voir `run_batch`).
-const MAX_BATCH_RESULT_BYTES: usize = 4 * 1024 * 1024;
+///
+/// **3 MiB, pas 4** : le pire cas légitime sérialisé vaut `MAX_BATCH_RESULT_BYTES` (agrégat des
+/// non-dernières étapes) + `MAX_STEP_RESULT_BYTES` (dernière étape, exemptée de l'agrégat) +
+/// l'enveloppe JSON. À 4+4 MiB ça atteignait 8 MiB PILE = `sandbox::STDOUT_CAP`, et l'enveloppe
+/// (non comptée par `json_size`, cf. `run_batch`) faisait DÉPASSER le cap du pipe → `spawn_transient`
+/// **tuait** le helper et renvoyait `Err` **rejouable** alors que TOUT le batch avait tourné →
+/// re-exécution → double-POST d'un `click`/`fill` intercalé (Fable 5, couture browser↔sandbox).
+/// L'assertion `const` ci-dessous **verrouille** l'invariant à la compilation.
+const MAX_BATCH_RESULT_BYTES: usize = 3 * 1024 * 1024;
 
 /// Borne **par étape** (Fable 5) : le cap d'agrégat seul est crevable par un **unique** body
 /// géant (une page hostile servant ~16 Mio d'outerHTML passe sous `MAX_FRAME` du codec). On
 /// borne donc chaque résultat AVANT de l'agréger — fail-closed : un body sur-taille devient une
 /// étape `failed`, l'agent ne reçoit pas de données hostiles partielles.
 const MAX_STEP_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Marge pour l'**enveloppe JSON** que `run_batch` ajoute autour des corps mais que `json_size`
+/// (qui ne mesure QUE les corps) ne compte pas : le wrapper `{"index":_,"status":_,"result":_}`
+/// par étape (≤ 16) plus l'objet top-level `{"batch":_,"attached":_,"steps":[_],"steps_total":_}`.
+/// L'overhead réel est ~1 KiB ; 64 KiB est délibérément large (marge sur la marge).
+const RESULT_ENVELOPE_MARGIN: usize = 64 * 1024;
+
+/// **Invariant inter-module verrouillé à la compilation** (couture browser↔sandbox, Fable 5) : le
+/// JSON complet que `run_browser` écrit sur stdout — corps agrégés (`MAX_BATCH_RESULT_BYTES` pour
+/// les non-dernières + `MAX_STEP_RESULT_BYTES` pour la dernière) PLUS l'enveloppe — DOIT tenir sous
+/// [`crate::sandbox::STDOUT_CAP`], sinon `spawn_transient` tue un helper qui a pourtant fini et
+/// vibed voit un échec rejouable (→ double-POST). Toute dérive future d'un de ces caps casse le
+/// build ici plutôt qu'en production.
+const _: () = assert!(
+    MAX_BATCH_RESULT_BYTES + MAX_STEP_RESULT_BYTES + RESULT_ENVELOPE_MARGIN
+        <= crate::sandbox::STDOUT_CAP,
+    "les caps de résultat browser + l'enveloppe doivent tenir sous sandbox::STDOUT_CAP \
+     (sinon un batch entièrement exécuté est refusé comme rejouable → double-POST)"
+);
 
 /// L'état d'une action dans un batch (ADR-022 addendum, Fable 5). Le type à **trois** variantes
 /// force le futur incrément `submit` à traiter explicitement `Indeterminate` — le mapping
@@ -577,10 +604,11 @@ const MAX_STEP_RESULT_BYTES: usize = 4 * 1024 * 1024;
 enum StepStatus {
     Completed,
     Failed,
-    /// **RÉSERVÉ** : un `submit` dont le POST est parti mais dont la réponse a timeout. **Jamais**
-    /// `Failed` (sinon double-POST au retry). Aucun verbe actuel ne le produit ; quand `submit`
-    /// atterrira, `run_action` devra distinguer « échec AVANT émission » (`Failed`) d'« échec
-    /// APRÈS émission réseau » (`Indeterminate`) — cela changera la signature de `run_action`.
+    /// Une action à effet distant (`click`/`fill`/`submit`) dont la commande CDP a échoué APRÈS
+    /// avoir potentiellement été émise — la session est empoisonnée (`CdpSession::is_poisoned`),
+    /// donc le POST/effet a PEUT-ÊTRE eu lieu. **Jamais** `Failed` (sinon double-POST/double-effet
+    /// au retry). Produit par `run_object_action` quand `callFunctionOn` rend `Err` sur une session
+    /// empoisonnée ; l'appelant NE DOIT PAS ré-exécuter le batch.
     Indeterminate,
 }
 
