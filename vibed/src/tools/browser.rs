@@ -325,12 +325,30 @@ pub(crate) fn run_action<C: CdpChannel>(
         BrowserAction::Click { selector } => {
             // Binding par-objet (ADR-022) : le sélecteur est un PARAMÈTRE de `DOM.querySelector`,
             // le nœud est lié en `this` d'une fonction CONSTANTE — JAMAIS d'interpolation.
+            //
+            // Garde de TIER (Fable 5 F1) : `click` est T1, mais cliquer un SUBMITTER de formulaire
+            // (`<button>` type submit/défaut, `<input type=submit|image>`) déclenche un POST
+            // mutant — c'est le plancher T2 de `submit`, et le danger double-POST qui a fait
+            // différer `submit`. On REFUSE ce cas (fonction TOUJOURS constante) : l'agent doit
+            // passer par `browser.submit`. `closest` couvre aussi un clic sur un DESCENDANT du
+            // bouton (qui bulle et soumettrait quand même).
+            //
+            // ⚠️ Navigation par click (Fable 5 F2) : un click sur `<a href=autre-hôte>` /
+            // `target=_blank` navigue SANS repasser par `[rule.domains]` de `navigate` ; le
+            // contrôle est le PROXY egress (comme les redirections). Invariant du câblage live :
+            // le proxy CONNECT DOIT atterrir AVANT que `browser.*` ne soit exposé.
             let object_id = resolve_object(session, page, selector)?;
             call_on_object(
                 session,
                 page,
                 &object_id,
-                "function() { this.click(); }",
+                "function() { const b = this.closest ? this.closest('button, input') : null; \
+                 if (b && b.form) { const t = (b.getAttribute('type') || \
+                 (b.tagName === 'BUTTON' ? 'submit' : '')).toLowerCase(); \
+                 if ((b.tagName === 'BUTTON' && t === 'submit') || \
+                 (b.tagName === 'INPUT' && (t === 'submit' || t === 'image'))) \
+                 throw new Error('submitter de formulaire — utilisez browser.submit (T2)'); } \
+                 this.click(); }",
                 json!([]),
             )?;
             Ok(json!({ "clicked": true }))
@@ -338,12 +356,18 @@ pub(crate) fn run_action<C: CdpChannel>(
         BrowserAction::Fill { selector, value } => {
             let object_id = resolve_object(session, page, selector)?;
             // La VALEUR est un ARGUMENT (`arguments[0]`), JAMAIS dans la source de la fonction —
-            // c'est ce qui garde `browser.evaluate` exclu même pour une valeur hostile.
+            // c'est ce qui garde `browser.evaluate` exclu même pour une valeur hostile. Garde
+            // anti-cloaking (Fable 5 F3) : une cible sans propriété `value` (contenteditable,
+            // élément générique) fait ÉCHOUER le fill au lieu de renvoyer `filled: true` menteur.
+            // (`<select>`/checkbox ONT `value` mais une sémantique différente — limite
+            // fonctionnelle assumée, pas un mensonge d'exécution.)
             call_on_object(
                 session,
                 page,
                 &object_id,
-                "function(v) { this.focus(); this.value = v; \
+                "function(v) { if (!('value' in this)) \
+                 throw new Error('cible sans propriété value — fill inapplicable'); \
+                 this.focus(); this.value = v; \
                  this.dispatchEvent(new Event('input', { bubbles: true })); \
                  this.dispatchEvent(new Event('change', { bubbles: true })); }",
                 json!([{ "value": value }]),
@@ -774,10 +798,12 @@ mod tests {
     fn click_binds_by_object_selector_as_param_and_constant_function() {
         let chan = FakeCdp::new(cdp_object_binding(42, "OBJ1", json!({"result": {}})));
         let mut s = CdpSession::new(chan);
+        // Sélecteur DISTINCTIF (un token qui n'apparaît pas dans la fonction constante) pour que
+        // le test de non-fuite ne collisionne pas avec les mots de la garde submitter.
         let out = run_action(
             &mut s,
             &BrowserAction::Click {
-                selector: "button[type=\"submit\"]".into(),
+                selector: "#zzUniqSel777".into(),
             },
             "PAGE-SID",
         )
@@ -787,7 +813,7 @@ mod tests {
         // querySelector porte le sélecteur en PARAMÈTRE (jamais du JS).
         let qs: Value = serde_json::from_slice(&sent[1][..sent[1].len() - 1]).unwrap();
         assert_eq!(qs["method"], "DOM.querySelector");
-        assert_eq!(qs["params"]["selector"], "button[type=\"submit\"]");
+        assert_eq!(qs["params"]["selector"], "#zzUniqSel777");
         assert_eq!(qs["sessionId"], "PAGE-SID");
         // callFunctionOn : fonction CONSTANTE (this.click()) qui NE contient PAS le sélecteur ;
         // objectId = celui résolu.
@@ -797,8 +823,13 @@ mod tests {
         let f = call["params"]["functionDeclaration"].as_str().unwrap();
         assert!(f.contains("this.click()"));
         assert!(
-            !f.contains("button"),
+            !f.contains("zzUniqSel777"),
             "le sélecteur ne doit JAMAIS entrer dans la source de la fonction : {f}"
+        );
+        // Garde de submitter présente (Fable 5 F1) — régression si retirée.
+        assert!(
+            f.contains("browser.submit"),
+            "la garde anti-submitter T2 doit être dans la fonction : {f}"
         );
     }
 
