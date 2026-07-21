@@ -63,6 +63,9 @@ kvantum         # widget style engine of the VibeOS Dark Global Theme
 jemalloc        # runtime dep of quickshell (built from source, see 4bis)
 qt6-qtsvg       # runtime dep of quickshell (already in the Kinoite base)
 
+## [dnf] 1h. Governed browser substrate — browser.* runtime (ADR-022)
+chromium-headless  # minimal headless_shell (multi-arch x86_64+aarch64, verified 2026-07-21); NEVER launched directly — only via the hardened run_browser helper. See Containerfile 1h.
+
 ## [dnf — VSCodium community rpm repo] 2. Editor
 # VS Code binaries are proprietary/non-redistributable; VSCodium is the MIT
 # build (Open VSX marketplace). See docs/ECOSYSTEM.md.

@@ -537,6 +537,33 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         plymouth-plugin-label \
     && dnf clean all
 
+# --- 1h. Navigateur gouverné : chromium-headless (substrat de browser.*, ADR-022) --
+# `headless_shell`, le binaire Chromium MINIMAL — construit sans alsa/cups/dbus/
+# gconf/gio/kerberos/pulseaudio/udev (surface d'attaque réduite). Packagé par Fedora 44
+# pour x86_64 ET aarch64 (multi-arch préservé — c'est la disparition du showstopper
+# arm64 d'ADR-017 ; vérifié 2026-07-21 : chromium-headless-150.0.7871.124-1.fc44 présent
+# sur les DEUX arches en STABLE, pas updates-testing). Le binaire vit à
+# /usr/lib64/chromium-browser/headless_shell (chromium-headless tire chromium-common).
+#
+# GOUVERNANCE (ADR-022) : chromium n'est JAMAIS lancé directement par l'agent. Il ne
+# tourne que via le mode `run_browser` du helper vibed-tool — service systemd transitoire
+# durci (ToolClass::Browser, ADR-019/022) : profil ÉPHÉMÈRE sans identifiants, egress au
+# plancher IPAddressDeny=any (seule l'IP du proxy CONNECT dédié ouverte), pilotage CDP par
+# PIPE (jamais un port TCP), `--no-sandbox`/`--remote-debugging-port` interdits au niveau
+# argv (le helper refuse de les émettre). La simple PRÉSENCE du binaire n'ouvre aucune
+# capacité nouvelle hors ce chemin gouverné — même modèle que la trousse sécurité (1d-bis)
+# et les outils SaaS (1d-ter) : shippés dans le shell, mais l'invocation par l'IA passe par
+# le tiering vibed. Le module SELinux de confinement de l'exécution est un incrément
+# séparé (le durcissement du chemin run_browser, pas de la présence du binaire).
+#
+# NON épinglé à un NVRA exact, délibérément : chromium bouge très vite et Fedora retire
+# les vieux NVRA des dépôts (un pin casserait les rebuilds, comme les COPR de la couche 1e).
+# Le NEVRA réellement shippé est enregistré dans /usr/share/vibeos/packages-nevra.txt
+# (couche 8), diffable entre releases. install_weak_deps=False garde l'image lean.
+RUN dnf -y install --setopt=install_weak_deps=False \
+        chromium-headless \
+    && dnf clean all
+
 # =============================================================================
 # 2. VSCodium — community rpm repository (paulcarroty)
 #    LICENSING: official VS Code binaries are proprietary and NOT redistributable
