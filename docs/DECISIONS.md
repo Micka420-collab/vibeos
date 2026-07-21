@@ -1602,3 +1602,110 @@ contraintes de cibles (`paths`/`services`/`domains` allowlists, `deploy` targets
   restreindra.
 - Résiduel accepté : `base_decision` est une simplification (elle n'exécute pas
   `evaluate`) ; c'est assumé et **documenté dans le manifeste lui-même** (`note`).
+
+---
+
+## ADR-025 — Réglage noyau pour charges IA : `sysctl.d` + zram zstd livrés dans l'image — *décidé & livré (session Fable 5, perf couche basse)*
+
+**Statut** : **DÉCIDÉ & livré**. Première configuration noyau custom du dépôt —
+jusqu'ici l'image ne livrait **aucun** `sysctl.d`. (ADR-024 est réservée par
+`os.propose`, ADR-018 reste un numéro sauté — on continue à 025.)
+
+### Contexte
+
+VibeOS est un OS **pour** charges IA : inférence locale (ollama/llama.cpp,
+modèles 7B-13B mmap-és sur 16 Go de référence), téléchargements multi-Go
+(modèles, images OCI), agents qui **surveillent** des arbres de fichiers
+(Claude Code, éditeurs, HUD). Le noyau Fedora générique est réglé pour un
+poste générique. La couche la plus basse que ce dépôt contrôle **sans**
+préempter les chantiers actés est le réglage des tunables à l'exécution :
+
+- la **config kernel dédiée** (compilation) est un chantier **Phase 7+**
+  (ROADMAP §9, axe 2) — cette ADR n'y touche pas, le noyau reste celui de
+  Fedora, signé Fedora ;
+- la **cmdline** sera scellée dans l'**UKI signée** (Phase 4) — cette ADR n'y
+  ajoute **rien** (pas de `vibeos.*=`, pas de paramètre de boot) pour ne pas
+  préempter cette chaîne ni la décision de séquencement de Micka ;
+- le canal choisi — fichiers sous `/usr/lib` cuits dans l'image — est
+  atomique, rollbackable avec l'image (ADR-001) et surchargeable par l'admin
+  via `/etc` (cascade standard `sysctl.d(5)` / `zram-generator.conf(5)`).
+
+### Décision
+
+Deux fichiers de configuration, **zéro binaire, zéro démon** (doctrine
+outils-passifs d'ADR-020 respectée), livrés par le `COPY os/rootfs/` :
+
+1. **`os/rootfs/usr/lib/sysctl.d/50-vibeos-ai.conf`** — chaque valeur y est
+   commentée avec sa source primaire :
+   - `vm.page-cluster=0`, `vm.swappiness=180`, `vm.watermark_boost_factor=0`,
+     `vm.watermark_scale_factor=125` : le jeu cohérent documenté pour un
+     système dont **tout le swap est zram** (Pop!_OS `default-settings`
+     PR #163, Arch Wiki « Zram », noyau `admin-guide/sysctl/vm.rst` — qui
+     autorise explicitement swappiness > 100 pour un swap en mémoire).
+     Le kickstart ne crée **aucune** partition swap (`installer/vibeos.ks`,
+     racine btrfs) : la condition d'application est structurelle, et le
+     garde-fou (« si un swap disque apparaît, redescendre ≤ 100 ») est écrit
+     dans le fichier même.
+   - `vm.dirty_background_bytes=128 Mio`, `vm.dirty_bytes=256 Mio` : bornes
+     **absolues** de writeback (valeurs Pop!_OS ; LWN « The pernicious
+     USB-stick stall ») — un pull ollama multi-Go ne fige plus le bureau à
+     chaque synchronisation de ~3,2 Go de pages sales (20 % de 16 Go).
+   - `fs.inotify.max_user_instances=1024` : le goulot réel des agents
+     observateurs (128 **par uid**, tous processus confondus) ;
+     `max_user_watches` est déjà auto-dimensionné (noyau ≥ 5.11) — pas touché.
+   - `net.ipv4.tcp_congestion_control=bbr` : débit tenu sur les pulls
+     multi-Go à fort BDP/pertes ; `CONFIG_TCP_CONG_BBR=m` vérifié sur le
+     kernel f44, **autoload** de `tcp_bbr` par l'écriture sysctl vérifié dans
+     `net/ipv4/tcp_cong.c` (`request_module`), ordre
+     `After=systemd-modules-load.service` vérifié dans systemd — donc pas de
+     `modules-load.d` redondant. `fq_codel` (défaut systemd) conservé : le
+     pacing TCP interne (noyau ≥ 4.13) a levé l'exigence de `fq`.
+2. **`os/rootfs/usr/lib/systemd/zram-generator.conf.d/50-vibeos.conf`** —
+   `compression-algorithm = zstd` **en drop-in** : la fusion par option est
+   documentée par le man upstream (`zram-generator.conf(5)`), le
+   `zram-size = min(ram, 8192)` de Fedora est conservé, et le fichier vendor
+   `zram-generator.conf` de la base n'est **jamais** écrasé (le piège du
+   COPY-clobber, précédent kdeglobals du Containerfile). zstd ≈ 3,7:1 contre
+   ≈ 2,7:1 pour le lzo-rle par défaut du kernel f44 : sur 16 Go, la capacité
+   effective prime.
+
+**Ce qui est délibérément ABSENT** (cargo cult vérifié inutile sur f44) :
+`vm.max_map_count` (déjà 1048576 depuis F39, systemd `10-map-count.conf`),
+`fs.file-max` (déjà `LONG_MAX` depuis systemd 240), `net.core.default_qdisc`
+(le `fq_codel` de systemd convient à BBR).
+
+**Preuve d'application** : invariant n°18 du selfcheck (`kernel-tuning`) —
+sonde read-only sur deux sentinelles (`vm.page-cluster=0` prouve que
+systemd-sysctl a appliqué le fichier ; `tcp_congestion_control=bbr` prouve
+l'autoload du module, l'hypothèse la plus risquée). Fichier absent (image
+antérieure) = SKIP, jamais FAIL. La **validation sur cible reste
+machine-gated** : aucune de ces valeurs n'a encore été mesurée sur la machine
+de référence (docs/BOOT-VALIDATION.md).
+
+### Alternatives considérées
+
+- **Ne rien faire avant la Phase 7+** : cohérent mais perdant — le réglage de
+  tunables est orthogonal à la compilation d'un noyau custom, réversible par
+  retrait d'un fichier, et le bénéfice (bureau qui ne fige pas pendant un
+  pull, agents qui n'épuisent pas inotify) est immédiat.
+- **`tuned` / profils dynamiques** : un démon de plus dans l'image, contraire
+  à la doctrine outils-passifs (ADR-020), et redondant avec
+  power-profiles-daemon déjà présent (héritage Kinoite).
+- **Paramètres de cmdline kernel** : rejeté — la cmdline appartient au
+  chantier UKI (Phase 4) ; rien ici ne doit y préjuger.
+- **zstd via remplacement du fichier vendor zram** : rejeté — COPY-clobber
+  d'un fichier appartenant à un RPM de la base (`rpm -Va` le signalerait),
+  exactement ce que la garde kdeglobals du Containerfile existe pour empêcher.
+
+### Conséquences
+
+- Le comportement mémoire/IO/réseau de l'image est **réglé pour sa charge
+  déclarée** (IA locale + agents), documenté valeur par valeur, réversible et
+  surchargeable par l'admin sans toucher `/usr`.
+- Résiduel accepté : **BBRv1** peut être agressif envers cubic sur des liens
+  saturés à pertes (poste client — impact assumé) ; `swappiness=180` est
+  **conditionné** à l'absence de swap disque (garde-fou écrit dans le
+  fichier) ; les valeurs sont **sourcées mais non mesurées sur cible** — la
+  mesure est un critère de la validation de boot (machine-gated), et tout
+  ajustement ultérieur passera par un diff d'une ligne dans le même fichier.
+- Le selfcheck passe de 17 à 18 invariants (`kernel-tuning`).

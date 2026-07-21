@@ -5,7 +5,8 @@
 # the invariants only a real boot can prove: vibed.service up, the MCP socket
 # present with the right ownership/mode, the policy loaded fail-closed, the
 # built-in denylist live, the audit chain intact, Genesis done, the immutable
-# root read-only. Every probe is READ-ONLY (no restart, no write, no approval):
+# root read-only, the shipped AI kernel tuning in effect.
+# Every probe is READ-ONLY (no restart, no write, no approval):
 # the single T2 check is a `policy.check` dry-run, never a real mutation.
 #
 # It is version-TOLERANT: capabilities absent from an older image (vibectl,
@@ -252,6 +253,28 @@ if have vibectl; then
     fi
 else
     row SKIP "audit-chain" "vibectl not installed; verify the chain manually (docs/VALIDATION.md)"
+fi
+
+# ============================ KERNEL TUNING =================================
+# ADR-025: AI-workload kernel tuning shipped as image content in
+# /usr/lib/sysctl.d/50-vibeos-ai.conf. Version-tolerant: an image without the
+# file SKIPs (the capability does not exist there), never FAILs. Read-only
+# probe on two sentinels: vm.page-cluster proves systemd-sysctl applied the
+# file, tcp_congestion_control proves the tcp_bbr module AUTOLOADED from the
+# sysctl write (the riskiest assumption of the file — see its header).
+SYSCTL_AI_CONF="/usr/lib/sysctl.d/50-vibeos-ai.conf"
+if [ ! -f "$SYSCTL_AI_CONF" ]; then
+    row SKIP "kernel-tuning" "$SYSCTL_AI_CONF not shipped (older image)"
+elif ! have sysctl; then
+    row SKIP "kernel-tuning" "sysctl unavailable — cannot probe live tunables"
+else
+    pc="$(sysctl -n vm.page-cluster 2>/dev/null)"
+    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+    if [ "$pc" = "0" ] && [ "$cc" = "bbr" ]; then
+        row PASS "kernel-tuning" "AI sysctl in effect (vm.page-cluster=0, tcp_bbr autoloaded)"
+    else
+        row FAIL "kernel-tuning" "shipped $SYSCTL_AI_CONF not in effect (page-cluster=${pc:-?}, tcp=${cc:-?})"
+    fi
 fi
 
 # ============================ REPORT ========================================
