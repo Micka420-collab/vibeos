@@ -129,15 +129,33 @@ const RESPONSE_BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\nConnection: cl
 /// Réponse HTTP sur un refus de politique (host hors-allowlist). Gouvernance transparente :
 /// l'allowlist n'est pas un secret vis-à-vis de l'agent.
 const RESPONSE_FORBIDDEN: &[u8] = b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
+/// Réponse écrite au client quand le tunnel est **autorisé** (RFC 9110 §9.3.6). À partir de cette
+/// ligne, le corps de l'échange CONNECT EST le tunnel brut : plus aucun en-tête, les octets sont
+/// relayés tels quels dans les deux sens. Le status 2xx DOIT précéder tout octet applicatif.
+const RESPONSE_TUNNEL_ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+
+/// Le motif d'un refus CONNECT. Porte la **cause** (400 syntaxe / 403 politique), pas les octets :
+/// le rendu octets vit dans [`tunnel_handshake`], de sorte qu'un refus **ne peut structurellement
+/// pas** porter une réponse `2xx` (le trou du `Reject { response: <200> }` constructible est fermé
+/// — Fable 5). Fail-closed par construction du type, plus par convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectKind {
+    /// Syntaxe invalide (parse raté) → `400 Bad Request`. Client hostile : rien à lui apprendre.
+    BadRequest,
+    /// Host hors-allowlist `[rule.domains]` → `403 Forbidden`. Gouvernance transparente.
+    Forbidden,
+}
 
 /// La décision du proxy pour une requête CONNECT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectDecision {
     /// Autorisé : le relais (incrément suivant) DOIT ouvrir un tunnel vers `(host, port)`, écrire
-    /// `HTTP/1.1 200 Connection Established\r\n\r\n` au client, puis relayer les octets.
+    /// `HTTP/1.1 200 Connection Established\r\n\r\n` au client **une fois le dial réussi**, puis
+    /// relayer les octets (cf. [`tunnel_handshake`] pour l'ordre exact).
     Tunnel { host: String, port: u16 },
-    /// Refusé : le relais DOIT écrire `response` au client puis **fermer** — jamais de tunnel.
-    Reject { response: &'static [u8] },
+    /// Refusé : le relais DOIT écrire la réponse (déterminée par `kind` dans [`tunnel_handshake`])
+    /// au client puis **fermer** — jamais de tunnel.
+    Reject { kind: RejectKind },
 }
 
 /// Décide, pour la requête CONNECT d'un `chromium` **hostile** et l'allowlist **approuvée** de la
@@ -155,7 +173,7 @@ pub fn connect_decision(request: &[u8], allowed: &[String]) -> ConnectDecision {
         Ok(hp) => hp,
         Err(_) => {
             return ConnectDecision::Reject {
-                response: RESPONSE_BAD_REQUEST,
+                kind: RejectKind::BadRequest,
             }
         }
     };
@@ -163,7 +181,42 @@ pub fn connect_decision(request: &[u8], allowed: &[String]) -> ConnectDecision {
         ConnectDecision::Tunnel { host, port }
     } else {
         ConnectDecision::Reject {
-            response: RESPONSE_FORBIDDEN,
+            kind: RejectKind::Forbidden,
+        }
+    }
+}
+
+/// La suite de la boucle CONNECT une fois la décision prise : traduit un [`ConnectDecision`] en
+/// **(octets à écrire au client, cible du tunnel s'il y a lieu)**. C'est la **frontière protocolaire
+/// pure** entre la décision `[rule.domains]` et l'I/O — l'ultime brique testable avant le relais, et
+/// **le seul endroit** où la cause d'un refus ([`RejectKind`]) devient des octets.
+///
+/// - `Tunnel{host,port}` → `(RESPONSE_TUNNEL_ESTABLISHED, Some((host, port)))` : le relais ouvre
+///   D'ABORD le tunnel vers `(host, port)` ; **si et seulement si** le dial réussit, il écrit ce
+///   `200`, puis relaie bidirectionnellement ; sinon il **ferme** (le `502 Bad Gateway` est l'affaire
+///   de l'incrément d'I/O — jamais de `200` optimiste avant que la cible réponde, cf. squid / RFC
+///   9110 §9.3.6 : le `2xx` signale que l'établissement A réussi). L'ordre dial-puis-`200` est le
+///   même que celui gravé sur le bras `Tunnel` de l'enum — cette fonction ne le contredit pas.
+/// - `Reject{kind}` → `(octets 400/403, None)` : le relais écrit ces octets puis **ferme** — `None`
+///   rend la cible **inatteignable par construction**, jamais de tunnel sur un refus.
+///
+/// **Fail-closed structurel (par le type, pas par convention)** : seul le bras `Tunnel` produit une
+/// cible `Some` ET des octets `2xx` ; un `Reject` ne porte qu'un [`RejectKind`] (400/403), il ne peut
+/// donc ni produire de cible ni **annoncer** un tunnel — un `Reject { response: <200> }` est
+/// irreprésentable. **Forme-agnostique** : ne décrit QUE les octets protocolaires échangés avec le
+/// client — *comment* le tunnel s'ouvre (processus dédié dans le netns du navigateur, cf. plancher
+/// egress `127.66.0.1`, vs thread) est la décision de forme « à trancher » d'ADR-022, laissée à
+/// l'incrément d'I/O suivant.
+#[must_use]
+pub fn tunnel_handshake(decision: ConnectDecision) -> (&'static [u8], Option<(String, u16)>) {
+    match decision {
+        ConnectDecision::Tunnel { host, port } => (RESPONSE_TUNNEL_ESTABLISHED, Some((host, port))),
+        ConnectDecision::Reject { kind } => {
+            let response = match kind {
+                RejectKind::BadRequest => RESPONSE_BAD_REQUEST,
+                RejectKind::Forbidden => RESPONSE_FORBIDDEN,
+            };
+            (response, None)
         }
     }
 }
@@ -338,7 +391,7 @@ mod tests {
         assert!(matches!(
             connect_decision(&req("api.github.com:443"), &allowed),
             ConnectDecision::Reject {
-                response: RESPONSE_FORBIDDEN
+                kind: RejectKind::Forbidden
             }
         ));
     }
@@ -369,14 +422,14 @@ mod tests {
         assert_eq!(
             connect_decision(&req("evil.example:443"), &["github.com".to_string()]),
             ConnectDecision::Reject {
-                response: RESPONSE_FORBIDDEN
+                kind: RejectKind::Forbidden
             }
         );
         // Allowlist VIDE → tout refusé (deny-par-défaut).
         assert!(matches!(
             connect_decision(&req("github.com:443"), &[]),
             ConnectDecision::Reject {
-                response: RESPONSE_FORBIDDEN
+                kind: RejectKind::Forbidden
             }
         ));
         // Requête malformée (host non canonique / parse raté) → 400, jamais un tunnel.
@@ -386,15 +439,79 @@ mod tests {
                 &["10.0.0.1".to_string()]
             ),
             ConnectDecision::Reject {
-                response: RESPONSE_BAD_REQUEST
+                kind: RejectKind::BadRequest
             }
         );
         // Même si le pattern « matcherait », un parse raté ferme AVANT le verdict (400).
         assert!(matches!(
             connect_decision(b"GET / HTTP/1.1\r\n", &["*.x.com".to_string()]),
             ConnectDecision::Reject {
-                response: RESPONSE_BAD_REQUEST
+                kind: RejectKind::BadRequest
             }
         ));
+    }
+
+    // ----- tunnel_handshake : décision → octets client + cible -----
+
+    #[test]
+    fn tunnel_handshake_maps_a_tunnel_to_the_200_and_the_target() {
+        let (response, target) = tunnel_handshake(ConnectDecision::Tunnel {
+            host: "github.com".to_string(),
+            port: 443,
+        });
+        // Câblage : le bras Tunnel rend bien la constante 200.
+        assert_eq!(response, RESPONSE_TUNNEL_ESTABLISHED);
+        // Octets EXACTS figés (littéral indépendant de la constante) : un `2xx` à CONNECT ne doit
+        // porter NI Content-Length NI Transfer-Encoding (RFC 9112) — la nudité de la ligne EST
+        // l'invariant, qu'un futur « enrichissement » de la constante casserait sans ce verrou.
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 Connection Established\r\n\r\n".as_slice()
+        );
+        assert_eq!(target, Some(("github.com".to_string(), 443)));
+    }
+
+    #[test]
+    fn tunnel_handshake_maps_a_reject_to_its_response_and_no_target() {
+        // La cause du refus devient des octets ICI (le seul endroit) — aucune cible, jamais de
+        // tunnel. 403 (politique).
+        assert_eq!(
+            tunnel_handshake(ConnectDecision::Reject {
+                kind: RejectKind::Forbidden
+            }),
+            (RESPONSE_FORBIDDEN, None)
+        );
+        // 400 (parse).
+        assert_eq!(
+            tunnel_handshake(ConnectDecision::Reject {
+                kind: RejectKind::BadRequest
+            }),
+            (RESPONSE_BAD_REQUEST, None)
+        );
+    }
+
+    #[test]
+    fn the_pure_pipeline_parse_decide_handshake_is_coherent() {
+        // Le pipeline pur complet : requête hostile → verdict → octets/cible, bout en bout.
+        let allowed = vec!["*.github.com".to_string()];
+
+        // Autorisé : le handshake livre le 200 ET une cible relayable = celle validée/canonique.
+        let (resp, target) =
+            tunnel_handshake(connect_decision(&req("Api.GitHub.com:443"), &allowed));
+        assert_eq!(resp, RESPONSE_TUNNEL_ESTABLISHED);
+        assert_eq!(target, Some(("api.github.com".to_string(), 443)));
+
+        // Hors-allowlist : 403, aucune cible — impossible de relayer un refus (garanti par le type).
+        let (resp, target) = tunnel_handshake(connect_decision(&req("evil.example:443"), &allowed));
+        assert_eq!(resp, RESPONSE_FORBIDDEN);
+        assert_eq!(target, None);
+
+        // Malformé (host IP littérale) : 400, aucune cible — ferme AVANT toute idée de tunnel.
+        let (resp, target) = tunnel_handshake(connect_decision(
+            b"CONNECT 10.0.0.1:443 HTTP/1.1\r\n",
+            &allowed,
+        ));
+        assert_eq!(resp, RESPONSE_BAD_REQUEST);
+        assert_eq!(target, None);
     }
 }
