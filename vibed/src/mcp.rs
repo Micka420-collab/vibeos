@@ -1180,6 +1180,25 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
              Read-only, takes no arguments.",
             json!({"type": "object", "properties": {}}),
         ),
+        (
+            "user.model",
+            Tier::T0,
+            "The machine's DERIVED, TRANSPARENT understanding of YOU — how you \
+             work — and a deterministic anticipation of your next moves (ADR-028, \
+             symbiose). Folded from data VibeOS already holds under governance, \
+             CONFINED to your uid (never another user): your explicit \
+             preferences (user-memory fold), your patterns and rhythm and the \
+             friction you hit (from the audit trail), what the agent has observed \
+             (recent journal notes), and 'anticipations' — your most likely next \
+             governed actions ranked by a frequency×recency heuristic, each with \
+             its reason. NOT a trained predictor, NOT hidden profiling, NOT raw \
+             keystrokes: every field is derived from records you can inspect, and \
+             it exposes nothing memory.query + agent.activity would not for your \
+             own uid. Optional 'window_seconds' (default 7d, max 30d). Read-only.",
+            json!({"type": "object", "properties": {
+                "window_seconds": {"type": "integer", "minimum": 1}
+            }}),
+        ),
     ]
 }
 
@@ -1332,6 +1351,7 @@ fn execute_tool(
         "agent.sessions" => agent_sessions(),
         "agents.list" => agents_list(args, caller, audit_dir),
         "agent.activity" => agent_activity(args, caller, audit_dir),
+        "user.model" => crate::tools::user_model::user_model(args, caller, audit_dir),
         "policy.check" => policy_check(args, policy),
         "policy.capabilities" => crate::tools::policy_tool::capabilities(policy),
         _ => Err(format!("unknown tool: {name}")),
@@ -1539,7 +1559,10 @@ const TAIL_CACHE_MAX_RECORDS: usize = 8192;
 /// dropped (daily rotation); a delta that does not yet end in `'\n'` leaves the
 /// incomplete line unconsumed for the next probe (the writer emits the line and
 /// its newline as separate writes, so a reader can observe the gap).
-fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
+///
+/// `pub(crate)` so the `user.model` derivation (ADR-028) can reuse the same
+/// bounded, cached per-uid audit view instead of re-reading the trail.
+pub(crate) fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
     const MAX_TAIL_BYTES: u64 = 512 * 1024;
     use std::collections::HashMap;
     use std::io::{Read, Seek, SeekFrom};
@@ -2264,6 +2287,7 @@ mod tests {
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
         assert_eq!(tool_tier("agent.activity"), Some(Tier::T0));
+        assert_eq!(tool_tier("user.model"), Some(Tier::T0));
         assert_eq!(
             tool_tier("disk.wipe"),
             None,

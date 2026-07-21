@@ -14,3 +14,4 @@ pub(crate) mod propose;
 pub(crate) mod sandbox_tool;
 pub(crate) mod sectools;
 pub(crate) mod svc;
+pub(crate) mod user_model;

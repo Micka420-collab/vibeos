@@ -21,8 +21,11 @@
 > citoyen relit ses propres actes (refus compris), surface 18 → 19. Puis **mode
 > autonome / ouvert** ([ADR-027](docs/DECISIONS.md), fondation) : déverrouillage
 > humain hors-bande (`vibectl mode open`), T2/T3 auto-accordés en fenêtre bornée,
-> panneau danger + kill-switch + audit `*_open_mode`, no-self-escalation — **340
-> tests verts**, 19ᵉ invariant selfcheck `operating-mode`. La mesure sur cible reste
+> panneau danger + kill-switch + audit `*_open_mode`, no-self-escalation. Puis
+> **symbiose** : `user.model` (T0, [ADR-028](docs/DECISIONS.md)) — modèle dérivé &
+> transparent de *comment vous travaillez* + anticipation déterministe, confiné
+> par uid, sans surveillance nouvelle — surface 19 → 20, **346 tests verts**,
+> 19ᵉ invariant selfcheck `operating-mode`. La mesure sur cible reste
 > machine-gated. *(Précédent : 2026-07-19, trousse SaaS complète dev→prod —
 > [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
 
@@ -167,6 +170,13 @@
   - **Panneau danger (données livrées)** : `os.status` porte `mode { mode, danger, remaining_secs, set_by_uid, reason }` (le HUD le sonde déjà) ; **19ᵉ invariant selfcheck `operating-mode`** (open = PASS signalé fort). Bandeau Plasma/Quickshell = présentation, à venir.
   - **Sur-couches conçues, non livrées** (ADR-027) : auto-planification crons/battements de cœur **révocables**, usage d'apps (sur `browser.*`/Wayland), auto-modification via `os.propose` (racine immuable → nouvelle image, ADR-024).
   - **340 tests verts** (dont module `mode` : fail-safe, fenêtre, clamp, kill-switch, statut, perms 0600 ; + 2 e2e : auto-grant audité `*_open_mode` & deny inchangé, `os.status`.mode danger) ; clippy -D warnings (2 configs), fmt, log-hygiene, shellcheck OK. Docs : ADR-027, BOOT-VALIDATION (19 checks), 4 README (compteur → 340, 19 invariants).
+
+- **2026-07-21 (suite de session) — symbiose : `user.model` (T0, [ADR-028](docs/DECISIONS.md))** — sur demande de Micka : *l'agent comprend comment l'humain travaille, ce qu'il fait, et anticipe ses actions — une vraie symbiose machine/IA/humain*. Construit **vie-privée-d'abord** : un modèle **dérivé & transparent**, pas une surveillance.
+  - **Module pur `tools/user_model.rs`** (`derive_user_model`, déterministe, testé) : `preferences` (fold mémoire `user/`), `patterns` (outils/cibles récurrents), `friction` (actions refusées/approuvées — candidates à pré-arranger), `rhythm` (histogramme par heure UTC), `observed` (notes de journal typées récentes), et **`anticipations`** — prochaines actions gouvernées probables classées par heuristique **fréquence×récence, chacune avec sa raison** (jamais un score opaque).
+  - **Sûr & honnête par conception** : **confiné par uid** (SO_PEERCRED, comme `agent.activity`) ; **aucune fuite nouvelle** (mêmes données que `memory.query` + `agent.activity` pour le même uid, agrégées) ; **aucune surveillance nouvelle** (jamais les frappes/l'historique shell) ; **local & possédé** (`/var/lib/vibeos/memory/`) ; anticipation ≠ prédicteur entraîné (le champ `note` le dit).
+  - Règle politique `user-model` (T0 allow, confiné uid) ; surface d'outils 19 → **20**.
+  - **346 tests verts** (module : fréquence/récence, friction vs exécution, rythme par heure, préférences+observed plafonné, vide bien formé ; + 1 e2e : dérivation depuis de vraies actions auditées & confinement uid) ; clippy -D warnings (2 configs), fmt, log-hygiene, verify-roadmap-truth OK. Docs : ADR-028, 4 README (surface 20, compteur → 346).
+  - **Sur-couches conçues (ADR-028)** : signal **opt-in** plus riche, **embeddings locaux** (ollama, `knowledge/embeddings/` réservé), branchement sur le mode ouvert (ADR-027) et `os.propose` (ADR-024) pour une IA qui propose *à bon escient*.
 
 - **2026-07-21 (suite de session) — IA citoyenne : `agent.activity` (T0, [ADR-026](docs/DECISIONS.md))** — le citoyen relit ses **propres actes**. Deuxième brique après `policy.capabilities` (ADR-023) : là où celle-ci donne la carte *statique* des droits et `agent.thinking` la biographie des *pensées*, `agent.activity` rend la biographie des *actes* — les appels gouvernés récents de l'appelant, du plus récent au plus ancien, **refus compris** (`deny`/`require_approval`), pour apprendre par l'expérience les frontières que le manifeste ne décrit qu'en théorie. **Confiné par uid** (SO_PEERCRED), fenêtre + nombre de lignes bornés, réutilise le cache incrémental de la queue d'audit ; **aucune fuite nouvelle** (même donnée qu'`agents.list` pour son propre uid — que `agents.list` excluait justement). Règle ajoutée à `agent-observability` (T0 allow) ; surface d'outils 18 → **19**. **332 tests verts** (dont 2 nouveaux : confinement/chronologie/refus, tier T0) ; test d'intégration de politique étendu ; docs recalées (ADR-026, 4 README).
 

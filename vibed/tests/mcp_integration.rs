@@ -558,6 +558,62 @@ async fn os_status_exposes_the_operating_mode_for_the_danger_panel() {
     srv.cleanup();
 }
 
+/// user.model (T0) derives a transparent model from the caller's OWN governed
+/// actions and stays confined to the caller's uid.
+#[tokio::test]
+async fn user_model_derives_from_governed_actions_and_is_uid_confined() {
+    let mut srv = Server::start("user-model");
+
+    // Generate a little governed history for TEST_UID: os.status runs several
+    // times (T0 allow → executed patterns), a denylisted read is refused
+    // (friction), all audited under this uid.
+    for i in 0..3 {
+        let (err, _) = srv.tool_call(10 + i, "os.status", json!({})).await;
+        assert!(!err, "os.status is T0");
+    }
+    let (denied, _) = srv
+        .tool_call(20, "fs.read", json!({"path": "/etc/shadow"}))
+        .await;
+    assert!(denied, "shadow read is on the built-in denylist");
+
+    // The model folds those into patterns + friction, transparently.
+    let (err, text) = srv.tool_call(30, "user.model", json!({})).await;
+    assert!(!err, "user.model is T0 and must succeed: {text}");
+    let model: Value = serde_json::from_str(&text).expect("user.model returns JSON");
+
+    assert_eq!(
+        model["uid"], TEST_UID,
+        "the model is stamped with the caller uid"
+    );
+    let patterns = model["patterns"].as_array().unwrap();
+    assert!(
+        patterns
+            .iter()
+            .any(|p| p["tool"] == "os.status" && p["count"].as_u64().unwrap_or(0) >= 3),
+        "os.status (run 3×) is the top executed pattern: {model}"
+    );
+    // The refused shadow read is friction, never an executed pattern.
+    assert!(
+        model["friction"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["tool"] == "fs.read"),
+        "the denied read shows up as friction: {model}"
+    );
+    assert!(
+        !patterns.iter().any(|p| p["tool"] == "fs.read"),
+        "a denied action is never an executed pattern"
+    );
+    // Transparency + honesty are stated in the model itself.
+    assert!(
+        model["note"].as_str().unwrap().contains("transparent"),
+        "the model states its own transparency"
+    );
+
+    srv.cleanup();
+}
+
 /// An over-long target is refused OUTRIGHT, and never parked in the approval
 /// queue.
 ///

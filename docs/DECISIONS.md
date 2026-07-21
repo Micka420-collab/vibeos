@@ -1828,3 +1828,46 @@ Un **mode d'exploitation** à deux états, matérialisé par un enregistrement r
 - L'IA **peut** fonctionner en autonomie réelle (T2/T3 sans demander) quand l'humain tourne la clé — ce qui était demandé — tout en gardant l'audit, le kill-switch et le panneau danger que l'humain a demandés *aussi*.
 - Le selfcheck passe de 18 à 19 invariants (`operating-mode`). Aucun nouvel **outil** MCP (la surface reste 19) : le mode change *comment* un `RequireApproval` se résout, il n'ajoute pas d'outil ; `os.status` gagne un champ.
 - Résiduel assumé : le bandeau visuel, l'auto-planification révocable, l'usage d'apps et l'auto-modification via `os.propose` sont conçus ici mais **non encore livrés** ; l'effet réel du mode sur cible reste **machine-gated** (aucune ISO bootée).
+
+---
+
+## ADR-028 — Compréhension de l'humain & anticipation : un modèle DÉRIVÉ, transparent, possédé par l'utilisateur — *décidé & livré (fondation ; sur-couches à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** L'outil `user.model` (T0) est livré et testé ; l'apprentissage plus riche (signal opt-in, embeddings locaux) est conçu ici, à venir. Demande de Micka : *« l'agent apprend à comprendre l'utilisation, comment il travaille, ce qu'il fait ; il analyse l'humain de fond en comble pour mieux le servir ; il prédit/anticipe les actions de l'humain — une vraie symbiose machine / IA / humain. »*
+
+### Contexte
+
+C'est le prolongement direct de l'idéation « symbiose IA-citoyenne » ([ADR-023](#), agent.thinking, [ADR-026](#)) : après *ce que l'agent peut faire*, *pense* et *a fait*, vient *ce que la machine comprend de l'humain*. Deux tensions cadrent la conception :
+
+- **Vie privée.** « Analyser l'humain de fond en comble » touche au plus sensible. Or l'invariant du projet est que **la mémoire appartient à l'utilisateur et à personne d'autre**, et que l'OS est *security-first*. Un modèle de l'humain ne peut donc être ni caché, ni exfiltré, ni fondé sur une surveillance nouvelle.
+- **Honnêteté.** « Prédire/anticiper » ne doit pas survendre : pas de prédicteur entraîné boîte-noire présenté comme de la voyance.
+
+### Décision
+
+Un outil **`user.model` (T0, lecture seule)** qui rend un **modèle DÉRIVÉ et TRANSPARENT** de « comment vous travaillez », **confiné à l'uid appelant** (SO_PEERCRED, comme `agents.list`/`agent.activity` ; appelant non identifié ⇒ rien, fail-closed). Il est **folded** à partir de données **que VibeOS détient déjà sous gouvernance**, jamais d'une capture nouvelle :
+
+- **`preferences`** : le fold de la mémoire `user/` (préférences explicites).
+- **`patterns`** : vos outils/cibles récurrents, dérivés de la **trace d'audit confinée à votre uid** (fréquence + récence + cible dominante).
+- **`friction`** : les actions qui ont dû être approuvées ou ont été refusées — candidates à pré-arranger (l'inverse des patterns : un signal, de sens opposé).
+- **`rhythm`** : histogramme d'activité par **heure UTC** (buckets grossiers, respectueux de la vie privée) + heures les plus actives.
+- **`observed`** : les notes de journal typées récentes que l'agent a écrites sur vous (`observation`/`decision`/`preference`), plafonnées, **clés seulement** (pas de dump de payload).
+- **`anticipations`** : vos prochaines actions gouvernées les plus probables, classées par une **heuristique déterministe fréquence×récence**, **chacune avec sa raison** (« fait N fois, vu il y a Xs ») — jamais un score opaque.
+
+**Ce qui rend ça sûr et honnête, par conception :**
+- **Aucune fuite NOUVELLE** : les mêmes données sous-jacentes sont déjà accessibles à l'agent pour son propre uid via `memory.query` + `agent.activity` ; `user.model` ne fait que les **agréger** (même raisonnement qu'[ADR-023](#)/[ADR-026](#)). La trace d'audit reste root-only et sur la denylist.
+- **Aucune surveillance nouvelle** : le modèle ne lit **jamais** les frappes clavier ni l'historique shell brut de l'humain (non captés, et hors éthique du projet). La symbiose est bâtie sur du signal **gouverné et transparent**, pas sur de l'espionnage.
+- **Local, possédé, effaçable** : le store est `/var/lib/vibeos/memory/` (« appartient à son utilisateur »). Chaque champ est inspectable ; rien de caché. Cœur de dérivation **pur** (`derive_user_model`) et déterministe — testable et auditable.
+- **Anticipation ≠ prédiction entraînée** : le champ le dit lui-même (`note`), et chaque anticipation porte sa raison.
+
+### Alternatives considérées
+
+- **Capturer les frappes / l'historique shell de l'humain** : rejeté — surveillance nouvelle, contraire au *security-first* et à « la mémoire appartient à l'utilisateur » ; et un shell natif échappe de toute façon à `vibed` (invariant n°1). La symbiose se construit sur du signal gouverné.
+- **Un prédicteur entraîné (ML) côté image** : rejeté pour la fondation — opaque, non déterministe, non testable simplement, et il survendrait « anticiper ». L'heuristique explicable vient d'abord ; l'apprentissage local (embeddings via ollama, `knowledge/embeddings/` déjà réservé) est une sur-couche opt-in (Phase 3).
+- **Profil caché optimisé pour l'agent seul** : rejeté — la transparence pour l'humain est non négociable ici ; « l'IA vous comprend » uniquement via ce que vous pouvez lire.
+
+### Conséquences
+
+- L'agent **planifie mieux** (moins de tâtonnement, il connaît vos préférences, vos patterns et vos frictions) et peut **anticiper** vos prochaines actions gouvernées — sans élargir d'un iota sa surface de pouvoir ni introduire de surveillance.
+- La surface d'outils passe de 19 à **20** (T0). Règle de politique `user-model` (T0 allow, confiné uid) ; le test d'intégration qui charge la vraie politique le vérifie.
+- Fondation pour la suite : signal **opt-in** plus riche (préférences observées dans les sessions Claude Code), **embeddings locaux** pour la similarité de tâches, et branchement du modèle sur le **mode ouvert** (ADR-027) et `os.propose` (ADR-024) pour une IA qui propose *à bon escient*. Toute capture nouvelle sera **opt-in et transparente**.
+- Résiduel assumé : l'anticipation est heuristique (pas un prédicteur) ; le modèle ne voit que le gouverné (pas le shell natif) ; l'effet réel sur cible reste **machine-gated**.

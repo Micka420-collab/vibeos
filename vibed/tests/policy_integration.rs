@@ -123,6 +123,7 @@ fn shipped_default_policy_canonical_decisions() {
         "agent.sessions",
         "agents.list",
         "agent.activity",
+        "user.model",
     ] {
         assert_eq!(
             engine.evaluate(tool, Some(Tier::T0), NO_CTX),

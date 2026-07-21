@@ -226,6 +226,13 @@ action = "allow"
 reason = "Read-only capability manifest DERIVED from the loaded policy (tools/tier/approval/target constraints) so the agent plans in reality instead of discovering limits by refusal. Indicative only; the authoritative decision stays the per-call evaluation, so it can never over-promise."
 
 [[rule]]
+id = "user-model"
+tools = ["user.model"]
+tier = "T0"
+action = "allow"
+reason = "Read-only, DERIVED and TRANSPARENT model of how the human works, for symbiosis (ADR-028). Folded from data VibeOS already holds under governance — the user-memory profile and the audit trail CONFINED to the caller's uid — plus recent typed journal notes; anticipations are a deterministic frequency×recency heuristic, never a trained predictor. No NEW leak (same underlying data as memory.query + agent.activity for the same uid), no new surveillance (never the human's raw keystrokes), local and user-owned (the memory belongs to its user). Bounded output, rate-limited like any tool."
+
+[[rule]]
 id = "memory-append"
 tools = ["memory.append"]
 tier = "T1"
