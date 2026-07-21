@@ -11,6 +11,7 @@ pub mod domain;
 pub mod glob;
 pub mod mcp;
 pub mod policy;
+pub mod proxy;
 pub mod ratelimit;
 pub mod reasoning;
 pub mod sandbox;
