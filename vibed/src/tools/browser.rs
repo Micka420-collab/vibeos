@@ -209,12 +209,14 @@ fn validate_value(val: &str) -> Result<String, String> {
 /// **opaque** (le contenu vient d'une page hostile). Le transport `run_browser`
 /// construira la [`CdpSession`] sur les fds du pipe puis appellera ceci.
 ///
-/// **Incrément 1** : les verbes SANS sélecteur — `navigate`/`read`/`screenshot`. Leurs
-/// commandes CDP ne portent aucune entrée agent interpolée (URL en paramètre, hôte déjà
-/// validé ; expressions `Runtime.evaluate` CONSTANTES). `click`/`fill`/`submit`, qui
-/// exigent le **binding CDP par-objet** du sélecteur/valeur (`DOM.querySelector` par
-/// paramètre → `Input.dispatch*`/`Runtime.callFunctionOn` avec le nœud en `arguments`,
-/// jamais d'interpolation — invariant ADR-022), arrivent à l'incrément suivant.
+/// Verbes SANS sélecteur — `navigate`/`read`/`screenshot` : leurs commandes CDP ne portent
+/// aucune entrée agent interpolée (URL en paramètre, hôte déjà validé ; expressions
+/// `Runtime.evaluate` CONSTANTES). `click`/`fill` : **binding CDP par-objet** ([`resolve_object`]
+/// → [`call_on_object`]) — le sélecteur est un **paramètre** de `DOM.querySelector`, le nœud est
+/// lié en `this` d'une fonction **constante**, la valeur d'un `fill` est un **argument** ;
+/// **jamais** d'interpolation d'entrée agent dans une source `evaluate` (invariant ADR-022 qui
+/// garde `browser.evaluate` exclu). `submit` (T2, POST mutant) reste différé : il exige le
+/// refactor à **trois états** (`indeterminate` pour un POST parti sans réponse).
 ///
 /// Toutes les commandes de page portent le `sessionId` de la **page** attachée (`page`,
 /// produit par [`crate::browser_transport::attach_page`]) : sur `--remote-debugging-pipe`,
@@ -320,13 +322,132 @@ pub(crate) fn run_action<C: CdpChannel>(
                 })?;
             Ok(json!({ "screenshot_png_base64": data }))
         }
-        BrowserAction::Click { .. } | BrowserAction::Fill { .. } | BrowserAction::Submit { .. } => {
-            Err(
-                "browser: click/fill/submit — incrément suivant (binding CDP par-objet)"
-                    .to_string(),
-            )
+        BrowserAction::Click { selector } => {
+            // Binding par-objet (ADR-022) : le sélecteur est un PARAMÈTRE de `DOM.querySelector`,
+            // le nœud est lié en `this` d'une fonction CONSTANTE — JAMAIS d'interpolation.
+            //
+            // Garde de TIER (Fable 5 F1) : `click` est T1, mais cliquer un SUBMITTER de formulaire
+            // (`<button>` type submit/défaut, `<input type=submit|image>`) déclenche un POST
+            // mutant — c'est le plancher T2 de `submit`, et le danger double-POST qui a fait
+            // différer `submit`. On REFUSE ce cas (fonction TOUJOURS constante) : l'agent doit
+            // passer par `browser.submit`. `closest` couvre aussi un clic sur un DESCENDANT du
+            // bouton (qui bulle et soumettrait quand même).
+            //
+            // ⚠️ Navigation par click (Fable 5 F2) : un click sur `<a href=autre-hôte>` /
+            // `target=_blank` navigue SANS repasser par `[rule.domains]` de `navigate` ; le
+            // contrôle est le PROXY egress (comme les redirections). Invariant du câblage live :
+            // le proxy CONNECT DOIT atterrir AVANT que `browser.*` ne soit exposé.
+            let object_id = resolve_object(session, page, selector)?;
+            call_on_object(
+                session,
+                page,
+                &object_id,
+                "function() { const b = this.closest ? this.closest('button, input') : null; \
+                 if (b && b.form) { const t = (b.getAttribute('type') || \
+                 (b.tagName === 'BUTTON' ? 'submit' : '')).toLowerCase(); \
+                 if ((b.tagName === 'BUTTON' && t === 'submit') || \
+                 (b.tagName === 'INPUT' && (t === 'submit' || t === 'image'))) \
+                 throw new Error('submitter de formulaire — utilisez browser.submit (T2)'); } \
+                 this.click(); }",
+                json!([]),
+            )?;
+            Ok(json!({ "clicked": true }))
         }
+        BrowserAction::Fill { selector, value } => {
+            let object_id = resolve_object(session, page, selector)?;
+            // La VALEUR est un ARGUMENT (`arguments[0]`), JAMAIS dans la source de la fonction —
+            // c'est ce qui garde `browser.evaluate` exclu même pour une valeur hostile. Garde
+            // anti-cloaking (Fable 5 F3) : une cible sans propriété `value` (contenteditable,
+            // élément générique) fait ÉCHOUER le fill au lieu de renvoyer `filled: true` menteur.
+            // (`<select>`/checkbox ONT `value` mais une sémantique différente — limite
+            // fonctionnelle assumée, pas un mensonge d'exécution.)
+            call_on_object(
+                session,
+                page,
+                &object_id,
+                "function(v) { if (!('value' in this)) \
+                 throw new Error('cible sans propriété value — fill inapplicable'); \
+                 this.focus(); this.value = v; \
+                 this.dispatchEvent(new Event('input', { bubbles: true })); \
+                 this.dispatchEvent(new Event('change', { bubbles: true })); }",
+                json!([{ "value": value }]),
+            )?;
+            Ok(json!({ "filled": true }))
+        }
+        BrowserAction::Submit { .. } => Err(
+            // `submit` (T2, POST mutant) exige le refactor à TROIS états — un POST parti sans
+            // réponse doit être `indeterminate`, jamais `failed` (sinon double-POST au retry) —
+            // ce qui change la signature de `run_action`. Incrément séparé.
+            "browser: submit — incrément suivant (trois états, POST mutant)".to_string(),
+        ),
     }
+}
+
+/// Résout `selector` en un `objectId` CDP **sans jamais interpoler** le sélecteur dans du JS :
+/// `DOM.getDocument` → `DOM.querySelector` (le sélecteur est un **paramètre**) → `DOM.resolveNode`.
+/// C'est le cœur du **binding par-objet** (ADR-022) qui garde `browser.evaluate` exclu : le nœud
+/// devient un `objectId` que [`call_on_object`] liera en `this` d'une fonction **constante**.
+/// Fail-closed : `nodeId == 0` (rien ne matche — `querySelector` renvoie 0, pas une erreur CDP),
+/// ou une réponse sans `nodeId`/`objectId`, est une erreur.
+fn resolve_object<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    page: &str,
+    selector: &str,
+) -> Result<String, String> {
+    let doc = session.call("DOM.getDocument", json!({ "depth": 0 }), Some(page))?;
+    let root = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "browser: DOM.getDocument sans nodeId racine — refusé".to_string())?;
+    // Le sélecteur est un PARAMÈTRE de querySelector — jamais du JS interpolé.
+    let found = session.call(
+        "DOM.querySelector",
+        json!({ "nodeId": root, "selector": selector }),
+        Some(page),
+    )?;
+    let node_id = found
+        .get("nodeId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "browser: DOM.querySelector sans nodeId — refusé".to_string())?;
+    if node_id == 0 {
+        return Err("browser: aucun élément ne matche le sélecteur — refusé".to_string());
+    }
+    let resolved = session.call("DOM.resolveNode", json!({ "nodeId": node_id }), Some(page))?;
+    resolved
+        .get("object")
+        .and_then(|o| o.get("objectId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "browser: DOM.resolveNode sans objectId — refusé".to_string())
+}
+
+/// Exécute une fonction **constante** sur l'`objectId` (le nœud lié en `this`), avec des
+/// `arguments` éventuels (valeur d'un `fill` en `arguments[0]`) — **jamais d'interpolation**.
+/// Fail-closed : une exception côté page (`exceptionDetails`) est une erreur, pas un succès
+/// silencieux (même doctrine que `read`, Fable 5).
+fn call_on_object<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    page: &str,
+    object_id: &str,
+    function_declaration: &str,
+    arguments: Value,
+) -> Result<(), String> {
+    let r = session.call(
+        "Runtime.callFunctionOn",
+        json!({
+            "objectId": object_id,
+            "functionDeclaration": function_declaration,
+            "arguments": arguments,
+            "returnByValue": true,
+            "awaitPromise": false,
+        }),
+        Some(page),
+    )?;
+    if r.get("exceptionDetails").is_some() {
+        return Err("browser: l'action a levé une exception côté page — refusé".to_string());
+    }
+    Ok(())
 }
 
 /// Cap DUR d'actions par batch (ADR-022 addendum ratifié, Fable 5) : la garantie « chromium
@@ -662,9 +783,112 @@ mod tests {
         assert_eq!(shot["sessionId"], "PAGE-SID");
     }
 
+    /// Les 4 réponses CDP qui satisfont le binding par-objet : getDocument → querySelector →
+    /// resolveNode → callFunctionOn. `qs_node` = nodeId renvoyé par querySelector (0 = rien).
+    fn cdp_object_binding(qs_node: i64, object_id: &str, call_result: Value) -> Vec<Vec<u8>> {
+        vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": qs_node}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": object_id}}})),
+            cdp_frame(json!({"id": 4, "result": call_result})),
+        ]
+    }
+
     #[test]
-    fn click_fill_submit_are_deferred_to_the_next_increment() {
-        let chan = FakeCdp::new(vec![]);
+    fn click_binds_by_object_selector_as_param_and_constant_function() {
+        let chan = FakeCdp::new(cdp_object_binding(42, "OBJ1", json!({"result": {}})));
+        let mut s = CdpSession::new(chan);
+        // Sélecteur DISTINCTIF (un token qui n'apparaît pas dans la fonction constante) pour que
+        // le test de non-fuite ne collisionne pas avec les mots de la garde submitter.
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#zzUniqSel777".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap();
+        assert_eq!(out["clicked"], true);
+        let sent = s.into_channel().sent;
+        // querySelector porte le sélecteur en PARAMÈTRE (jamais du JS).
+        let qs: Value = serde_json::from_slice(&sent[1][..sent[1].len() - 1]).unwrap();
+        assert_eq!(qs["method"], "DOM.querySelector");
+        assert_eq!(qs["params"]["selector"], "#zzUniqSel777");
+        assert_eq!(qs["sessionId"], "PAGE-SID");
+        // callFunctionOn : fonction CONSTANTE (this.click()) qui NE contient PAS le sélecteur ;
+        // objectId = celui résolu.
+        let call: Value = serde_json::from_slice(&sent[3][..sent[3].len() - 1]).unwrap();
+        assert_eq!(call["method"], "Runtime.callFunctionOn");
+        assert_eq!(call["params"]["objectId"], "OBJ1");
+        let f = call["params"]["functionDeclaration"].as_str().unwrap();
+        assert!(f.contains("this.click()"));
+        assert!(
+            !f.contains("zzUniqSel777"),
+            "le sélecteur ne doit JAMAIS entrer dans la source de la fonction : {f}"
+        );
+        // Garde de submitter présente (Fable 5 F1) — régression si retirée.
+        assert!(
+            f.contains("browser.submit"),
+            "la garde anti-submitter T2 doit être dans la fonction : {f}"
+        );
+    }
+
+    #[test]
+    fn fill_passes_the_value_as_argument_never_in_the_function_source() {
+        let chan = FakeCdp::new(cdp_object_binding(7, "OBJ2", json!({"result": {}})));
+        let mut s = CdpSession::new(chan);
+        // Une valeur qui, INTERPOLÉE, s'échapperait vers du JS arbitraire — elle DOIT rester un
+        // argument opaque, c'est ce qui garde browser.evaluate exclu même sur entrée hostile.
+        let evil = "\"; fetch('//evil'); //";
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Fill {
+                selector: "#q".into(),
+                value: evil.into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap();
+        assert_eq!(out["filled"], true);
+        let sent = s.into_channel().sent;
+        let call: Value = serde_json::from_slice(&sent[3][..sent[3].len() - 1]).unwrap();
+        assert_eq!(call["method"], "Runtime.callFunctionOn");
+        // La valeur hostile est dans arguments[0], PAS dans la source de la fonction.
+        assert_eq!(call["params"]["arguments"][0]["value"], evil);
+        let f = call["params"]["functionDeclaration"].as_str().unwrap();
+        assert!(
+            !f.contains("fetch"),
+            "la valeur hostile ne doit JAMAIS entrer dans la source : {f}"
+        );
+        assert!(f.contains("this.value = v"));
+    }
+
+    #[test]
+    fn click_fails_closed_when_the_selector_matches_nothing() {
+        // querySelector renvoie nodeId 0 (rien ne matche) — pas une erreur CDP, mais fail-closed.
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 0}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#none".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(err.contains("aucun élément ne matche"), "{err}");
+    }
+
+    #[test]
+    fn click_fails_closed_on_a_page_side_exception() {
+        let chan = FakeCdp::new(cdp_object_binding(
+            5,
+            "O",
+            json!({"result": {}, "exceptionDetails": {"text": "boom"}}),
+        ));
         let mut s = CdpSession::new(chan);
         let err = run_action(
             &mut s,
@@ -674,7 +898,22 @@ mod tests {
             "PAGE-SID",
         )
         .unwrap_err();
-        assert!(err.contains("incrément suivant"));
+        assert!(err.contains("exception"), "{err}");
+    }
+
+    #[test]
+    fn submit_is_still_deferred_pending_the_three_state_refactor() {
+        let chan = FakeCdp::new(vec![]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "form#login".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(err.contains("submit") && err.contains("incrément suivant"));
     }
 
     #[test]
@@ -999,8 +1238,8 @@ mod tests {
 
     #[test]
     fn run_batch_is_fail_closed_and_stops_on_the_first_non_completed_step() {
-        // read (Runtime.evaluate id3) réussit ; click échoue (deferred, aucun appel CDP) →
-        // le batch s'arrête, le 2e read ne tire PAS.
+        // read (Runtime.evaluate id3) réussit ; submit échoue (encore différé, aucun appel CDP)
+        // → le batch s'arrête, le 2e read ne tire PAS.
         let chan = cdp_with_attach(vec![cdp_frame(
             json!({"id": 3, "result": {"result": {"value": "<html>a</html>"}}}),
         )]);
@@ -1008,8 +1247,8 @@ mod tests {
         let batch = BrowserBatch {
             steps: vec![
                 BrowserAction::Read,
-                BrowserAction::Click {
-                    selector: "#x".to_string(),
+                BrowserAction::Submit {
+                    selector: "form".to_string(),
                 },
                 BrowserAction::Read,
             ],
