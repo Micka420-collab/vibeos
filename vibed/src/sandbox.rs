@@ -606,8 +606,12 @@ pub mod helper {
         match mode {
             "probe" => Ok(probe_report()),
             "deploy" => run_deploy(),
+            // Mode navigateur — unix-only (chromium / CDP sur pipe). Le code vit dans
+            // `browser_transport` (`#![cfg(unix)]`) ; l'arm est absente hors unix → « unknown ».
+            #[cfg(unix)]
+            "browser" => crate::browser_transport::run_browser(),
             other => Err(format!(
-                "unknown vibed-tool mode {other:?} (known: probe, deploy)"
+                "unknown vibed-tool mode {other:?} (known: probe, deploy, browser)"
             )),
         }
     }
