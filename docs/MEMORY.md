@@ -65,6 +65,7 @@ c'est le mécanisme, pas un cas particulier.
 /var/lib/vibeos/memory/          # racine, root:root 0700 — v0.1 : répertoire en clair (LUKS ou tmpfs : Phase 3)
 ├── identity.toml                # identité de la machine — écrit UNE fois par Genesis
 ├── hardware.json                # profil matériel — écrit par Genesis
+├── personality.toml             # caractère du citoyen IA, choisi à la naissance — écrit par Genesis
 ├── user/                        # profil de l'humain
 │   ├── README.md                # placeholder posé par Genesis
 │   ├── profile.toml             # (rempli au fil de l'eau) identité déclarée
@@ -90,6 +91,7 @@ c'est le mécanisme, pas un cas particulier.
 |---|---|---|---|---|
 | `identity.toml` | TOML | Genesis uniquement | `memory.query` (T0) | **interdite** |
 | `hardware.json` | JSON | Genesis uniquement | `memory.query` (T0) | **interdite** |
+| `personality.toml` | TOML | Genesis uniquement | `memory.query` (T0, scope `personality`) | **interdite** |
 | `user/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `user`) |
 | `projects/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `projects`) |
 | `journal/*.jsonl` | JSONL | Genesis puis `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
@@ -234,6 +236,63 @@ ollama, jamais envoyés dans le cloud) pour la recherche sémantique de
 - Conséquence : le seul chemin d'accès pour un agent est le socket MCP
   `/run/vibed/mcp.sock`, donc le moteur de politiques et l'audit (§9).
 
+### 3.8 `personality.toml` (schema 1)
+
+Le **caractère du citoyen IA**, choisi par la machine **à sa naissance**. C'est
+le pendant « âme » de `identity.toml` (le pendant « corps » étant
+`hardware.json`) : écrit **une seule fois** par Genesis, jamais par
+`memory.append`, lisible via `memory.query` (scope `personality`). Voir
+[ADR-029](DECISIONS.md).
+
+```toml
+schema = 1
+name = "Lumen"                 # nom choisi dans un vivier de noms neutres
+archetype = "sentinelle"       # l'axe de trait dominant, valeur en français
+tone = "concis et direct"      # comment il s'exprime, dérivé des axes de tête
+birth = "2026-07-21T13:49:41+00:00"  # même instant que identity.birth
+seed = "2067ece4"              # empreinte FNV-1a de l'ancre (traçabilité)
+
+[traits]                       # six axes 0..100, dérivés du seed
+curiosity = 62
+caution = 78                   # plancher 50 — un citoyen VibeOS n'est jamais imprudent
+initiative = 40
+warmth = 55
+concision = 70
+playfulness = 33
+
+[values]                       # valeurs civiques héritées, non tirées au sort
+principles = ["la sécurité d'abord", "la transparence", "la mémoire appartient à l'humain"]
+
+[adaptation]                   # comment le caractère se plie à l'humain (symbiose)
+source = "user.model"          # signal ADR-028
+concision = "rhythm+preferences"
+warmth = "friction"
+initiative = "patterns"
+note = "Caractère de naissance. Il évolue vers vous ; il ne vous imite pas."
+```
+
+**Déterminisme et unicité.** Le caractère est **dérivé de façon déterministe**
+d'une **ancre stable** — `machine_id` (repli `hostname`) — par une fonction de
+hachage FNV-1a **en bash pur** (aucun outil externe, hors-ligne, reproductible).
+Conséquences voulues :
+
+- **une installation = un caractère unique** (les `machine_id` diffèrent) : « à
+  chaque installation l'IA choisit sa personnalité » est réel, pas du théâtre ;
+- **même machine = même caractère à chaque boot**, y compris en **mode
+  amnésique** — la mémoire est effacée à chaque démarrage, le tempérament de
+  naissance ne l'est pas (`machine_id` vit dans `/etc`, hors du tmpfs). L'âme est
+  constante ; seul ce qu'elle apprend est effacé.
+
+**Naissance puis symbiose.** `[traits]` est un tempérament **de naissance** ; la
+table `[adaptation]` déclare le **contrat d'évolution** — quels traits se
+réajustent à partir de quel champ du signal `user.model` ([ADR-028](DECISIONS.md)).
+La **boucle de réécriture vivante** (un agent qui replie `user.model` dans
+`personality.toml`) est une **sur-couche (Phase 3)** ; ce qui est **livré** est
+la naissance déterministe, le schéma, le contrat d'adaptation et l'exposition en
+lecture. L'« éveil » visible (le bloc futuriste imprimé sur la console de
+premier boot par `genesis.sh`) accompagne la naissance ; la cérémonie graphique
+riche dans le HUD reste **machine-gated** (pas d'ISO bootée).
+
 ---
 
 ## 4. Cycle de vie
@@ -266,14 +325,23 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
    `birth = date -Is`, `mode` (persistent par défaut, amnesic si la variable
    d'environnement `VIBEOS_MEMORY_MODE=amnesic` est injectée — par le generator
    amnésique livré, cf. §5).
-6. Pose des `README.md` placeholders dans les cinq sous-répertoires.
-7. Premier événement du journal : `type: "genesis"` dans le fichier du jour.
-8. **En dernier** : écriture de `.initialized` (contenu : horodatage de naissance).
+6. Écriture de `personality.toml` : le **caractère du citoyen IA** dérivé de
+   façon déterministe de `machine_id` (§3.8, [ADR-029](DECISIONS.md)) — nom,
+   archétype, six axes de trait, ton, contrat d'`[adaptation]`.
+7. Pose des `README.md` placeholders dans les cinq sous-répertoires.
+8. Premier événement du journal : `type: "genesis"` (portant le caractère né :
+   nom/archétype/seed) dans le fichier du jour.
+9. **L'éveil** : un bloc futuriste imprimé sur la console (stderr) révélant le
+   citoyen qui vient de naître — purement cosmétique, gardé pour ne jamais
+   pouvoir faire échouer Genesis.
+10. **En dernier** : écriture de `.initialized` (contenu : horodatage de naissance).
 
-L'ordre 8-en-dernier rend Genesis **crash-safe** : une interruption à n'importe
-quelle étape laisse `.initialized` absent, donc la séquence se rejoue intégralement
-au boot suivant. Toutes les écritures des étapes 3–7 sont des créations/écrasements
-idempotents.
+L'ordre « sentinelle-en-dernier » rend Genesis **crash-safe** : une interruption
+à n'importe quelle étape laisse `.initialized` absent, donc la séquence se rejoue
+intégralement au boot suivant. Toutes les écritures des étapes 3–8 sont des
+créations/écrasements idempotents (le caractère, dérivé d'une ancre stable, se
+réécrit à l'identique) — sauf l'ajout au journal (étape 8), append-only, donc
+**gardé** (voir le script) pour ne jamais estampiller une seconde naissance.
 
 Périmètre strict de `genesis.sh` : il crée des répertoires et des fichiers, rien
 d'autre. **Ni `cryptsetup`, ni `mkfs`, ni montage, ni option de ligne de
@@ -479,9 +547,10 @@ Points durs :
 ```
 
 Trois arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
-sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` | `user` |
-`projects` | `journal` | `knowledge` (restreint la marche à une entrée du
-layout §3 ; un scope inconnu est une erreur explicite) et `limit` (entier ≥ 1,
+sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` |
+`personality` | `user` | `projects` | `journal` | `knowledge` (restreint la
+marche à une entrée du layout §3 ; un scope inconnu est une erreur explicite) et
+`limit` (entier ≥ 1,
 plafond de résultats — la réponse porte un drapeau `truncated`). Chaque match
 est rendu `{ "file": <chemin relatif>, "snippet": <extrait de contenu borné,
 ≤ 1024 caractères>, "snippet_truncated": <bool> }` : l'agent **lit la mémoire

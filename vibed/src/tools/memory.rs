@@ -558,6 +558,11 @@ mod tests {
             "schema = 1\nhostname = \"testhost\"\n",
         )
         .expect("write identity");
+        std::fs::write(
+            dir.join("personality.toml"),
+            "schema = 1\nname = \"Lumen\"\narchetype = \"sentinelle\"\n\n[traits]\ncaution = 71\n",
+        )
+        .expect("write personality");
         std::fs::write(dir.join("user").join("profile.toml"), "lang = \"fr\"\n")
             .expect("write profile");
         std::fs::write(
@@ -618,6 +623,25 @@ mod tests {
         // a scope never leaks files from another scope.
         let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
         assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_personality_scope_resolves_the_character() {
+        // The AI citizen's birth character (personality.toml, written by
+        // Genesis §3.8) is a first-class, addressable, read-only scope — so the
+        // HUD/agent can ask "who are you?" without walking the whole store.
+        let root = memory_scratch("qpersona");
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "personality"})));
+        assert_eq!(payload["scope"], "personality");
+        assert_eq!(payload["scanned_files"], 1);
+        assert_eq!(payload["matches"][0]["file"], "personality.toml");
+        assert!(
+            payload["matches"][0]["snippet"]
+                .as_str()
+                .is_some_and(|s| s.contains("archetype")),
+            "personality snippet carries the character: {payload}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -938,8 +962,8 @@ mod tests {
     #[test]
     fn memory_append_rejects_readonly_and_unknown_scopes() {
         let root = memory_scratch("ascope");
-        // identity/hardware are written by Genesis only — never via memory.append.
-        for scope in ["identity", "hardware"] {
+        // identity/hardware/personality are written by Genesis only — never via memory.append.
+        for scope in ["identity", "hardware", "personality"] {
             let err = memory_append_at(
                 &root,
                 &json!({"scope": scope, "entry": {"source": "x"}}),
