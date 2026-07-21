@@ -1474,6 +1474,70 @@ puis exécute les actions **en séquence** via `run_action(session, action, &pag
 Une action qui échoue **arrête** le batch (fail-closed) et rend les résultats jusque-là + l'état
 de l'action fautive. `browser.evaluate` reste exclu ; le binding par-objet reste l'invariant.
 
+### Addendum — la FORME du proxy CONNECT : netns partagé + egress cgroup par-unité — *PROPOSÉ (2026-07-22, autonomie de nuit), à ratifier on-target*
+
+Le **code du relais** est livré (PR #180 : `is_internal_ip` anti-SSRF/rebinding, `serve_connection`
+dial-sûr+splice+timeouts, listener + entrée helper `run_proxy`, tous Fable-durcis). Restait la
+**« décision de forme à trancher »** : *où* le proxy tourne pour que `chromium` — dont l'egress est
+plancheté à `IPAddressDeny=any` + `127.66.0.1/32` — puisse l'atteindre, alors que le proxy, lui,
+doit joindre l'Internet. Le paradoxe apparent (mêmes `127.66.0.1`, egress opposés) se résout par un
+fait clé : **le filtrage egress `IPAddressAllow`/`Deny` de systemd est appliqué par eBPF au niveau
+du CGROUP, donc PAR-UNITÉ — pas par netns.** Deux unités peuvent partager un netns et avoir des
+règles egress différentes.
+
+**Forme retenue (V1, la plus simple qui confine) — netns de l'hôte, deux unités, egress cgroup
+divergent :**
+
+1. **Unité `chromium`** (la classe `Browser` d'ADR-019, existante) : `IPAddressDeny=any` +
+   `IPAddressAllow=127.66.0.1/32`. Le cgroup eBPF **jette** tout paquet vers une destination ≠
+   `127.66.0.1` — Internet ET autres services loopback (`127.0.0.1`, `::1`) inclus. `chromium` ne
+   peut donc joindre **que** le proxy, même s'il essaie l'interface réelle directement.
+2. **Unité `proxy`** (`vibed helper proxy`, nouvelle) : egress Internet (pas de `IPAddressDeny=any`,
+   ou allow explicite). Bind `127.66.0.1:8888`. Durcissement ADR-019 par ailleurs (DynamicUser,
+   NNP, seccomp, caps vidées, `RuntimeMaxSec`) ; **pas** de credential, **pas** de FS.
+3. **Les deux dans le netns de l'hôte** (pas de `PrivateNetwork`) : `127.66.0.1` vit sur la loopback
+   de l'hôte (tout `127/8` route vers `lo` sans `ip addr add`), donc `chromium` l'atteint et le
+   proxy y écoute. Le proxy a l'interface réelle pour son egress Internet.
+
+**Pourquoi c'est sûr** : le confinement de `chromium` ne dépend **pas** du netns mais de son cgroup
+egress (`127.66.0.1/32` seul) — un `chromium` compromis ne peut ni sortir sur Internet ni scanner
+les services loopback de l'hôte. Le proxy est le **seul** gate domaine (le lint `navigate` de vibed
+n'est qu'un lint) ; il applique `[rule.domains]` par requête et refuse toute IP interne résolue
+(anti-rebinding, `is_internal_ip`). Résidu accepté en V1 : **tout process de l'hôte** peut se
+connecter à `127.66.0.1:8888` — mais n'obtient que le **même** tunneling gouverné (deny-par-défaut
+vers les domaines approuvés), aucune élévation. Fermé en V2 ci-dessous.
+
+**Orchestration (dans le dispatch `browser.run`, mcp.rs, après gouvernance) :**
+
+1. Spawn l'unité `proxy`, config `{ "bind": "127.66.0.1:8888", "allowed": [<domaines navigate
+   approuvés du batch> ] }` **écrite sur son stdin puis pipe FERMÉ** (le helper lit jusqu'à EOF —
+   ne pas fermer = deadlock de liveness ; même contrat que `deploy`). ⚠️ Ce spawn n'est **PAS**
+   `spawn_transient` (qui attend la sortie + capture stdout comme résultat) : le proxy tourne
+   jusqu'au teardown. Nouveau mécanisme **spawn-and-hold** : `systemd-run --unit=<nom>` nommé (pas
+   auto-collect), garder le nom, `systemctl stop` au teardown.
+2. Spawn l'unité `chromium` (`run_browser`, existant) qui pilote le batch et **rend** son résultat
+   (via `spawn_transient`, qui attend).
+3. **Teardown** : `systemctl stop` de l'unité proxy (et cleanup du profil éphémère). `try`/finally :
+   le proxy est stoppé **même si** le batch échoue.
+
+**Profil éphémère écrivable** (bloqueur partagé avec le dispatch #179) : la classe `Browser` doit
+fournir un `--user-data-dir` **écrivable**. `RuntimeDirectory=vibeos-browser/<id>` (tmpfs sous
+`/run`, mode 0700, nettoyé à l'arrêt de l'unité) — écrivable par le `DynamicUser`, éphémère et sans
+credential par construction. `run_browser` reçoit ce chemin dans son `BrowserRequest.profile_dir`.
+
+**V2 — durcissement (évolution, pas V1)** : netns **dédié** (pas l'hôte) pour la paire
+chromium+proxy, avec un `veth`/`slirp4netns` pour l'egress Internet du seul proxy. Ferme le résidu
+« un process hôte joint le proxy » et isole totalement. Coût : plomberie netns/veth + NAT, à peser
+quand la surface le justifie.
+
+**À VALIDER ON-TARGET (Micka)** — c'est ici que le test systemd/netns est décisif, off-target étant
+impossible : (a) le filtrage egress cgroup `IPAddressAllow=127.66.0.1/32` **jette bien** l'egress
+Internet ET loopback de `chromium` tout en laissant passer `127.66.0.1` (loopback) ; (b) le bind
+`127.66.0.1` sur `lo` de l'hôte depuis l'unité proxy durcie fonctionne ; (c) `RuntimeDirectory`
+donne un profil écrivable sous le durcissement `Browser` ; (d) le spawn-and-hold + `systemctl stop`
+au teardown ne laisse pas d'unité orpheline. Une fois ratifié, le wiring spawn dans `mcp.rs` +
+`sandbox.rs` est un incrément mécanique.
+
 ## ADR-021 — `deploy.*` gouverné : mettre en production sans jamais donner le token à l'agent — *proposé (2026-07-19, autonomie week-end), à trancher*
 
 **Statut** : **PROPOSÉ**, non tranché. Aucun code écrit. C'est le design concret de la capacité que la demande initiale nomme « le mettre en production » et qu'**ADR-020** a délibérément reportée (« brique gouvernée future »). Il **dépend de deux décisions de Micka** : (a) le **modèle d'allowlist de cibles** ci-dessous ; (b) la décision sur **ADR-019** (le helper-process), dont l'isolation des credentials hérite **entièrement** — sans ADR-019, `deploy.apply` ne se construit pas.
