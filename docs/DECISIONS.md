@@ -1709,3 +1709,73 @@ de référence (docs/BOOT-VALIDATION.md).
   mesure est un critère de la validation de boot (machine-gated), et tout
   ajustement ultérieur passera par un diff d'une ligne dans le même fichier.
 - Le selfcheck passe de 17 à 18 invariants (`kernel-tuning`).
+
+---
+
+## ADR-026 — `agent.activity` (T0) : le citoyen relit ses propres actes — *décidé & livré (session Fable 5, symbiose IA-citoyenne)*
+
+**Statut** : **DÉCIDÉ & livré**. Deuxième brique de l'idéation « IA citoyenne »
+après ADR-023 : là où `policy.capabilities` donne la **carte statique** des droits
+et `agent.thinking` la **biographie des pensées**, il manquait la **biographie des
+actes**. (ADR-024 reste réservée par `os.propose` ; on continue à 026.)
+
+### Contexte
+
+Un citoyen se souvient de ce qu'il a fait. Aujourd'hui l'agent ne le peut pas :
+`agents.list` dérive un **roster par pid** de la trace d'audit mais **exclut
+délibérément le pid appelant** (« le HUD ne se liste pas »), et la trace elle-même
+est root-only + sur la denylist intégrée — un agent ne peut donc **pas** relire
+sa propre séquence d'appels gouvernés. Conséquence concrète : un agent qui reprend
+une session ne sait pas ce qu'il vient de tenter, et surtout **ne revoit pas ses
+refus** (`deny`/`require_approval`) — précisément l'information qui lui apprend, par
+l'expérience, où sont les frontières que `policy.capabilities` ne décrit qu'en
+théorie.
+
+### Décision
+
+Un outil **`agent.activity` (T0, lecture seule)** qui rend les **propres appels
+récents de l'appelant**, du plus récent au plus ancien, dérivés de la trace
+d'audit : par ligne `{ ts_unix, when, tool, target, decision, outcome, pid }`.
+Arguments optionnels `window_seconds` (défaut 3600, max 3600) et `limit`
+(défaut/max 200) ; sortie bornée avec `total_in_window`/`truncated`.
+
+**Ce qui rend ça sûr, par conception :**
+- **Confiné par uid, comme `agents.list`** : filtré sur le `caller_uid`
+  (SO_PEERCRED, infalsifiable) ; un appelant sans uid identifié voit **rien**
+  (fail-closed). Jamais l'activité d'un autre utilisateur.
+- **Aucune fuite NOUVELLE** : `agents.list` expose déjà, pour l'uid appelant, les
+  mêmes champs sous-jacents (outil, cible non-secrète, tier) dérivés de la même
+  trace ; `agent.activity` n'ajoute que la **vue chronologique de SES propres
+  pids** — que `agents.list` excluait. La trace d'audit reste root-only et sur la
+  denylist (`fs.read` ne la lit pas). Même raisonnement qu'ADR-023.
+- **Inclut les refus, par design** : un `deny`/`require_approval` que l'agent a
+  provoqué est de l'information sur **ses** frontières, pas une frontière en soi —
+  la montrer ne débloque rien (l'enforcement reste à l'exécution).
+- **Anti-DoS** : passe par le pipeline normal (rate-limiter par uid d'abord, appel
+  audité) ; fenêtre = queue d'audit bornée (réutilise le cache incrémental
+  append-only), nombre de lignes plafonné.
+
+### Alternatives considérées
+
+- **Lever l'exclusion du self dans `agents.list`** : rejeté — `agents.list` est un
+  *roster* (agrégé par pid, pour le HUD) ; y mêler la vue chronologique du self
+  brouillerait deux usages distincts et changerait un contrat déjà consommé par le
+  client HUD.
+- **Laisser l'agent lire la trace d'audit** : exclu — la trace est root-only,
+  chaînée, sur la denylist ; l'ouvrir en lecture rouvrirait la surface que tout le
+  modèle protège. `agent.activity` rend une **vue dérivée, confinée, bornée**, pas
+  le fichier.
+- **Ne rien faire** : le citoyen reste amnésique de ses actes ; il redécouvre ses
+  refus par tâtonnement à chaque reprise — le coût exact qu'ADR-023 voulait supprimer.
+
+### Conséquences
+
+- Le citoyen dispose des **trois vues de soi** : ce qu'il *peut* faire
+  (`policy.capabilities`), ce qu'il *pense* (`agent.thinking`), ce qu'il *a fait*
+  (`agent.activity`) — sans élargir d'un iota sa surface de pouvoir.
+- Fondation pour la suite : la vue des refus est aussi ce sur quoi une future
+  boucle d'apprentissage (ou la **teinte de session**) s'appuiera pour proposer un
+  ajustement à l'humain.
+- La surface d'outils passe de 18 à 19 (T0). Règle de politique : ajouté à la règle
+  `agent-observability` (T0 allow, confiné par uid) ; le test d'intégration qui
+  charge la vraie politique le vérifie.

@@ -16,9 +16,11 @@
 > ([ADR-025](docs/DECISIONS.md) : `sysctl.d` charges IA + zram `zstd`, chaque valeur
 > sourcée) + 18ᵉ invariant `kernel-tuning` du selfcheck — **PR #166 mergée**. Puis,
 > en suite de session : **caches incrémentaux** sur les chemins sondés par le HUD
-> (queue d'audit, fold mémoire, têtes de sessions) + digest d'audit unique par appel
-> — 331 tests verts. La mesure sur cible reste machine-gated. *(Précédent :
-> 2026-07-19, trousse SaaS complète dev→prod — [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
+> (queue d'audit, fold mémoire, têtes de sessions) + digest d'audit unique par appel.
+> Puis **IA citoyenne** : `agent.activity` (T0, [ADR-026](docs/DECISIONS.md)) — le
+> citoyen relit ses propres actes (refus compris), surface 18 → 19, **332 tests
+> verts**. La mesure sur cible reste machine-gated. *(Précédent : 2026-07-19,
+> trousse SaaS complète dev→prod — [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
 
 ## Vue d'ensemble
 
@@ -153,6 +155,8 @@
   - **Têtes de sessions (`agent.sessions`) mémoïsées** : la première ligne d'un fichier append-only est immuable — son `ts_unix` n'est plus relu à chaque sonde (jusqu'à 200 open+read+parse évités par sonde) ; une tête absente (fichier déchiré) n'est jamais mise en cache et reste re-tentée.
   - **Digest d'audit calculé une fois par appel** (`record_with_digest` + `OnceLock` partagé) : les deux records d'un même appel (`started` + final) portaient déjà le même digest mais re-sérialisaient chacun tout l'arbre d'arguments (jusqu'à ~1 Mio pour `fs.write`).
   - **331 tests verts** (dont 7 nouveaux : incrémentalité, troncature, ligne déchirée, invalidation du fold, stabilité des têtes, parité des digests) ; clippy -D warnings (2 configs), log-hygiene, fmt OK ; compteurs des 4 README recalés 299 → 331.
+
+- **2026-07-21 (suite de session) — IA citoyenne : `agent.activity` (T0, [ADR-026](docs/DECISIONS.md))** — le citoyen relit ses **propres actes**. Deuxième brique après `policy.capabilities` (ADR-023) : là où celle-ci donne la carte *statique* des droits et `agent.thinking` la biographie des *pensées*, `agent.activity` rend la biographie des *actes* — les appels gouvernés récents de l'appelant, du plus récent au plus ancien, **refus compris** (`deny`/`require_approval`), pour apprendre par l'expérience les frontières que le manifeste ne décrit qu'en théorie. **Confiné par uid** (SO_PEERCRED), fenêtre + nombre de lignes bornés, réutilise le cache incrémental de la queue d'audit ; **aucune fuite nouvelle** (même donnée qu'`agents.list` pour son propre uid — que `agents.list` excluait justement). Règle ajoutée à `agent-observability` (T0 allow) ; surface d'outils 18 → **19**. **332 tests verts** (dont 2 nouveaux : confinement/chronologie/refus, tier T0) ; test d'intégration de politique étendu ; docs recalées (ADR-026, 4 README).
 
 ## 📋 Reste à faire (court terme)
 

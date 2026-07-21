@@ -118,7 +118,12 @@ fn shipped_default_policy_canonical_decisions() {
     // Agent observability tools are T0 read-only and MUST be allowed by the
     // shipped policy — otherwise the HUD roster / reasoning discovery is dead
     // behind the catch-all default-deny.
-    for tool in ["agent.thinking", "agent.sessions", "agents.list"] {
+    for tool in [
+        "agent.thinking",
+        "agent.sessions",
+        "agents.list",
+        "agent.activity",
+    ] {
         assert_eq!(
             engine.evaluate(tool, Some(Tier::T0), NO_CTX),
             Decision::Allow,

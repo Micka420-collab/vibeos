@@ -1087,6 +1087,24 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             }}),
         ),
         (
+            "agent.activity",
+            Tier::T0,
+            "YOUR OWN recent governed tool calls, newest first, from the audit \
+             trail — CONFINED to your uid (never another user's). The 'deeds' \
+             counterpart to agent.thinking ('thoughts') and policy.capabilities \
+             (the static map): it INCLUDES your refusals (decision deny / \
+             require_approval), so you learn the policy boundaries you actually \
+             hit, not only the ones you can read. Optional 'window_seconds' \
+             (default 3600, max 3600) and 'limit' (default/max 200). Returns \
+             { activity: [{ ts_unix, when, tool, target, decision, outcome, pid \
+             }], count, total_in_window, truncated, window_seconds, uid }. \
+             Read-only; exposes nothing agents.list would not for your own uid.",
+            json!({"type": "object", "properties": {
+                "window_seconds": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1}
+            }}),
+        ),
+        (
             "policy.check",
             Tier::T0,
             "Classify a HYPOTHETICAL tool call WITHOUT executing it: returns the \
@@ -1264,6 +1282,7 @@ fn execute_tool(
         "agent.thinking" => agent_thinking(args),
         "agent.sessions" => agent_sessions(),
         "agents.list" => agents_list(args, caller, audit_dir),
+        "agent.activity" => agent_activity(args, caller, audit_dir),
         "policy.check" => policy_check(args, policy),
         "policy.capabilities" => crate::tools::policy_tool::capabilities(policy),
         _ => Err(format!("unknown tool: {name}")),
@@ -1740,6 +1759,93 @@ fn agents_list(
     .to_string())
 }
 
+/// agent.activity (T0): the caller's OWN recent governed tool calls, in
+/// chronological order, derived from the audit trail — the "deeds" half of the
+/// AI-citizen self-knowledge, complementing `agent.thinking` (thoughts) and
+/// `policy.capabilities` (the static map of rights). Where `agents.list` gives a
+/// per-pid ROSTER and deliberately EXCLUDES the caller's own process, this is the
+/// mirror: the caller's OWN footprint, including its REFUSALS — so a citizen
+/// learns the policy boundaries empirically (a `deny`/`require_approval` it hit)
+/// on top of the manifest it can read statically.
+///
+/// Confinement is identical to `agents.list` (the same underlying data, self-
+/// scoped): CONFINED to the requesting uid (SO_PEERCRED); an unidentified caller
+/// sees nothing. It exposes no field an agent could not already obtain from
+/// `agents.list` for its own uid — the audit trail itself stays root-only and on
+/// the built-in denylist, unreadable via `fs.read` (no new leak; same reasoning
+/// as ADR-023).
+///
+/// Anti-DoS: reached through `handle_tools_call` (per-uid rate limiter first,
+/// call audited); the window is a bounded audit tail and the row count is capped.
+fn agent_activity(
+    args: &Value,
+    caller: Caller,
+    audit_dir: &std::path::Path,
+) -> Result<String, String> {
+    const DEFAULT_WINDOW_SECS: u64 = 3600;
+    const MAX_ROWS: usize = 200;
+    let window = args
+        .get("window_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_WINDOW_SECS)
+        .clamp(1, MAX_ROSTER_WINDOW_SECS);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| (n as usize).clamp(1, MAX_ROWS))
+        .unwrap_or(MAX_ROWS);
+    let now = now_epoch_secs();
+    let cutoff = now.saturating_sub(window);
+
+    // Fail-closed confinement: no SO_PEERCRED uid -> nothing (per-uid view only).
+    let Some(uid) = caller.uid else {
+        return Ok(json!({
+            "activity": [],
+            "count": 0,
+            "window_seconds": window,
+            "note": "no caller uid (SO_PEERCRED); activity is confined per-uid"
+        })
+        .to_string());
+    };
+
+    // The audit tail is chronological; keep only THIS uid's records, newest last.
+    let mut rows: Vec<Value> = read_recent_audit(audit_dir, cutoff)
+        .into_iter()
+        .filter(|r| r.get("caller_uid").and_then(Value::as_u64) == Some(u64::from(uid)))
+        .map(|r| {
+            let ts = r
+                .get("ts_unix_ms")
+                .and_then(Value::as_u64)
+                .map(|ms| ms / 1000)
+                .unwrap_or(0);
+            json!({
+                "ts_unix": ts,
+                "when": utc_iso8601(ts),
+                "tool": r.get("tool").and_then(Value::as_str).unwrap_or(""),
+                "target": r.get("target").cloned().unwrap_or(Value::Null),
+                "decision": r.get("decision").cloned().unwrap_or(Value::Null),
+                "outcome": r.get("outcome").cloned().unwrap_or(Value::Null),
+                "pid": r.get("caller_pid").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+
+    // Newest first, then cap: an agent resuming a session wants its LAST actions.
+    rows.reverse();
+    let total = rows.len();
+    rows.truncate(limit);
+
+    Ok(json!({
+        "activity": rows,
+        "count": rows.len(),
+        "total_in_window": total,
+        "truncated": total > rows.len(),
+        "window_seconds": window,
+        "uid": uid,
+    })
+    .to_string())
+}
+
 fn os_status() -> Result<String, String> {
     let uptime_seconds = std::fs::read_to_string("/proc/uptime")
         .ok()
@@ -2103,6 +2209,7 @@ mod tests {
         assert_eq!(tool_tier("sectools.list"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
+        assert_eq!(tool_tier("agent.activity"), Some(Tier::T0));
         assert_eq!(
             tool_tier("disk.wipe"),
             None,
@@ -2112,8 +2219,8 @@ mod tests {
 
     #[test]
     fn tool_catalog_is_built_once_and_cached() {
-        // Same allocation on every call: the registry (18 tuples, each with a
-        // json! schema tree) must never regress to being rebuilt per lookup —
+        // Same allocation on every call: the registry (each tuple with a json!
+        // schema tree) must never regress to being rebuilt per lookup —
         // tool_tier runs on every tools/call and once per audit record walked
         // by the agents.list roster loop.
         assert!(std::ptr::eq(tool_catalog(), tool_catalog()));
@@ -2374,6 +2481,87 @@ mod tests {
         assert_eq!(out2["count"], 0, "an unidentified caller sees nothing");
 
         assert_eq!(tool_tier("agents.list"), Some(Tier::T0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_activity_is_own_uid_chronological_and_includes_refusals() {
+        let dir = std::env::temp_dir().join(format!("vibed-agent-activity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = AuditLog::new(dir.clone());
+
+        let me = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(111),
+        };
+        let stranger = Caller {
+            uid: Some(2000),
+            gid: Some(2000),
+            pid: Some(333),
+        };
+
+        // My own footprint: an allow, then a refusal, in this order.
+        log.record("os.status", &json!({}), None, "allow", "ok", me)
+            .unwrap();
+        // A stranger's record between mine must never appear in my activity.
+        log.record(
+            "fs.read",
+            &json!({}),
+            Some("/home/b/y"),
+            "allow",
+            "ok",
+            stranger,
+        )
+        .unwrap();
+        log.record(
+            "fs.read",
+            &json!({}),
+            Some("/etc/shadow"),
+            "deny",
+            "blocked_builtin_denylist",
+            me,
+        )
+        .unwrap();
+
+        let out: Value =
+            serde_json::from_str(&agent_activity(&json!({}), me, &dir).unwrap()).unwrap();
+        let act = out["activity"].as_array().unwrap();
+
+        // Exactly my two records — the stranger's is confined out.
+        assert_eq!(act.len(), 2, "only my own uid's records: {out}");
+        // Newest first: the refusal is the most recent action.
+        assert_eq!(act[0]["tool"], "fs.read");
+        assert_eq!(
+            act[0]["decision"], "deny",
+            "refusals are surfaced, not hidden"
+        );
+        assert_eq!(act[0]["outcome"], "blocked_builtin_denylist");
+        assert_eq!(act[0]["target"], "/etc/shadow");
+        assert_eq!(act[1]["tool"], "os.status");
+        assert!(act
+            .iter()
+            .all(|r| r["tool"] != "fs.read" || r["target"] != "/home/b/y"));
+
+        // limit caps the rows but reports the true total in the window.
+        let capped: Value =
+            serde_json::from_str(&agent_activity(&json!({"limit": 1}), me, &dir).unwrap()).unwrap();
+        assert_eq!(capped["count"], 1);
+        assert_eq!(capped["total_in_window"], 2);
+        assert_eq!(capped["truncated"], true);
+
+        // No SO_PEERCRED uid -> nothing (fail-closed, per-uid view).
+        let anon = Caller {
+            uid: None,
+            gid: None,
+            pid: Some(9),
+        };
+        let out2: Value =
+            serde_json::from_str(&agent_activity(&json!({}), anon, &dir).unwrap()).unwrap();
+        assert_eq!(out2["count"], 0, "an unidentified caller sees nothing");
+
+        assert_eq!(tool_tier("agent.activity"), Some(Tier::T0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
