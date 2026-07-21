@@ -353,6 +353,104 @@ fn place_cdp_fds(cmd_fd: RawFd, resp_fd: RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Récupère un champ chaîne requis qui DOIT être un chemin **absolu** (chemin de config venant de
+/// `vibed`, cohérent avec la garde de [`spawn_chromium`]).
+fn req_abs_field(payload: &serde_json::Value, key: &str) -> Result<String, String> {
+    let s = payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("browser: champ '{key}' manquant ou non-chaîne — refusé"))?;
+    if !s.starts_with('/') {
+        return Err(format!(
+            "browser: '{key}' doit être un chemin absolu : {s:?}"
+        ));
+    }
+    Ok(s.to_string())
+}
+
+/// Valide la **requête de contrôle** `browser` (ce que root `vibed` descend sur le stdin du
+/// helper). `vibed` est le SEUL écrivain du pipe → la requête est **de confiance** ; les pages que
+/// `chromium` pilotera, elles, sont **hostiles**. La validation du **batch** délègue à
+/// [`crate::tools::browser::parse_batch`] — source de vérité UNIQUE (cap d'étapes, whitelist de
+/// clés, `submit` terminal…). Rend `(chromium_bin, profile_dir, proxy, batch)`.
+fn parse_browser_request(
+    payload: &serde_json::Value,
+) -> Result<
+    (
+        String,
+        String,
+        Option<String>,
+        crate::tools::browser::BrowserBatch,
+    ),
+    String,
+> {
+    let chromium_bin = req_abs_field(payload, "chromium_bin")?;
+    let profile_dir = req_abs_field(payload, "profile_dir")?;
+    // `proxy` = autorité du proxy CONNECT (ex "127.66.0.1:8888"), ou absent (aucun egress ouvert :
+    // fail-closed correct — sans listener, chromium ne peut rien atteindre).
+    let proxy = payload
+        .get("proxy")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let batch = crate::tools::browser::parse_batch(payload)?;
+    Ok((chromium_bin, profile_dir, proxy, batch))
+}
+
+/// Réaffirme `SIGPIPE = SIG_IGN` (disposition **process-wide** du helper). Le runtime std l'installe
+/// déjà avant `main`, mais on le réaffirme (cf. doc du module) : un `chromium` hostile qui ferme sa
+/// lecture pendant un `write_all` lèverait sinon SIGPIPE et **tuerait le helper par signal** avant
+/// son erreur bornée. Avec `SIG_IGN`, `write_all` renvoie `EPIPE` (une `Err` propre), jamais un signal.
+fn reaffirm_sigpipe_ignored() {
+    // SAFETY : poser `SIG_IGN` sur `SIGPIPE` est sûr et idempotent ; aucune donnée partagée touchée.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
+/// Spawn `chromium`, pilote le batch, teardown. **Non testable unitairement** (vrai `chromium` +
+/// vrai CDP sur pipe) — validé **E2E sur target** ; ses briques ([`spawn_chromium`],
+/// [`crate::tools::browser::run_batch`]) sont testées séparément. `run_batch` **consomme** la
+/// session (drop → EOF sur le pipe → `chromium` voit la fin de son entrée) ; on tue puis reap
+/// l'enfant ensuite (le `RuntimeMaxSec` de l'unité transitoire est le garde-fou ultime).
+fn drive_batch(
+    chromium_bin: &str,
+    profile_dir: &str,
+    proxy: Option<&str>,
+    batch: &crate::tools::browser::BrowserBatch,
+) -> serde_json::Value {
+    let (mut child, chan) = match spawn_chromium(chromium_bin, profile_dir, proxy) {
+        Ok(cc) => cc,
+        Err(e) => {
+            return serde_json::json!({
+                "batch": "failed", "spawned": false,
+                "error": format!("browser: spawn chromium : {e}"),
+            });
+        }
+    };
+    let session = crate::cdp::CdpSession::new(chan);
+    let result = crate::tools::browser::run_batch(session, batch);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// Mode **`browser`** du helper `vibed-tool` (dispatché par `sandbox::helper::run`). Lit la requête
+/// de contrôle sur stdin (bornée, comme `run_deploy`), la valide, spawn `chromium`, pilote le batch
+/// et rend le résultat JSON **sérialisé**. Le contenu des pages y reste **opaque** (entrée hostile).
+/// Réaffirme `SIGPIPE=SIG_IGN` avant tout spawn/écriture.
+pub fn run_browser() -> Result<String, String> {
+    reaffirm_sigpipe_ignored();
+    let mut payload = String::new();
+    std::io::stdin()
+        .take(1 << 20)
+        .read_to_string(&mut payload)
+        .map_err(|e| format!("browser: lecture du payload de contrôle : {e}"))?;
+    let payload: serde_json::Value = serde_json::from_str(payload.trim())
+        .map_err(|e| format!("browser: payload de contrôle malformé : {e}"))?;
+    let (chromium_bin, profile_dir, proxy, batch) = parse_browser_request(&payload)?;
+    Ok(drive_batch(&chromium_bin, &profile_dir, proxy.as_deref(), &batch).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,5 +803,60 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_browser_request_extracts_config_and_delegates_batch_validation() {
+        use serde_json::json;
+        let payload = json!({
+            "chromium_bin": "/usr/lib64/chromium-browser/headless_shell",
+            "profile_dir": "/run/vibed-tool/abc/profile",
+            "proxy": "127.66.0.1:8888",
+            "steps": [
+                { "verb": "navigate", "url": "https://github.com/x" },
+                { "verb": "read" }
+            ]
+        });
+        let (bin, prof, proxy, batch) = parse_browser_request(&payload).unwrap();
+        assert_eq!(bin, "/usr/lib64/chromium-browser/headless_shell");
+        assert_eq!(prof, "/run/vibed-tool/abc/profile");
+        assert_eq!(proxy.as_deref(), Some("127.66.0.1:8888"));
+        assert_eq!(batch.steps.len(), 2);
+    }
+
+    #[test]
+    fn parse_browser_request_is_fail_closed() {
+        use serde_json::json;
+        // chromium_bin absent.
+        assert!(parse_browser_request(
+            &json!({ "profile_dir": "/p", "steps": [{"verb": "read"}] })
+        )
+        .unwrap_err()
+        .contains("chromium_bin"));
+        // chromium_bin relatif → refusé (chemin absolu exigé).
+        assert!(parse_browser_request(&json!({
+            "chromium_bin": "headless_shell", "profile_dir": "/p", "steps": [{"verb": "read"}]
+        }))
+        .unwrap_err()
+        .contains("absolu"));
+        // profile_dir relatif → refusé.
+        assert!(parse_browser_request(&json!({
+            "chromium_bin": "/bin/x", "profile_dir": "prof", "steps": [{"verb": "read"}]
+        }))
+        .unwrap_err()
+        .contains("absolu"));
+        // proxy absent → None (fail-closed egress : sans listener chromium n'atteint rien).
+        let (_, _, proxy, _) = parse_browser_request(&json!({
+            "chromium_bin": "/bin/x", "profile_dir": "/p", "steps": [{"verb": "read"}]
+        }))
+        .unwrap();
+        assert!(proxy.is_none());
+        // Batch invalide (submit non-terminal) → délégué à parse_batch (source de vérité unique).
+        assert!(parse_browser_request(&json!({
+            "chromium_bin": "/bin/x", "profile_dir": "/p",
+            "steps": [{"verb": "submit", "selector": "form"}, {"verb": "read"}]
+        }))
+        .unwrap_err()
+        .contains("DERNIÈRE étape"));
     }
 }
