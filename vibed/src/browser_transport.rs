@@ -223,6 +223,16 @@ pub fn spawn_chromium(
     profile_dir: &str,
     proxy: Option<&str>,
 ) -> std::io::Result<(Child, PipeChannel)> {
+    // Chemins ABSOLUS obligatoires (cohérent avec `run_cli` du helper deploy, Fable 5) : un
+    // `chromium_bin` relatif se résoudrait via le PATH hérité, un `profile_dir` relatif contre
+    // le cwd du helper — deux dérives évitables sur le chemin critique.
+    if !chromium_bin.starts_with('/') || !profile_dir.starts_with('/') {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "spawn_chromium: chromium_bin et profile_dir doivent être des chemins absolus",
+        ));
+    }
+
     // Deux pipes O_CLOEXEC. Convention CDP : l'enfant LIT ses commandes sur le fd 3 et ÉCRIT
     // ses réponses sur le fd 4.
     //   commandes : le helper écrit sur `to_child_w`, l'enfant lit sur `to_child_r`  (→ fd 3)
@@ -239,6 +249,14 @@ pub fn spawn_chromium(
     let argv = chromium_argv(chromium_bin, profile_dir, proxy);
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
+        // Env VERROUILLÉ comme l'argv (Fable 5) : l'unité durcie fournit déjà un env minimal,
+        // mais `env_clear` + `HOME=profile_dir` ferme l'autre moitié de l'`execve` (LD_PRELOAD,
+        // proxies d'env, XDG_*…) — même discipline que `run_cli`. HOME sur le profil éphémère
+        // garde toute écriture HOME-relative de chromium dans le profil jeté. (Env exact à
+        // revalider contre le vrai chromium à l'E2E — `headless_shell` tolère un env quasi-vide
+        // avec `--user-data-dir`.)
+        .env_clear()
+        .env("HOME", profile_dir)
         .stdin(Stdio::null()) // chromium n'a aucune entrée standard à lire
         .stdout(Stdio::null()) // ISOLATION du canal de résultat systemd-run (CDP = fd 4)
         .stderr(Stdio::null()); // les diagnostics de chromium ne polluent pas le résultat
@@ -279,6 +297,11 @@ fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
 /// Place les extrémités côté enfant du pipe CDP sur les **fds 3 et 4** (convention
 /// `--remote-debugging-pipe`), **sans** `FD_CLOEXEC` (pour survivre à l'`exec`). Tourne DANS
 /// l'enfant après le fork : **uniquement des appels async-signal-safe**, aucune allocation.
+///
+/// **Contrainte (Fable 5) : seules les erreurs `Error::last_os_error()`/`from_raw_os_error`
+/// sont permises ici.** Un `Error::new(..., "msg")` **allouerait** post-fork (deadlock possible
+/// sur le lock malloc tenu par un autre thread au moment du fork) et son `raw_os_error()` serait
+/// `None` → remappé `EINVAL` par std, diagnostic perdu.
 fn place_cdp_fds(cmd_fd: RawFd, resp_fd: RawFd) -> std::io::Result<()> {
     // SAFETY : appels bruts async-signal-safe ; on ne touche aucun état alloué du parent.
     unsafe {
@@ -306,6 +329,24 @@ fn place_cdp_fds(cmd_fd: RawFd, resp_fd: RawFd) -> std::io::Result<()> {
             return Err(Error::last_os_error());
         }
         if libc::fcntl(4, libc::F_SETFD, 0) < 0 {
+            return Err(Error::last_os_error());
+        }
+        // 4) Défense en profondeur (Fable 5) : marquer `CLOEXEC` **tout** fd `>= 5` (parasites
+        //    éventuels du helper — sockets futurs, `LISTEN_FDS`) **sans les fermer**. L'invariant
+        //    « seuls 3/4 atteignent l'enfant » ne doit pas dépendre de l'hygiène CLOEXEC de TOUT
+        //    le helper. `CLOSE_RANGE_CLOEXEC` et **non** un close : fermer casserait le pipe de
+        //    report d'échec d'`exec` de std (déjà CLOEXEC) — son EOF signifierait alors « exec
+        //    réussi » → `Ok` sur un enfant mort. Syscall **brut** (pas le wrapper glibc) :
+        //    indépendant de la version glibc, kernel >= 5.11 (trivialement tenu sur Fedora 44).
+        //    Nos fds temporaires (`tmp_* >= 10`) et les extrémités côté helper (déjà CLOEXEC)
+        //    sont couverts sans effet de bord ; 3/4 (< 5) restent hors de portée.
+        if libc::syscall(
+            libc::SYS_close_range,
+            5 as libc::c_long,
+            libc::c_uint::MAX as libc::c_long,
+            libc::CLOSE_RANGE_CLOEXEC as libc::c_long,
+        ) < 0
+        {
             return Err(Error::last_os_error());
         }
     }
@@ -624,16 +665,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("fake-chromium");
-        std::fs::write(&fake, "#!/bin/sh\nexec cat 0<&3 1>&4\n").unwrap();
+        // Le `printf` forge une sortie sur SON stdout AVANT l'écho fd3→fd4 : si stdout fuyait
+        // dans le canal (le pipe réponses branché à la fois en stdout ET en fd 4), "FORGED\0"
+        // arriverait AVANT "PING\0" et l'assert d'égalité casserait. C'est le test NÉGATIF
+        // gratuit de l'isolation stdout (Fable 5) — avec stdout à /dev/null, "FORGED\0" est
+        // jeté et seul l'écho du fd 4 remonte.
+        std::fs::write(&fake, "#!/bin/sh\nprintf 'FORGED\\0'\nexec cat 0<&3 1>&4\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let fake_bin = fake.to_string_lossy().into_owned();
 
-        // Réessaie la course ETXTBSY (fichier fraîchement écrit puis exécuté), comme les
-        // tests de sandbox.rs.
+        // Réessaie la course ETXTBSY (fichier fraîchement écrit puis exécuté), comme les tests
+        // de sandbox.rs. Détection par errno, pas par chaîne (locale/formulation, Fable 5).
         let (mut child, mut chan) = (|| {
             for _ in 0..50 {
                 match spawn_chromium(&fake_bin, "/tmp/ephemeral-profile", None) {
-                    Err(e) if e.to_string().contains("Text file busy") => {
+                    Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
                         std::thread::sleep(std::time::Duration::from_millis(20))
                     }
                     other => return other,
