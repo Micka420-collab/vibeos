@@ -741,6 +741,13 @@ pub(crate) fn run_batch<C: CdpChannel>(mut session: CdpSession<C>, batch: &Brows
     let mut results = Vec::with_capacity(total);
     let mut agg_bytes = 0usize;
     let mut batch_status = "completed";
+    // Une interaction (`click`/`fill`/`submit`) qui a COMPLÉTÉ a pu émettre un POST/effet distant
+    // (onclick→fetch, onchange→autosave). Dès lors, AUCUN statut rejouable ne doit plus sortir :
+    // sinon un `read` ultérieur que la page hostile fait échouer rendrait le batch `failed`
+    // (rejouable) → l'appelant rejoue → **double-POST** (Fable 5, BLOQUANT). La règle « submit
+    // terminal » ne protège que `submit` ; ce drapeau couvre `click`/`fill` mutants en milieu de
+    // batch, ainsi que le chemin `truncated`.
+    let mut mutated = false;
 
     for (i, action) in batch.steps.iter().enumerate() {
         let (status, body, size) = match run_action(&mut session, action, &page) {
@@ -774,14 +781,40 @@ pub(crate) fn run_batch<C: CdpChannel>(mut session: CdpSession<C>, batch: &Brows
         agg_bytes += size;
         results.push(json!({ "index": i, "status": status.as_str(), "result": body }));
 
-        // Fail-closed : la première action non `completed` arrête le batch.
+        // Une interaction mutante qui a COMPLÉTÉ : le POST/effet distant a PEUT-ÊTRE eu lieu. (Un
+        // `Failed` sur ces verbes = échec AVANT émission — non mutant ; un `Indeterminate` arrête
+        // déjà le batch en non-rejouable.)
+        if status == StepStatus::Completed
+            && matches!(
+                action,
+                BrowserAction::Click { .. }
+                    | BrowserAction::Fill { .. }
+                    | BrowserAction::Submit { .. }
+            )
+        {
+            mutated = true;
+        }
+
+        // Fail-closed : la première action non `completed` arrête le batch. Si une mutation a pu
+        // partir, un `Failed` (rejouable) est reclassé `Indeterminate` (ne-pas-réessayer) —
+        // `Indeterminate` l'est déjà.
         if status != StepStatus::Completed {
-            batch_status = status.as_str();
+            batch_status = if mutated && status == StepStatus::Failed {
+                StepStatus::Indeterminate.as_str()
+            } else {
+                status.as_str()
+            };
             break;
         }
-        // Borne d'agrégat — `truncated` UNIQUEMENT s'il reste des étapes (Fable 5, F1).
+        // Borne d'agrégat — `truncated` UNIQUEMENT s'il reste des étapes (Fable 5, F1). Si une
+        // mutation a pu partir, `truncated` (que l'appelant rejouerait pour récupérer la suite)
+        // devient `indeterminate` : rejouer re-tirerait l'effet.
         if agg_bytes > MAX_BATCH_RESULT_BYTES && i + 1 < total {
-            batch_status = "truncated";
+            batch_status = if mutated {
+                StepStatus::Indeterminate.as_str()
+            } else {
+                "truncated"
+            };
             break;
         }
     }
@@ -1553,6 +1586,44 @@ mod tests {
             "le read après une interaction indéterminée ne tire pas"
         );
         assert_eq!(steps[0]["status"], "indeterminate");
+    }
+
+    #[test]
+    fn run_batch_reclassifies_a_post_mutation_failure_as_indeterminate() {
+        // (Fable 5, BLOQUANT anti-double-POST) Un `click` qui COMPLÈTE (son POST onclick a
+        // PEUT-ÊTRE été émis) PUIS une étape faillible : le batch ne doit JAMAIS ressortir
+        // `failed` (rejouable) — sinon l'appelant rejoue et re-tire le POST. Il doit être
+        // `indeterminate` (ne-pas-réessayer). click1 complète (getDocument/querySelector/
+        // resolveNode/callFunctionOn OK, ids 3-6) ; click2 échoue à son resolve (querySelector →
+        // 0, AVANT toute émission → `Failed` en soi, ids 7-8).
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 4, "result": {"nodeId": 5}})),
+            cdp_frame(json!({"id": 5, "result": {"object": {"objectId": "O"}}})),
+            cdp_frame(json!({"id": 6, "result": {"result": {}}})),
+            cdp_frame(json!({"id": 7, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 8, "result": {"nodeId": 0}})),
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Click {
+                    selector: "#a".to_string(),
+                },
+                BrowserAction::Click {
+                    selector: "#none".to_string(),
+                },
+            ],
+        };
+        let out = run_batch(s, &batch);
+        // Le VERDICT du batch est `indeterminate` (ne-pas-rejouer), PAS `failed` — bien que
+        // l'étape 2 ait échoué AVANT émission : l'étape 1 a pu muter.
+        assert_eq!(out["batch"], "indeterminate");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["status"], "completed");
+        // L'étape faillible garde son statut PROPRE `failed` ; seul le verdict du batch est relevé.
+        assert_eq!(steps[1]["status"], "failed");
     }
 
     #[test]
