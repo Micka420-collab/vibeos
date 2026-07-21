@@ -332,8 +332,12 @@ pub struct ToolOutput {
 /// Cap on the RESULT channel (helper stdout) buffered in root `vibed`'s memory.
 /// `MemoryMax` bounds the helper's cgroup, NOT the bytes it writes to a pipe, so
 /// without this a hostile helper could flood stdout and OOM the root daemon
-/// (Fable 5). 8 MiB is far above any legitimate bounded result.
-const STDOUT_CAP: usize = 8 * 1024 * 1024;
+/// (Fable 5). A helper that exceeds it is KILLED and its call refused — so any
+/// helper whose legitimate result can approach this bound must size its OWN caps
+/// to fit UNDER it, envelope included, or a fully-executed batch is refused as if
+/// it failed (replayable) — see the compile-time assertion in `tools::browser`
+/// that pins `MAX_BATCH_RESULT_BYTES + MAX_STEP_RESULT_BYTES + envelope ≤` this.
+pub(crate) const STDOUT_CAP: usize = 8 * 1024 * 1024;
 /// Cap on captured diagnostics (helper stderr + systemd-run chatter).
 const STDERR_CAP: usize = 256 * 1024;
 
