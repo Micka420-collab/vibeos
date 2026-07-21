@@ -205,9 +205,70 @@ fn validate_value(val: &str) -> Result<String, String> {
     Ok(val.to_string())
 }
 
-/// Exécute une [`BrowserAction`] contre une session CDP et renvoie un résultat JSON
-/// **opaque** (le contenu vient d'une page hostile). Le transport `run_browser`
-/// construira la [`CdpSession`] sur les fds du pipe puis appellera ceci.
+/// L'issue d'une action navigateur — **trois états** (ADR-022 addendum ratifié, Fable 5). Le type
+/// force `submit` à traiter explicitement `Indeterminate` : un POST parti sans réponse ne doit
+/// JAMAIS être `Failed` (sinon double-POST au retry). Les verbes non mutants
+/// (navigate/read/screenshot/click/fill — les click-submitters étant bloqués côté click) ne
+/// produisent que `Completed`/`Failed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActionOutcome {
+    /// Réussie ; `Value` = résultat JSON **opaque** (contenu de page hostile).
+    Completed(Value),
+    /// Échouée AVANT tout effet distant observable (resolve raté, exception page, refus vibed).
+    Failed(String),
+    /// `submit` uniquement : le `callFunctionOn` du submit a échoué APRÈS émission (flux CDP cassé)
+    /// — le POST a PEUT-ÊTRE tiré. Ni `Completed` (pas de confirmation) ni `Failed` (retry =
+    /// double-POST) : l'appelant NE DOIT PAS ré-exécuter le batch.
+    Indeterminate(String),
+}
+
+#[cfg(test)]
+impl ActionOutcome {
+    /// Test helper : le `Value` d'un `Completed` (panique sinon). Nommé `unwrap` pour que les
+    /// tests existants (`run_action(...).unwrap()`) marchent tels quels après le passage à
+    /// `ActionOutcome`.
+    fn unwrap(self) -> Value {
+        match self {
+            ActionOutcome::Completed(v) => v,
+            other => panic!("attendu Completed, obtenu {other:?}"),
+        }
+    }
+    /// Test helper : le message d'un `Failed` (panique sinon).
+    fn unwrap_err(self) -> String {
+        match self {
+            ActionOutcome::Failed(e) => e,
+            other => panic!("attendu Failed, obtenu {other:?}"),
+        }
+    }
+}
+
+/// Exécute une [`BrowserAction`] et rend son issue à **trois états** ([`ActionOutcome`]). `submit`
+/// (T2, POST mutant) suit un chemin propre ([`run_submit`]) qui peut rendre `Indeterminate` ; les
+/// autres verbes délèguent à [`run_simple_action`] (mappé `Ok → Completed`, `Err → Failed`).
+/// Refuse d'emblée un `page` (sessionId) **vide** — jamais produit par `attach_page`, donne une
+/// erreur vibed claire plutôt qu'un refus chromium cryptique (Fable 5).
+pub(crate) fn run_action<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    action: &BrowserAction,
+    page: &str,
+) -> ActionOutcome {
+    if page.is_empty() {
+        return ActionOutcome::Failed(
+            "browser: run_action sans sessionId de page — refusé".to_string(),
+        );
+    }
+    if let BrowserAction::Submit { selector } = action {
+        return run_submit(session, page, selector);
+    }
+    match run_simple_action(session, action, page) {
+        Ok(v) => ActionOutcome::Completed(v),
+        Err(e) => ActionOutcome::Failed(e),
+    }
+}
+
+/// Exécute un verbe navigateur **sans mutation distante** (navigate/read/screenshot/click/fill)
+/// contre une session CDP et renvoie un résultat JSON **opaque** (le contenu vient d'une page
+/// hostile). `submit` est routé vers [`run_submit`] par [`run_action`] et n'atteint jamais ici.
 ///
 /// Verbes SANS sélecteur — `navigate`/`read`/`screenshot` : leurs commandes CDP ne portent
 /// aucune entrée agent interpolée (URL en paramètre, hôte déjà validé ; expressions
@@ -235,17 +296,11 @@ fn validate_value(val: &str) -> Result<String, String> {
 /// live — sinon un `read` juste après un `navigate` peut capturer la page PRÉCÉDENTE
 /// (intégrité d'attribution ; le cas de la redirection hors-allowlist, lui, est bloqué à
 /// l'egress par le proxy, pas ici — bon découpage).
-pub(crate) fn run_action<C: CdpChannel>(
+fn run_simple_action<C: CdpChannel>(
     session: &mut CdpSession<C>,
     action: &BrowserAction,
     page: &str,
 ) -> Result<Value, String> {
-    // Un sessionId de page vide n'est jamais légitime (`attach_page` rend une chaîne non
-    // vide) : refuser tôt donne une erreur vibed claire plutôt qu'un refus chromium
-    // cryptique en aval (Fable 5).
-    if page.is_empty() {
-        return Err("browser: run_action sans sessionId de page — refusé".to_string());
-    }
     match action {
         BrowserAction::Navigate { host, url } => {
             // Ré-assertion de cohérence (promesse de l'en-tête) : l'hôte que la
@@ -374,12 +429,71 @@ pub(crate) fn run_action<C: CdpChannel>(
             )?;
             Ok(json!({ "filled": true }))
         }
-        BrowserAction::Submit { .. } => Err(
-            // `submit` (T2, POST mutant) exige le refactor à TROIS états — un POST parti sans
-            // réponse doit être `indeterminate`, jamais `failed` (sinon double-POST au retry) —
-            // ce qui change la signature de `run_action`. Incrément séparé.
-            "browser: submit — incrément suivant (trois états, POST mutant)".to_string(),
-        ),
+        // `submit` est routé vers `run_submit` par `run_action` (chemin à trois états) — jamais ici.
+        BrowserAction::Submit { .. } => {
+            unreachable!("browser.submit est routé vers run_submit par run_action")
+        }
+    }
+}
+
+/// Exécute `submit` avec le binding par-objet ET la sémantique à **trois états** (ADR-022 addendum,
+/// Fable 5). `submit` déclenche un POST **mutant** : contrairement aux autres verbes, un échec
+/// APRÈS émission du `callFunctionOn` (flux CDP cassé ⇒ session **empoisonnée**) NE PEUT PAS être
+/// `Failed` — le POST a peut-être tiré, un retry ferait un **double-POST** → `Indeterminate`. Un
+/// échec AVANT (resolve raté, ou exception page « pas un `<form>` ») reste `Failed` (rien n'est
+/// parti). La `functionDeclaration` est **constante** (invariant anti-`browser.evaluate`) ; elle
+/// exige que la cible soit un `<form>`.
+fn run_submit<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    page: &str,
+    selector: &str,
+) -> ActionOutcome {
+    // resolve : tout échec ici est AVANT toute soumission → Failed (rien n'est parti).
+    let object_id = match resolve_object(session, page, selector) {
+        Ok(o) => o,
+        Err(e) => return ActionOutcome::Failed(format!("browser.submit: {e}")),
+    };
+    let r = session.call(
+        "Runtime.callFunctionOn",
+        json!({
+            "objectId": object_id,
+            "functionDeclaration":
+                "function() { if (this.tagName !== 'FORM') throw new Error('cible pas un <form>'); \
+                 this.submit(); }",
+            "arguments": [],
+            "returnByValue": true,
+            "awaitPromise": false,
+        }),
+        Some(page),
+    );
+    match r {
+        // Réponse reçue : si la fonction a levé (`exceptionDetails`), le submit N'A PAS eu lieu →
+        // Failed. Sinon `this.submit()` a été appelé → Completed.
+        Ok(resp) => {
+            if resp.get("exceptionDetails").is_some() {
+                ActionOutcome::Failed(
+                    "browser.submit: exception côté page (cible pas un <form> ?) — refusé"
+                        .to_string(),
+                )
+            } else {
+                ActionOutcome::Completed(json!({ "submitted": true }))
+            }
+        }
+        // `session.call` a échoué. **Empoisonnée** ⇒ erreur PROTOCOLE : le `callFunctionOn` est
+        // PARTI mais le flux s'est cassé → le POST a PEUT-ÊTRE tiré → **Indeterminate** (jamais
+        // Failed, sinon double-POST). **Non empoisonnée** ⇒ erreur applicative CDP (commande
+        // rejetée AVANT exécution) → Failed. `e` peut porter un message du pair : assaini.
+        Err(e) => {
+            let e = crate::cdp::sanitize_peer_text(&e);
+            if session.is_poisoned() {
+                ActionOutcome::Indeterminate(format!(
+                    "browser.submit: flux CDP cassé APRÈS émission — POST indéterminé, NE PAS \
+                     réessayer : {e}"
+                ))
+            } else {
+                ActionOutcome::Failed(format!("browser.submit: {e}"))
+            }
+        }
     }
 }
 
@@ -601,7 +715,7 @@ pub(crate) fn run_batch<C: CdpChannel>(mut session: CdpSession<C>, batch: &Brows
 
     for (i, action) in batch.steps.iter().enumerate() {
         let (status, body, size) = match run_action(&mut session, action, &page) {
-            Ok(v) => {
+            ActionOutcome::Completed(v) => {
                 let n = json_size(&v);
                 if n > MAX_STEP_RESULT_BYTES {
                     // Borne par étape (Fable 5) : on ne pousse PAS le body hostile sur-taille.
@@ -615,11 +729,17 @@ pub(crate) fn run_batch<C: CdpChannel>(mut session: CdpSession<C>, batch: &Brows
                     (StepStatus::Completed, v, n)
                 }
             }
-            // Verbes actuels sans mutation distante → Failed. Voir StepStatus::Indeterminate.
-            Err(e) => {
+            ActionOutcome::Failed(e) => {
                 let b = json!({ "error": e });
                 let n = json_size(&b);
                 (StepStatus::Failed, b, n)
+            }
+            // `submit` dont le POST est parti sans réponse : Indeterminate → le batch s'ARRÊTE
+            // (fail-closed comme Failed) mais l'appelant NE DOIT PAS ré-exécuter (double-POST).
+            ActionOutcome::Indeterminate(e) => {
+                let b = json!({ "error": e });
+                let n = json_size(&b);
+                (StepStatus::Indeterminate, b, n)
             }
         };
         agg_bytes += size;
@@ -902,18 +1022,94 @@ mod tests {
     }
 
     #[test]
-    fn submit_is_still_deferred_pending_the_three_state_refactor() {
-        let chan = FakeCdp::new(vec![]);
+    fn submit_completes_on_a_form_with_a_constant_function() {
+        let chan = FakeCdp::new(cdp_object_binding(5, "F", json!({"result": {}})));
         let mut s = CdpSession::new(chan);
-        let err = run_action(
+        let out = run_action(
             &mut s,
             &BrowserAction::Submit {
                 selector: "form#login".into(),
             },
             "PAGE-SID",
-        )
-        .unwrap_err();
-        assert!(err.contains("submit") && err.contains("incrément suivant"));
+        );
+        assert_eq!(out, ActionOutcome::Completed(json!({"submitted": true})));
+        // Fonction CONSTANTE : exige un <form> et appelle this.submit() ; le sélecteur n'y entre pas.
+        let sent = s.into_channel().sent;
+        let call: Value = serde_json::from_slice(&sent[3][..sent[3].len() - 1]).unwrap();
+        let f = call["params"]["functionDeclaration"].as_str().unwrap();
+        assert!(f.contains("this.submit()"));
+        assert!(f.contains("'FORM'"));
+        assert!(
+            !f.contains("login"),
+            "le sélecteur ne doit JAMAIS entrer dans la source : {f}"
+        );
+    }
+
+    #[test]
+    fn submit_fails_on_a_page_exception_not_a_form() {
+        // callFunctionOn répond avec exceptionDetails (cible pas un <form>) → Failed (rien soumis).
+        let chan = FakeCdp::new(cdp_object_binding(
+            5,
+            "F",
+            json!({"result": {}, "exceptionDetails": {"text": "not a form"}}),
+        ));
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "#x".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Failed(_)),
+            "attendu Failed : {out:?}"
+        );
+    }
+
+    #[test]
+    fn submit_is_indeterminate_on_a_protocol_break_after_dispatch() {
+        // getDocument/querySelector/resolveNode OK, mais le callFunctionOn du submit est ÉMIS puis
+        // le flux se casse (pas de réponse → EOF → session empoisonnée) → Indeterminate : le POST
+        // a PEUT-ÊTRE tiré, ne PAS réessayer. JAMAIS Failed (ce serait le double-POST, Fable 5).
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 5}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "F"}}})),
+            // Pas de réponse au callFunctionOn (id 4) → EOF après émission.
+        ]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "form".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Indeterminate(_)),
+            "attendu Indeterminate : {out:?}"
+        );
+    }
+
+    #[test]
+    fn submit_fails_when_resolve_fails_before_any_submission() {
+        // Aucune réponse : getDocument échoue → resolve échoue → Failed (l'échec est AVANT le
+        // callFunctionOn du submit, donc rien n'est parti), JAMAIS Indeterminate — même si la
+        // session est empoisonnée par l'erreur protocole du getDocument.
+        let chan = FakeCdp::new(vec![]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "form".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Failed(_)),
+            "attendu Failed : {out:?}"
+        );
     }
 
     #[test]
@@ -1238,8 +1434,9 @@ mod tests {
 
     #[test]
     fn run_batch_is_fail_closed_and_stops_on_the_first_non_completed_step() {
-        // read (Runtime.evaluate id3) réussit ; submit échoue (encore différé, aucun appel CDP)
-        // → le batch s'arrête, le 2e read ne tire PAS.
+        // read (Runtime.evaluate id3) réussit ; submit échoue à son resolve (getDocument id4 sans
+        // réponse → canal fermé → Failed, AVANT toute soumission) → le batch s'arrête, le 2e read
+        // ne tire PAS.
         let chan = cdp_with_attach(vec![cdp_frame(
             json!({"id": 3, "result": {"result": {"value": "<html>a</html>"}}}),
         )]);
@@ -1262,7 +1459,38 @@ mod tests {
         assert!(steps[1]["result"]["error"]
             .as_str()
             .unwrap()
-            .contains("incrément suivant"));
+            .contains("browser.submit"));
+    }
+
+    #[test]
+    fn run_batch_surfaces_an_indeterminate_submit_and_stops() {
+        // submit dont le callFunctionOn est ÉMIS puis le flux se casse (poison après émission) →
+        // step INDETERMINATE → le batch s'arrête, statut "indeterminate" : l'appelant ne DOIT PAS
+        // ré-exécuter le batch (double-POST). Le read suivant ne tire pas.
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"root": {"nodeId": 1}}})), // getDocument
+            cdp_frame(json!({"id": 4, "result": {"nodeId": 5}})),           // querySelector
+            cdp_frame(json!({"id": 5, "result": {"object": {"objectId": "F"}}})), // resolveNode
+                                                                            // pas de réponse au callFunctionOn (id 6) → poison après émission
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Submit {
+                    selector: "form".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "indeterminate");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(
+            steps.len(),
+            1,
+            "le read après un submit indéterminé ne tire pas"
+        );
+        assert_eq!(steps[0]["status"], "indeterminate");
     }
 
     #[test]
