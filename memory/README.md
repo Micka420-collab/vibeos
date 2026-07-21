@@ -42,6 +42,7 @@ VIBEOS_MEMORY_DIR=/tmp/vibeos-memory-test bash memory/genesis.sh
 find /tmp/vibeos-memory-test -mindepth 1 | sort
 cat /tmp/vibeos-memory-test/identity.toml
 jq . /tmp/vibeos-memory-test/hardware.json        # sudo apt install -y jq
+cat /tmp/vibeos-memory-test/personality.toml      # le caractère choisi à la naissance (ADR-029)
 cat /tmp/vibeos-memory-test/journal/"$(date -u +%Y-%m-%d)".jsonl
 
 # 3. Vérifier l'idempotence : la seconde exécution sort immédiatement (code 0)
@@ -62,6 +63,9 @@ rm -rf /tmp/vibeos-memory-test
 - `identity.toml` : `hostname`, `machine_id`, `birth` (ISO 8601), `mode`.
 - `hardware.json` : JSON valide (`jq .` ne doit pas échouer), avec des marqueurs
   explicites du type `"(lscpu not available)"` si un outil manque — jamais un crash.
+- `personality.toml` : `schema = 1`, `name`/`archetype`/`tone`, table `[traits]`
+  (`caution` ≥ 50), table `[adaptation]` — le caractère est **déterministe** (même
+  machine ⇒ même caractère ; ADR-029).
 - `journal/<AAAA-MM-JJ>.jsonl` : une ligne, `type` = `genesis`.
 - `.initialized` : présent, écrit en **dernier**, contient l'horodatage de naissance.
 - Permissions : racine en `0700`, fichiers en `0600` (le script pose `umask 077`).

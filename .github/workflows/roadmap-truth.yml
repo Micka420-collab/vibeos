@@ -14,6 +14,7 @@ on:
     paths:
       - "ROADMAP.md"
       - "STATUS.md"
+      - "README*.md" # the 4 READMEs ARE validated (badge Kinoite, test counter) — trigger on them too
       - "docs/DECISIONS.md"
       - "scripts/verify-roadmap-truth.sh"
       - "vibed/**"
@@ -22,6 +23,7 @@ on:
     paths:
       - "ROADMAP.md"
       - "STATUS.md"
+      - "README*.md" # the 4 READMEs ARE validated (badge Kinoite, test counter) — trigger on them too
       - "docs/DECISIONS.md"
       - "scripts/verify-roadmap-truth.sh"
       - "vibed/**"

@@ -211,6 +211,38 @@ mod tests {
     }
 
     #[test]
+    fn malformed_or_expired_open_record_fails_safe() {
+        let p = scratch("failsafe");
+        let now = 1_000_000;
+        // (1) A well-formed {"mode":"open"} with a MISSING expiry must NOT read
+        // as open-forever: expires defaults to 0, now >= 0 => Governed.
+        std::fs::write(&p, br#"{"mode":"open"}"#).unwrap();
+        assert_eq!(
+            effective(&p, now),
+            Mode::Governed,
+            "open record without expires_unix must fail safe to governed"
+        );
+        // A non-numeric expiry is likewise treated as absent (0) => Governed.
+        std::fs::write(&p, br#"{"mode":"open","expires_unix":"soon"}"#).unwrap();
+        assert_eq!(
+            effective(&p, now),
+            Mode::Governed,
+            "non-numeric expires_unix must fail safe to governed"
+        );
+        // (2) status() on an EXPIRED open record reports governed / no danger
+        // even before anyone rewrites the file (auto-revert on read).
+        std::fs::write(&p, br#"{"mode":"open","expires_unix":500}"#).unwrap();
+        let s = status(&p, now); // now (1_000_000) is well past expiry (500)
+        assert_eq!(s["mode"], "governed", "expired open reads as governed");
+        assert_eq!(s["danger"], false, "expired open raises no danger");
+        assert!(
+            s.get("remaining_secs").is_none(),
+            "no open-mode details leak for an expired record"
+        );
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
     fn open_is_active_only_within_its_window() {
         let p = scratch("window");
         let now = 1_000_000;
