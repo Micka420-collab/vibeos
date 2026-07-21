@@ -147,9 +147,17 @@ const RESPONSE_BAD_GATEWAY: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nConnection: cl
 /// Un `chromium` légitime envoie ~200 octets ; 8 KiB borne un pair hostile qui n'enverrait jamais
 /// le `\r\n\r\n` terminal.
 const MAX_REQUEST_HEAD: usize = 8 * 1024;
-/// Timeout de connexion à la cible — borne un dial qui pend (cible qui n'accepte jamais). Le
-/// garde-fou ultime reste le `RuntimeMaxSec` de l'unité transitoire durcie (ADR-019/022).
+/// Timeout de connexion à la cible ET de résolution DNS — borne un dial/résolveur qui pend (cible
+/// qui n'accepte jamais, résolveur hostile/lent).
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout de lecture/écriture pendant la **phase d'en-tête** : un `chromium` hostile qui ouvre la
+/// connexion puis n'envoie jamais le `\r\n\r\n` (slowloris) — ou ne lit jamais la réponse — est
+/// coupé au lieu de tenir un thread indéfiniment (Fable 5, BLOQUANT anti-DoS).
+const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout d'**inactivité** du tunnel (par read/write) : un tunnel muet (slowloris / slow-read
+/// hostile) est coupé ; un tunnel **actif** (≥ 1 octet par fenêtre) survit. Généreux — l'automation
+/// gouvernée fait des échanges courts, pas des flux longuement inactifs.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Le motif d'un refus CONNECT. Porte la **cause** (400 syntaxe / 403 politique), pas les octets :
 /// le rendu octets vit dans [`tunnel_handshake`], de sorte qu'un refus **ne peut structurellement
@@ -349,20 +357,55 @@ fn all_addrs_external(addrs: &[SocketAddr]) -> bool {
     !addrs.is_empty() && addrs.iter().all(|a| !is_internal_ip(a.ip()))
 }
 
-/// Résout `host:port`, REFUSE si une seule adresse est interne ([`all_addrs_external`]), puis
-/// **ÉPINGLE** la première adresse validée et s'y connecte (timeout borné). L'IP connectée EST
-/// celle validée — **aucune re-résolution** entre le check et le dial, ce qui ferme la fenêtre de
-/// DNS-rebinding (une 2e résolution pourrait renvoyer une IP interne).
+/// Résout `host:port` avec un timeout **borné** (le `to_socket_addrs`/getaddrinfo de std n'en a
+/// PAS — modèle de menace : résolveur hostile/lent qui pendrait le thread ; Fable 5). Résolution
+/// dans un thread dédié, `recv_timeout` borné ; si le délai expire → `Err` (le thread résolveur se
+/// termine seul dans le timeout du résolveur OS, sans bloquer le thread de service).
+fn resolve_bounded(host: &str, port: u16, timeout: Duration) -> io::Result<Vec<SocketAddr>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host_owned = host.to_string();
+    std::thread::spawn(move || {
+        let res = (host_owned.as_str(), port)
+            .to_socket_addrs()
+            .map(|it| it.collect::<Vec<_>>());
+        let _ = tx.send(res); // le récepteur peut être parti (timeout) → on ignore
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(res) => res,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "proxy: résolution DNS expirée — refusé",
+        )),
+    }
+}
+
+/// Résout `host:port` (borné, [`resolve_bounded`]), REFUSE si une seule adresse est interne
+/// ([`all_addrs_external`]), puis connecte l'une des adresses **validées** (timeout borné). Les IP
+/// connectées sont EXACTEMENT celles vérifiées — **aucune re-résolution** entre le check et le dial,
+/// ce qui ferme la fenêtre de DNS-rebinding. Toutes étant externes, itérer sur les adresses (hôte
+/// multi-homé) est sûr et améliore la disponibilité (Fable 5, MINEUR).
 fn dial_safe(host: &str, port: u16) -> io::Result<TcpStream> {
-    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs()?.collect();
+    let addrs = resolve_bounded(host, port, DIAL_TIMEOUT)?;
     if !all_addrs_external(&addrs) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("proxy: {host} résout vers une IP interne — refusé (anti-rebinding)"),
         ));
     }
-    // `addrs` non vide (garanti par all_addrs_external) → index 0 sûr.
-    TcpStream::connect_timeout(&addrs[0], DIAL_TIMEOUT)
+    // `addrs` non vide (garanti par all_addrs_external). Essayer chaque adresse validée.
+    let mut last_err = None;
+    for addr in &addrs {
+        match TcpStream::connect_timeout(addr, DIAL_TIMEOUT) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "proxy: aucune adresse joignable",
+        )
+    }))
 }
 
 /// Relaie les octets dans les DEUX sens entre le client (`chromium`) et l'upstream jusqu'à
@@ -393,6 +436,10 @@ fn splice(client: TcpStream, upstream: TcpStream) -> io::Result<()> {
 /// l'établissement A réussi ; un dial raté → `502`, jamais de `200` optimiste). Fail-closed
 /// partout — toute erreur ferme la connexion sans tunnel.
 pub fn serve_connection(mut client: TcpStream, allowed: &[String]) -> io::Result<()> {
+    // Phase d'en-tête : borne read ET write (slowloris d'en-tête + client slow-read qui ne lirait
+    // jamais la réponse) — sinon un thread pend indéfiniment (Fable 5, BLOQUANT anti-DoS).
+    client.set_read_timeout(Some(HEAD_TIMEOUT))?;
+    client.set_write_timeout(Some(HEAD_TIMEOUT))?;
     let head = read_request_head(&mut client, MAX_REQUEST_HEAD)?;
     let (response, target) = tunnel_handshake(connect_decision(&head, allowed));
     let Some((host, port)) = target else {
@@ -406,6 +453,10 @@ pub fn serve_connection(mut client: TcpStream, allowed: &[String]) -> io::Result
             // `response` est ici `RESPONSE_TUNNEL_ESTABLISHED` (bras Tunnel) — écrit APRÈS le dial.
             client.write_all(response)?;
             client.flush()?;
+            // Phase tunnel : timeout d'INACTIVITÉ sur les deux sens (un tunnel muet hostile est
+            // coupé, un tunnel actif survit) → le splice ne peut plus pendre indéfiniment.
+            set_idle_timeouts(&client, IDLE_TIMEOUT)?;
+            set_idle_timeouts(&upstream, IDLE_TIMEOUT)?;
             splice(client, upstream)
         }
         Err(_) => {
@@ -415,6 +466,15 @@ pub fn serve_connection(mut client: TcpStream, allowed: &[String]) -> io::Result
             Ok(())
         }
     }
+}
+
+/// Pose un timeout d'**inactivité** (read + write) sur un socket du tunnel — un `io::copy` qui
+/// n'avance plus dans la fenêtre retourne alors `Err`, ce qui termine le thread de splice et libère
+/// le socket (anti-pendaison, Fable 5).
+fn set_idle_timeouts(s: &TcpStream, d: Duration) -> io::Result<()> {
+    s.set_read_timeout(Some(d))?;
+    s.set_write_timeout(Some(d))?;
+    Ok(())
 }
 
 #[cfg(test)]
