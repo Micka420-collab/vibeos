@@ -708,6 +708,26 @@ fn json_size(v: &Value) -> usize {
 /// rend le résultat **auto-porteur** (l'audit distingue « 2/2 complété » de « arrêté à 2/5 »).
 pub(crate) fn run_batch<C: CdpChannel>(mut session: CdpSession<C>, batch: &BrowserBatch) -> Value {
     let total = batch.steps.len();
+    // Défense EN PROFONDEUR (Fable 5) — l'invariant « submit TERMINAL » (anti double-POST) vit dans
+    // `parse_batch`, mais `BrowserBatch.steps` est `pub(crate)` : on le RÉ-ASSERTE ici, exactement
+    // comme `run_simple_action` ré-asserte la cohérence hôte/URL d'un `Navigate`. Sans ça, un futur
+    // constructeur de batch (câblage transport, refactor) qui contournerait `parse_batch` ferait
+    // s'évaporer la garantie en silence. Un `submit` non-terminal ⇒ batch failed SANS rien exécuter
+    // (aucun POST tiré), avant même d'attacher/spawner.
+    if let Some(pos) = batch
+        .steps
+        .iter()
+        .position(|s| matches!(s, BrowserAction::Submit { .. }))
+    {
+        if pos != total - 1 {
+            return json!({
+                "batch": "failed", "attached": false,
+                "error": "browser.batch: 'submit' non-terminal — refusé (anti double-POST ; \
+                          invariant de parse_batch ré-asserté)",
+                "steps": [], "steps_total": total,
+            });
+        }
+    }
     let page = match crate::browser_transport::attach_page(&mut session) {
         Ok(p) => p,
         Err(e) => {
@@ -1472,18 +1492,21 @@ mod tests {
 
     #[test]
     fn run_batch_is_fail_closed_and_stops_on_the_first_non_completed_step() {
-        // read (Runtime.evaluate id3) réussit ; submit échoue à son resolve (getDocument id4 sans
-        // réponse → canal fermé → Failed, AVANT toute soumission) → le batch s'arrête, le 2e read
-        // ne tire PAS.
-        let chan = cdp_with_attach(vec![cdp_frame(
-            json!({"id": 3, "result": {"result": {"value": "<html>a</html>"}}}),
-        )]);
+        // read (Runtime.evaluate id3) réussit ; click échoue à son resolve (querySelector id5 →
+        // nodeId 0, rien ne matche → Failed) → le batch s'arrête, le 3e read ne tire PAS. (click
+        // et non submit : submit doit être terminal, mais on teste ici l'arrêt sur étape faillible
+        // AU MILIEU.)
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"result": {"value": "<html>a</html>"}}})), // read
+            cdp_frame(json!({"id": 4, "result": {"root": {"nodeId": 1}}})), // click getDocument
+            cdp_frame(json!({"id": 5, "result": {"nodeId": 0}})),           // querySelector → 0
+        ]);
         let s = CdpSession::new(chan);
         let batch = BrowserBatch {
             steps: vec![
                 BrowserAction::Read,
-                BrowserAction::Submit {
-                    selector: "form".to_string(),
+                BrowserAction::Click {
+                    selector: "#none".to_string(),
                 },
                 BrowserAction::Read,
             ],
@@ -1497,25 +1520,26 @@ mod tests {
         assert!(steps[1]["result"]["error"]
             .as_str()
             .unwrap()
-            .contains("browser.submit"));
+            .contains("browser.click"));
     }
 
     #[test]
-    fn run_batch_surfaces_an_indeterminate_submit_and_stops() {
-        // submit dont le callFunctionOn est ÉMIS puis le flux se casse (poison après émission) →
+    fn run_batch_surfaces_an_indeterminate_interaction_and_stops() {
+        // click dont le callFunctionOn est ÉMIS puis le flux se casse (poison après émission) →
         // step INDETERMINATE → le batch s'arrête, statut "indeterminate" : l'appelant ne DOIT PAS
-        // ré-exécuter le batch (double-POST). Le read suivant ne tire pas.
+        // ré-exécuter (double-effet). Le read suivant ne tire pas. (click, non-terminal, illustre
+        // le chemin indeterminate d'une INTERACTION au milieu d'un batch.)
         let chan = cdp_with_attach(vec![
             cdp_frame(json!({"id": 3, "result": {"root": {"nodeId": 1}}})), // getDocument
             cdp_frame(json!({"id": 4, "result": {"nodeId": 5}})),           // querySelector
-            cdp_frame(json!({"id": 5, "result": {"object": {"objectId": "F"}}})), // resolveNode
+            cdp_frame(json!({"id": 5, "result": {"object": {"objectId": "O"}}})), // resolveNode
                                                                             // pas de réponse au callFunctionOn (id 6) → poison après émission
         ]);
         let s = CdpSession::new(chan);
         let batch = BrowserBatch {
             steps: vec![
-                BrowserAction::Submit {
-                    selector: "form".to_string(),
+                BrowserAction::Click {
+                    selector: "#buy".to_string(),
                 },
                 BrowserAction::Read,
             ],
@@ -1526,9 +1550,32 @@ mod tests {
         assert_eq!(
             steps.len(),
             1,
-            "le read après un submit indéterminé ne tire pas"
+            "le read après une interaction indéterminée ne tire pas"
         );
         assert_eq!(steps[0]["status"], "indeterminate");
+    }
+
+    #[test]
+    fn run_batch_defensively_refuses_a_non_terminal_submit_without_executing() {
+        // Défense en profondeur (Fable 5) : même si un batch avec `submit` non-terminal est
+        // construit directement (contournant parse_batch), run_batch le REFUSE avant d'attacher/
+        // exécuter — aucun POST tiré. FakeCdp vide : si run_batch exécutait quoi que ce soit, il
+        // échouerait autrement.
+        let chan = FakeCdp::new(vec![]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Submit {
+                    selector: "form".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "failed");
+        assert_eq!(out["attached"], false);
+        assert_eq!(out["steps"].as_array().unwrap().len(), 0);
+        assert!(out["error"].as_str().unwrap().contains("non-terminal"));
     }
 
     #[test]
