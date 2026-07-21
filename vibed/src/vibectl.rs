@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::{approval, audit, mcp, reasoning, supervisor};
+use crate::{approval, audit, mcp, mode, reasoning, supervisor};
 
 /// Current effective uid, parsed from `/proc/self/status` (no libc), for the
 /// `granted_by` field of an approval and the `require_root` check. `None` if it
@@ -148,6 +148,63 @@ pub fn deny(id: &str) -> (Value, bool) {
     }
 }
 
+/// `vibectl mode status` — the current operating mode (ADR-027). Read-only, for
+/// anyone: the mode is not a secret (it is literally what the danger panel
+/// shows). Never mutates.
+pub fn mode_status() -> Value {
+    mode::status(Path::new(mode::MODE_PATH), now_epoch_secs())
+}
+
+/// `vibectl mode open [--minutes N] [--reason R]` — the OUT-OF-BAND HUMAN unlock
+/// of autonomous/open mode (ADR-027). Root only — the same `require_root` gate
+/// as `approve`, because this IS a blanket approval of the T2/T3 floor for a
+/// bounded window. An agent can never reach this: it is a `vibectl` command run
+/// by the operator, and the mode file is root-only + on vibed's write denylist.
+/// Returns `(report, ok)`; the report carries a loud warning by design.
+pub fn mode_open(minutes: Option<u64>, reason: Option<&str>) -> (Value, bool) {
+    let euid = current_euid();
+    if let Err(e) = require_root(euid) {
+        return (e, false);
+    }
+    let secs = minutes
+        .map(|m| m.saturating_mul(60))
+        .unwrap_or(mode::OPEN_DEFAULT_SECS);
+    match mode::set_open(
+        Path::new(mode::MODE_PATH),
+        secs,
+        euid,
+        now_epoch_secs(),
+        reason,
+    ) {
+        Ok(record) => (
+            json!({
+                "mode": "open",
+                "record": record,
+                "warning": "AUTONOMOUS / OPEN MODE ACTIVE — the AI can act on the system \
+                            WITHOUT per-action approval (T2/T3 auto-granted) until this window \
+                            expires or you run `vibectl mode governed`. Every call is still \
+                            audited; the mode file, the audit trail and the kill-switch stay \
+                            out of the agent's reach.",
+            }),
+            true,
+        ),
+        Err(e) => (json!({"error": e.to_string()}), false),
+    }
+}
+
+/// `vibectl mode governed` — the KILL-SWITCH (ADR-027): revert to the governed
+/// default immediately, ending autonomous mode. Root only. Idempotent.
+pub fn mode_governed() -> (Value, bool) {
+    let euid = current_euid();
+    if let Err(e) = require_root(euid) {
+        return (e, false);
+    }
+    match mode::set_governed(Path::new(mode::MODE_PATH), euid, now_epoch_secs()) {
+        Ok(record) => (json!({"mode": "governed", "record": record}), true),
+        Err(e) => (json!({"error": e.to_string()}), false),
+    }
+}
+
 /// Default runtime marker written by the amnesic generator
 /// (`/run/vibeos/memory-mode`): `amnesic` | `persistent`.
 pub const MEMORY_MODE_MARKER: &str = "/run/vibeos/memory-mode";
@@ -256,34 +313,71 @@ fn read_jsonl(path: &Path) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Memoized fold over an append-only updates file. The updates stores grow
+/// forever without compaction, and this fold used to re-read and re-parse the
+/// WHOLE history on every call — the daemon's only per-call cost that grows
+/// without bound with the machine's age, on a path (`memory.query fold:true`)
+/// the HUD polls. An unchanged `(len, mtime)` pair on an append-only file
+/// means an unchanged fold, so the cached result (keyed by path) is returned
+/// as-is; any change re-folds from scratch (simple and always correct, cost
+/// only WHEN the file changed). For the one-shot `vibectl` CLI the cache is
+/// simply never warm — same behavior as before.
+fn fold_updates_cached(path: &Path, fold: fn(Vec<Value>) -> Value) -> Value {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Key = (u64, std::time::SystemTime);
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Key, Value)>>> = OnceLock::new();
+
+    let meta = std::fs::metadata(path).ok();
+    let key: Option<Key> = meta.and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(k) = key {
+        let map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((ck, v)) = map.get(path) {
+            if *ck == k {
+                return v.clone();
+            }
+        }
+    }
+    let v = fold(read_jsonl(path));
+    if let Some(k) = key {
+        let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        map.insert(path.to_path_buf(), (k, v.clone()));
+    }
+    v
+}
+
 /// `vibectl memory profile` — the CURRENT user profile, materialized as the
 /// fold of the append-only `user/updates.jsonl` (last-write-wins per `key`).
 /// This is the read side of the P1 append-only design (docs/MEMORY.md §3.3).
 pub fn memory_profile_at(root: &Path) -> Value {
-    let mut profile = serde_json::Map::new();
-    for rec in read_jsonl(&root.join("user").join("updates.jsonl")) {
-        if let Some(key) = rec.get("key").and_then(Value::as_str) {
-            // Later lines overwrite earlier ones — append-only, fold on read.
-            profile.insert(
-                key.to_string(),
-                rec.get("value").cloned().unwrap_or(Value::Null),
-            );
+    fold_updates_cached(&root.join("user").join("updates.jsonl"), |records| {
+        let mut profile = serde_json::Map::new();
+        for rec in records {
+            if let Some(key) = rec.get("key").and_then(Value::as_str) {
+                // Later lines overwrite earlier ones — append-only, fold on read.
+                let value = rec.get("value").cloned().unwrap_or(Value::Null);
+                profile.insert(key.to_string(), value);
+            }
         }
-    }
-    json!({ "profile": Value::Object(profile) })
+        json!({ "profile": Value::Object(profile) })
+    })
 }
 
 /// `vibectl memory projects` — the CURRENT project index, materialized as the
 /// fold of `projects/updates.jsonl` (last-write-wins per `path`), sorted by
 /// path (docs/MEMORY.md §3.4).
 pub fn memory_projects_at(root: &Path) -> Value {
-    let mut by_path: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
-    for rec in read_jsonl(&root.join("projects").join("updates.jsonl")) {
-        if let Some(path) = rec.get("path").and_then(Value::as_str) {
-            by_path.insert(path.to_string(), rec);
+    fold_updates_cached(&root.join("projects").join("updates.jsonl"), |records| {
+        let mut by_path: std::collections::BTreeMap<String, Value> =
+            std::collections::BTreeMap::new();
+        for rec in records {
+            if let Some(path) = rec.get("path").and_then(Value::as_str) {
+                by_path.insert(path.to_string(), rec);
+            }
         }
-    }
-    json!({ "projects": by_path.into_values().collect::<Vec<_>>() })
+        json!({ "projects": by_path.into_values().collect::<Vec<_>>() })
+    })
 }
 
 /// `vibectl audit verify [dir]` — verify the tamper-evident audit chain across
@@ -743,6 +837,39 @@ mod tests {
         // Absent store → empty profile, no panic.
         let empty = memory_profile_at(&scratch("profile-empty"));
         assert!(empty["profile"].as_object().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memoized_fold_recomputes_after_an_append() {
+        let root = scratch("profile-memo");
+        std::fs::create_dir_all(root.join("user")).unwrap();
+        let path = root.join("user").join("updates.jsonl");
+        std::fs::write(
+            &path,
+            "{\"ts\":\"t1\",\"key\":\"k\",\"value\":\"v1\",\"source\":\"x\"}\n",
+        )
+        .unwrap();
+        assert_eq!(memory_profile_at(&root)["profile"]["k"], "v1");
+
+        // Append-only growth changes (len, mtime): the memoized fold must
+        // recompute, never serve the stale profile.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"{\"ts\":\"t2\",\"key\":\"k\",\"value\":\"v2\",\"source\":\"x\"}\n")
+                .unwrap();
+        }
+        assert_eq!(
+            memory_profile_at(&root)["profile"]["k"],
+            "v2",
+            "an appended update must invalidate the memoized fold"
+        );
+        // An unchanged file returns the same (cached) fold.
+        assert_eq!(memory_profile_at(&root)["profile"]["k"], "v2");
         let _ = std::fs::remove_dir_all(&root);
     }
 

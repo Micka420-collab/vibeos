@@ -1709,3 +1709,165 @@ de référence (docs/BOOT-VALIDATION.md).
   mesure est un critère de la validation de boot (machine-gated), et tout
   ajustement ultérieur passera par un diff d'une ligne dans le même fichier.
 - Le selfcheck passe de 17 à 18 invariants (`kernel-tuning`).
+
+---
+
+## ADR-026 — `agent.activity` (T0) : le citoyen relit ses propres actes — *décidé & livré (session Fable 5, symbiose IA-citoyenne)*
+
+**Statut** : **DÉCIDÉ & livré**. Deuxième brique de l'idéation « IA citoyenne »
+après ADR-023 : là où `policy.capabilities` donne la **carte statique** des droits
+et `agent.thinking` la **biographie des pensées**, il manquait la **biographie des
+actes**. (ADR-024 reste réservée par `os.propose` ; on continue à 026.)
+
+### Contexte
+
+Un citoyen se souvient de ce qu'il a fait. Aujourd'hui l'agent ne le peut pas :
+`agents.list` dérive un **roster par pid** de la trace d'audit mais **exclut
+délibérément le pid appelant** (« le HUD ne se liste pas »), et la trace elle-même
+est root-only + sur la denylist intégrée — un agent ne peut donc **pas** relire
+sa propre séquence d'appels gouvernés. Conséquence concrète : un agent qui reprend
+une session ne sait pas ce qu'il vient de tenter, et surtout **ne revoit pas ses
+refus** (`deny`/`require_approval`) — précisément l'information qui lui apprend, par
+l'expérience, où sont les frontières que `policy.capabilities` ne décrit qu'en
+théorie.
+
+### Décision
+
+Un outil **`agent.activity` (T0, lecture seule)** qui rend les **propres appels
+récents de l'appelant**, du plus récent au plus ancien, dérivés de la trace
+d'audit : par ligne `{ ts_unix, when, tool, target, decision, outcome, pid }`.
+Arguments optionnels `window_seconds` (défaut 3600, max 3600) et `limit`
+(défaut/max 200) ; sortie bornée avec `total_in_window`/`truncated`.
+
+**Ce qui rend ça sûr, par conception :**
+- **Confiné par uid, comme `agents.list`** : filtré sur le `caller_uid`
+  (SO_PEERCRED, infalsifiable) ; un appelant sans uid identifié voit **rien**
+  (fail-closed). Jamais l'activité d'un autre utilisateur.
+- **Aucune fuite NOUVELLE** : `agents.list` expose déjà, pour l'uid appelant, les
+  mêmes champs sous-jacents (outil, cible non-secrète, tier) dérivés de la même
+  trace ; `agent.activity` n'ajoute que la **vue chronologique de SES propres
+  pids** — que `agents.list` excluait. La trace d'audit reste root-only et sur la
+  denylist (`fs.read` ne la lit pas). Même raisonnement qu'ADR-023.
+- **Inclut les refus, par design** : un `deny`/`require_approval` que l'agent a
+  provoqué est de l'information sur **ses** frontières, pas une frontière en soi —
+  la montrer ne débloque rien (l'enforcement reste à l'exécution).
+- **Anti-DoS** : passe par le pipeline normal (rate-limiter par uid d'abord, appel
+  audité) ; fenêtre = queue d'audit bornée (réutilise le cache incrémental
+  append-only), nombre de lignes plafonné.
+
+### Alternatives considérées
+
+- **Lever l'exclusion du self dans `agents.list`** : rejeté — `agents.list` est un
+  *roster* (agrégé par pid, pour le HUD) ; y mêler la vue chronologique du self
+  brouillerait deux usages distincts et changerait un contrat déjà consommé par le
+  client HUD.
+- **Laisser l'agent lire la trace d'audit** : exclu — la trace est root-only,
+  chaînée, sur la denylist ; l'ouvrir en lecture rouvrirait la surface que tout le
+  modèle protège. `agent.activity` rend une **vue dérivée, confinée, bornée**, pas
+  le fichier.
+- **Ne rien faire** : le citoyen reste amnésique de ses actes ; il redécouvre ses
+  refus par tâtonnement à chaque reprise — le coût exact qu'ADR-023 voulait supprimer.
+
+### Conséquences
+
+- Le citoyen dispose des **trois vues de soi** : ce qu'il *peut* faire
+  (`policy.capabilities`), ce qu'il *pense* (`agent.thinking`), ce qu'il *a fait*
+  (`agent.activity`) — sans élargir d'un iota sa surface de pouvoir.
+- Fondation pour la suite : la vue des refus est aussi ce sur quoi une future
+  boucle d'apprentissage (ou la **teinte de session**) s'appuiera pour proposer un
+  ajustement à l'humain.
+- La surface d'outils passe de 18 à 19 (T0). Règle de politique : ajouté à la règle
+  `agent-observability` (T0 allow, confiné par uid) ; le test d'intégration qui
+  charge la vraie politique le vérifie.
+
+---
+
+## ADR-027 — Mode autonome / ouvert : une clé humaine hors-bande, un noyau irréductible — *décidé & livré (fondation ; sur-couches à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** Le *mécanisme* du mode ouvert est livré et testé ; les capacités qu'il porte (auto-planification par crons/battements de cœur, usage d'applications, auto-modification de l'image) sont conçues ci-dessous mais restent des incréments suivants. Demande de Micka : *« un mode autonome de l'IA dans l'OS avec un panneau affichant danger — l'IA prend des décisions seule, peut s'ajouter des crons/battements de cœur, modifier tout l'OS, un mode ouvert 100 % autorisé qui déverrouille les accès pour qu'elle s'auto-améliore, télécharge/ouvre/utilise des apps comme un humain. »*
+
+### Contexte
+
+Tout VibeOS repose sur l'inverse : default-deny, plancher d'approbation humaine T2/T3, un agent qui ne peut **jamais** approuver sa propre escalade (invariant n°1, `docs/ARCHITECTURE.md` §8). Le mode ouvert est la **relaxation délibérée et bornée** de ce plancher — « l'IA agit seule sur le système sans demander à chaque geste » — sans jeter ce qui rend la relaxation *réversible et traçable*. Deux réalités cadrent d'emblée ce qui est possible :
+
+- **La racine est immuable** (bootc/OSTree, `/usr` en lecture seule). « Modifier tout l'OS » à chaud est **physiquement impossible** ; l'auto-modification réelle est le chemin `os.propose` → analyse au build → **nouvelle image** signée → reboot atomique (ADR-024, en attente de ratification). Le mode ouvert ne change pas cette physique ; il est la *fondation gouvernée* sur laquelle ce chemin s'assoira.
+- **L'auto-déverrouillage briserait tout.** Un mode que l'IA active elle-même = une IA qui entre dans son propre god-mode. C'est le seul principe sans lequel la sécurité de l'OS n'a plus aucun sens.
+
+### Décision
+
+Un **mode d'exploitation** à deux états, matérialisé par un enregistrement root-only (`/var/lib/vibeos/mode.json`, sur la denylist d'ÉCRITURE intégrée — `fs.write` ne peut jamais le forger) :
+
+- **`governed`** (défaut) : le plancher T2/T3 exige un grant humain à usage unique (inchangé).
+- **`open`** : un `RequireApproval` (T2/T3) est **auto-satisfait** — l'agent installe des paquets, redémarre des services, écrit des fichiers, déploie, lance des outils, **sans approbation par action**. C'est ce qui transforme « un assistant qui doit demander » en « un opérateur autonome », pour une fenêtre bornée.
+
+**Le noyau irréductible — ce que le mode ouvert ne fait PAS, par construction, pour qu'« ouvert » ne devienne jamais « aller sans retour » :**
+
+1. **Le déverrouillage est une action HUMAINE hors-bande.** Seul `vibectl mode open` (root, présent physiquement) écrit l'enregistrement `open` ; c'est le **même `require_root`** que `vibectl approve`, car c'est bien une approbation en bloc du plancher. L'agent peut *demander* le mode, jamais se l'accorder.
+2. **L'audit reste actif.** Chaque appel est audité ; les appels en mode ouvert portent l'issue distincte **`started_open_mode`/`ok_open_mode`** (jamais confondus avec une approbation humaine `ok_approved(by_uid=N)` ni un `ok` ordinaire). L'autonomie n'est pas l'absence de traces.
+3. **Le kill-switch reste à l'humain.** `vibectl mode governed` revient au défaut **immédiatement**, et le mode **auto-expire** après sa fenêtre bornée (vérifié à chaque évaluation — pas de tâche de fond, aucun moyen de « rester coincé »). Plafond dur : `OPEN_MAX_SECS = 24 h` (une durée aberrante est *clampée*, pas honorée).
+4. **Le mode ouvert ne lève que le PLANCHER de tier.** Un `deny` explicite, le default-deny absolu (outil inconnu) et la **denylist intégrée** (journal d'audit, store d'approbation, CE fichier de mode, `policy.d/`, identifiants) sont décidés **AVANT** le tier et restent en vigueur. Le mode ouvert auto-accorde l'approbation ; il ne dissout pas les gardes qui préservent la trace, le kill-switch et les secrets — sinon l'agent pourrait effacer ses traces ou verrouiller l'opérateur dehors, exactement l'irréversibilité que ce design interdit.
+
+**Panneau danger (livré, côté données) :** `os.status` (T0) porte un bloc `mode { mode, danger, remaining_secs, set_by_uid, reason }` — le HUD le sonde déjà, donc « MODE AUTONOME / OUVERT ACTIF » s'affiche en direct sans nouvel outil ; le selfcheck ajoute l'invariant `operating-mode` (open = PASS mais signalé fort). Le bandeau visuel Plasma/Quickshell est la couche de présentation (incrément suivant, comme le dialogue d'approbation).
+
+**Fail-safe :** l'état puissant exige un enregistrement `open` valide et non expiré. Fichier absent, illisible, malformé, autre valeur, ou expiré ⇒ `governed`. Le défaut sûr gagne dans **tous** les cas incertains.
+
+### Sur-couches conçues ici, livrées ensuite (chacune s'assoit sur ce mode + son audit)
+
+- **Auto-planification (crons / battements de cœur)** : un outil gouverné laissant l'agent, *en mode ouvert*, poser une unité `systemd` timer/`cron` **sous un namespace réservé** (`vibeos-agent-*`), bornée, auditée, et **révoquée au retour en `governed`** (sinon un timer survivrait au kill-switch — la trappe à éviter absolument). T2 minimum.
+- **Auto-amélioration (modifier l'OS)** : `os.propose` (ADR-024) → analyse d'image au build → nouvelle image signée. Le mode ouvert auto-approuve la *proposition*, jamais l'application directe sur la racine immuable.
+- **Usage d'applications comme un humain** : télécharger/ouvrir/piloter des apps — bâti sur le substrat navigateur gouverné (`browser.*`, ADR-022) et une future automatisation du bureau (Wayland), chaque action tiérée et auditée.
+
+### Alternatives considérées
+
+- **« 100 % déverrouiller, denylist comprise »** : rejeté — laisser l'agent réécrire le journal d'audit et le fichier de mode, c'est lui donner de quoi effacer ses traces et neutraliser le kill-switch : « mode ouvert » deviendrait « machine perdue sans retour ». Le noyau irréductible est ce qui garde le mode *réversible*.
+- **Auto-déverrouillage par l'IA** : rejeté — viole l'invariant n°1 (pas d'auto-escalade). Une action humaine unique suffit ; ensuite l'IA est autonome pour toute la fenêtre.
+- **Pas de plafond / pas d'expiration** : rejeté — un mode puissant sans borne temporelle finit par rester allumé par oubli. Fenêtre bornée + auto-expiration + kill-switch.
+
+### Conséquences
+
+- L'IA **peut** fonctionner en autonomie réelle (T2/T3 sans demander) quand l'humain tourne la clé — ce qui était demandé — tout en gardant l'audit, le kill-switch et le panneau danger que l'humain a demandés *aussi*.
+- Le selfcheck passe de 18 à 19 invariants (`operating-mode`). Aucun nouvel **outil** MCP (la surface reste 19) : le mode change *comment* un `RequireApproval` se résout, il n'ajoute pas d'outil ; `os.status` gagne un champ.
+- Résiduel assumé : le bandeau visuel, l'auto-planification révocable, l'usage d'apps et l'auto-modification via `os.propose` sont conçus ici mais **non encore livrés** ; l'effet réel du mode sur cible reste **machine-gated** (aucune ISO bootée).
+
+---
+
+## ADR-028 — Compréhension de l'humain & anticipation : un modèle DÉRIVÉ, transparent, possédé par l'utilisateur — *décidé & livré (fondation ; sur-couches à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** L'outil `user.model` (T0) est livré et testé ; l'apprentissage plus riche (signal opt-in, embeddings locaux) est conçu ici, à venir. Demande de Micka : *« l'agent apprend à comprendre l'utilisation, comment il travaille, ce qu'il fait ; il analyse l'humain de fond en comble pour mieux le servir ; il prédit/anticipe les actions de l'humain — une vraie symbiose machine / IA / humain. »*
+
+### Contexte
+
+C'est le prolongement direct de l'idéation « symbiose IA-citoyenne » ([ADR-023](#), agent.thinking, [ADR-026](#)) : après *ce que l'agent peut faire*, *pense* et *a fait*, vient *ce que la machine comprend de l'humain*. Deux tensions cadrent la conception :
+
+- **Vie privée.** « Analyser l'humain de fond en comble » touche au plus sensible. Or l'invariant du projet est que **la mémoire appartient à l'utilisateur et à personne d'autre**, et que l'OS est *security-first*. Un modèle de l'humain ne peut donc être ni caché, ni exfiltré, ni fondé sur une surveillance nouvelle.
+- **Honnêteté.** « Prédire/anticiper » ne doit pas survendre : pas de prédicteur entraîné boîte-noire présenté comme de la voyance.
+
+### Décision
+
+Un outil **`user.model` (T0, lecture seule)** qui rend un **modèle DÉRIVÉ et TRANSPARENT** de « comment vous travaillez », **confiné à l'uid appelant** (SO_PEERCRED, comme `agents.list`/`agent.activity` ; appelant non identifié ⇒ rien, fail-closed). Il est **folded** à partir de données **que VibeOS détient déjà sous gouvernance**, jamais d'une capture nouvelle :
+
+- **`preferences`** : le fold de la mémoire `user/` (préférences explicites).
+- **`patterns`** : vos outils/cibles récurrents, dérivés de la **trace d'audit confinée à votre uid** (fréquence + récence + cible dominante).
+- **`friction`** : les actions qui ont dû être approuvées ou ont été refusées — candidates à pré-arranger (l'inverse des patterns : un signal, de sens opposé).
+- **`rhythm`** : histogramme d'activité par **heure UTC** (buckets grossiers, respectueux de la vie privée) + heures les plus actives.
+- **`observed`** : les notes de journal typées récentes que l'agent a écrites sur vous (`observation`/`decision`/`preference`), plafonnées, **clés seulement** (pas de dump de payload).
+- **`anticipations`** : vos prochaines actions gouvernées les plus probables, classées par une **heuristique déterministe fréquence×récence**, **chacune avec sa raison** (« fait N fois, vu il y a Xs ») — jamais un score opaque.
+
+**Ce qui rend ça sûr et honnête, par conception :**
+- **Aucune fuite NOUVELLE** : les mêmes données sous-jacentes sont déjà accessibles à l'agent pour son propre uid via `memory.query` + `agent.activity` ; `user.model` ne fait que les **agréger** (même raisonnement qu'[ADR-023](#)/[ADR-026](#)). La trace d'audit reste root-only et sur la denylist.
+- **Aucune surveillance nouvelle** : le modèle ne lit **jamais** les frappes clavier ni l'historique shell brut de l'humain (non captés, et hors éthique du projet). La symbiose est bâtie sur du signal **gouverné et transparent**, pas sur de l'espionnage.
+- **Local, possédé, effaçable** : le store est `/var/lib/vibeos/memory/` (« appartient à son utilisateur »). Chaque champ est inspectable ; rien de caché. Cœur de dérivation **pur** (`derive_user_model`) et déterministe — testable et auditable.
+- **Anticipation ≠ prédiction entraînée** : le champ le dit lui-même (`note`), et chaque anticipation porte sa raison.
+
+### Alternatives considérées
+
+- **Capturer les frappes / l'historique shell de l'humain** : rejeté — surveillance nouvelle, contraire au *security-first* et à « la mémoire appartient à l'utilisateur » ; et un shell natif échappe de toute façon à `vibed` (invariant n°1). La symbiose se construit sur du signal gouverné.
+- **Un prédicteur entraîné (ML) côté image** : rejeté pour la fondation — opaque, non déterministe, non testable simplement, et il survendrait « anticiper ». L'heuristique explicable vient d'abord ; l'apprentissage local (embeddings via ollama, `knowledge/embeddings/` déjà réservé) est une sur-couche opt-in (Phase 3).
+- **Profil caché optimisé pour l'agent seul** : rejeté — la transparence pour l'humain est non négociable ici ; « l'IA vous comprend » uniquement via ce que vous pouvez lire.
+
+### Conséquences
+
+- L'agent **planifie mieux** (moins de tâtonnement, il connaît vos préférences, vos patterns et vos frictions) et peut **anticiper** vos prochaines actions gouvernées — sans élargir d'un iota sa surface de pouvoir ni introduire de surveillance.
+- La surface d'outils passe de 19 à **20** (T0). Règle de politique `user-model` (T0 allow, confiné uid) ; le test d'intégration qui charge la vraie politique le vérifie.
+- Fondation pour la suite : signal **opt-in** plus riche (préférences observées dans les sessions Claude Code), **embeddings locaux** pour la similarité de tâches, et branchement du modèle sur le **mode ouvert** (ADR-027) et `os.propose` (ADR-024) pour une IA qui propose *à bon escient*. Toute capture nouvelle sera **opt-in et transparente**.
+- Résiduel assumé : l'anticipation est heuristique (pas un prédicteur) ; le modèle ne voit que le gouverné (pas le shell natif) ; l'effet réel sur cible reste **machine-gated**.

@@ -39,6 +39,7 @@ struct Server {
     writer: OwnedWriteHalf,
     audit_dir: PathBuf,
     approval_dir: PathBuf,
+    mode_path: PathBuf,
     scratch: PathBuf,
 }
 
@@ -59,6 +60,7 @@ impl Server {
         std::fs::create_dir_all(&scratch).expect("create scratch dir");
         let audit_dir = scratch.join("audit");
         let approval_dir = scratch.join("approvals");
+        let mode_path = scratch.join("mode.json");
 
         let policy =
             Arc::new(PolicyEngine::load_dir(&repo_policy_dir()).expect("shipped policy must load"));
@@ -78,6 +80,7 @@ impl Server {
             limiter,
             caller,
             approval_dir.clone(),
+            mode_path.clone(),
         ));
 
         let (read_half, write_half) = client.into_split();
@@ -86,6 +89,7 @@ impl Server {
             writer: write_half,
             audit_dir,
             approval_dir,
+            mode_path,
             scratch,
         }
     }
@@ -447,6 +451,164 @@ async fn t2_svc_restart_human_approval_chain_end_to_end() {
     assert!(
         vibed::approval::list_pending(&srv.approval_dir).is_empty(),
         "no pending request should remain once approved and consumed"
+    );
+
+    srv.cleanup();
+}
+
+/// Open mode (ADR-027) auto-satisfies the T2 approval floor over the wire, and
+/// the audit trail attributes those calls AS open-mode — while an explicit deny
+/// still denies, so open mode only lifts the floor, never the guards.
+#[tokio::test]
+async fn open_mode_auto_grants_the_t2_floor_and_is_audited_distinctly() {
+    let mut srv = Server::start("open-mode");
+    let unit = "open-mode-e2e.service";
+
+    // 1. Governed by default: a T2 svc.restart is refused (human approval floor).
+    let (is_error, text) = srv.tool_call(1, "svc.restart", json!({"unit": unit})).await;
+    assert!(is_error, "governed default: T2 must be refused");
+    assert!(text.contains("requires human approval"), "why: {text}");
+
+    // 2. The operator unlocks open mode OUT OF BAND — exactly what
+    //    `vibectl mode open` does. The agent never writes this file itself.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    vibed::mode::set_open(&srv.mode_path, 3600, Some(0), now, Some("e2e"))
+        .expect("operator unlocks open mode");
+
+    // 3. The SAME call now flips to Allow with no per-action approval (we do not
+    //    assert the systemctl outcome — a non-root test cannot restart a unit;
+    //    the governance decision is the claim).
+    let _ = srv.tool_call(2, "svc.restart", json!({"unit": unit})).await;
+
+    // 4. An explicit deny is UNAFFECTED by open mode: a denylisted critical unit
+    //    is still denied, never auto-granted.
+    let (crit_err, crit_text) = srv
+        .tool_call(3, "svc.restart", json!({"unit": "sshd.service"}))
+        .await;
+    assert!(crit_err, "a denylisted unit stays denied even in open mode");
+    assert!(
+        crit_text.contains("denied"),
+        "open mode lifts the floor, not the guards: {crit_text}"
+    );
+
+    // 5. The audit trail proves the distinction.
+    let records = srv.audit_records();
+    let svc: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["tool"] == "svc.restart")
+        .collect();
+    assert!(
+        svc.iter()
+            .any(|r| r["target"] == unit && r["decision"] == "require_approval"),
+        "the first (governed) call is audited require_approval: {svc:?}"
+    );
+    assert!(
+        svc.iter().any(|r| r["target"] == unit
+            && r["decision"] == "allow"
+            && r["outcome"]
+                .as_str()
+                .is_some_and(|o| o.starts_with("started_open_mode") || o == "ok_open_mode")),
+        "the open-mode call is audited AS open-mode (started_open_mode/ok_open_mode): {svc:?}"
+    );
+    assert!(
+        svc.iter()
+            .any(|r| r["target"] == "sshd.service" && r["decision"] == "deny"),
+        "the denylisted unit is audited denied, never open-mode-granted: {svc:?}"
+    );
+
+    srv.cleanup();
+}
+
+/// os.status carries the operating mode (the HUD danger-panel feed): governed by
+/// default, and a loud `danger:true` once open mode is unlocked out of band.
+#[tokio::test]
+async fn os_status_exposes_the_operating_mode_for_the_danger_panel() {
+    let mut srv = Server::start("os-status-mode");
+
+    let (err, text) = srv.tool_call(1, "os.status", json!({})).await;
+    assert!(!err, "os.status is T0 and must succeed: {text}");
+    let status: Value = serde_json::from_str(&text).expect("os.status returns JSON");
+    assert_eq!(
+        status["mode"]["mode"], "governed",
+        "default operating mode is governed: {status}"
+    );
+    assert_eq!(status["mode"]["danger"], false);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
+    vibed::mode::set_open(&srv.mode_path, 1800, Some(0), now, Some("panel test")).expect("unlock");
+
+    let (_err, text2) = srv.tool_call(2, "os.status", json!({})).await;
+    let status2: Value = serde_json::from_str(&text2).expect("JSON");
+    assert_eq!(status2["mode"]["mode"], "open");
+    assert_eq!(
+        status2["mode"]["danger"], true,
+        "open mode raises the danger flag the HUD renders: {status2}"
+    );
+    assert!(
+        status2["mode"]["remaining_secs"].as_u64().unwrap_or(0) > 0,
+        "the panel shows how long autonomy remains: {status2}"
+    );
+
+    srv.cleanup();
+}
+
+/// user.model (T0) derives a transparent model from the caller's OWN governed
+/// actions and stays confined to the caller's uid.
+#[tokio::test]
+async fn user_model_derives_from_governed_actions_and_is_uid_confined() {
+    let mut srv = Server::start("user-model");
+
+    // Generate a little governed history for TEST_UID: os.status runs several
+    // times (T0 allow → executed patterns), a denylisted read is refused
+    // (friction), all audited under this uid.
+    for i in 0..3 {
+        let (err, _) = srv.tool_call(10 + i, "os.status", json!({})).await;
+        assert!(!err, "os.status is T0");
+    }
+    let (denied, _) = srv
+        .tool_call(20, "fs.read", json!({"path": "/etc/shadow"}))
+        .await;
+    assert!(denied, "shadow read is on the built-in denylist");
+
+    // The model folds those into patterns + friction, transparently.
+    let (err, text) = srv.tool_call(30, "user.model", json!({})).await;
+    assert!(!err, "user.model is T0 and must succeed: {text}");
+    let model: Value = serde_json::from_str(&text).expect("user.model returns JSON");
+
+    assert_eq!(
+        model["uid"], TEST_UID,
+        "the model is stamped with the caller uid"
+    );
+    let patterns = model["patterns"].as_array().unwrap();
+    assert!(
+        patterns
+            .iter()
+            .any(|p| p["tool"] == "os.status" && p["count"].as_u64().unwrap_or(0) >= 3),
+        "os.status (run 3×) is the top executed pattern: {model}"
+    );
+    // The refused shadow read is friction, never an executed pattern.
+    assert!(
+        model["friction"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["tool"] == "fs.read"),
+        "the denied read shows up as friction: {model}"
+    );
+    assert!(
+        !patterns.iter().any(|p| p["tool"] == "fs.read"),
+        "a denied action is never an executed pattern"
+    );
+    // Transparency + honesty are stated in the model itself.
+    assert!(
+        model["note"].as_str().unwrap().contains("transparent"),
+        "the model states its own transparency"
     );
 
     srv.cleanup();

@@ -168,7 +168,16 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
 /// the governed write path (scope-based, no path argument, so this path
 /// denylist cannot and need not apply to it) — and the policy itself is not
 /// agent-writable.
-const BUILTIN_DENY_WRITE: &[&str] = &["/etc/vibeos/policy.d/**", "/var/lib/vibeos/memory/**"];
+const BUILTIN_DENY_WRITE: &[&str] = &[
+    "/etc/vibeos/policy.d/**",
+    "/var/lib/vibeos/memory/**",
+    // The operating-mode record (ADR-027). An agent must NEVER be able to flip
+    // itself into open mode via fs.write — the unlock is a human, out-of-band
+    // `vibectl mode open` only. This is belt-and-suspenders (fs.write is already
+    // confined to the caller's home, and the file is root-only), kept explicit
+    // because it is the no-self-escalation invariant the whole model rests on.
+    "/var/lib/vibeos/mode.json",
+];
 
 /// Returns the matched pattern when `path` (already normalized) hits the
 /// built-in denylist. `write` selects the additional write-only entries.
@@ -209,6 +218,11 @@ pub async fn handle_connection(
     // require_approval -> approve -> grant-consumed -> Allow chain is exercisable
     // over the real socket without touching `/var/lib/vibeos`.
     approval_dir: std::path::PathBuf,
+    // Operating-mode record (ADR-027). Production passes `crate::mode::MODE_PATH`;
+    // tests inject a scratch path so the open-mode auto-grant is exercisable over
+    // the real socket. Read-only here — the daemon never WRITES it (only the
+    // out-of-band `vibectl mode` operator action does).
+    mode_path: std::path::PathBuf,
 ) {
     info!(
         "MCP client connected (uid={:?} gid={:?} pid={:?})",
@@ -263,8 +277,16 @@ pub async fn handle_connection(
         let response = match serde_json::from_str::<Request>(line) {
             Ok(request) => {
                 let is_notification = request.id.is_none();
-                let response =
-                    dispatch(request, &policy, &audit, &limiter, caller, &approval_dir).await;
+                let response = dispatch(
+                    request,
+                    &policy,
+                    &audit,
+                    &limiter,
+                    caller,
+                    &approval_dir,
+                    &mode_path,
+                )
+                .await;
                 if is_notification {
                     None
                 } else {
@@ -339,6 +361,7 @@ async fn dispatch(
     limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
     approval_dir: &std::path::Path,
+    mode_path: &std::path::Path,
 ) -> Value {
     debug!("dispatch method={}", request.method);
     let id = request.id.unwrap_or(Value::Null);
@@ -368,6 +391,7 @@ async fn dispatch(
                 limiter,
                 caller,
                 approval_dir,
+                mode_path,
             )
             .await
         }
@@ -375,6 +399,12 @@ async fn dispatch(
     }
 }
 
+// The call pipeline threads the per-connection environment (policy, audit,
+// limiter, approval store, mode store) alongside the per-call (id, params,
+// caller). Grouping the five environment refs into a struct would trade one
+// honest signature for an indirection the whole file would then read through;
+// the governed surface is small and stable, so the flat signature stays.
+#[allow(clippy::too_many_arguments)]
 async fn handle_tools_call(
     id: Value,
     params: Value,
@@ -383,6 +413,7 @@ async fn handle_tools_call(
     limiter: &crate::ratelimit::RateLimiter,
     caller: Caller,
     approval_dir: &std::path::Path,
+    mode_path: &std::path::Path,
 ) -> Value {
     let name = params
         .get("name")
@@ -397,6 +428,15 @@ async fn handle_tools_call(
     // a `fs.write` payload close to MAX_LINE_BYTES used to be deep-cloned for
     // the execution task on every allowed call.
     let args = Arc::new(params.get("arguments").cloned().unwrap_or(Value::Null));
+    // Everything constant across THIS call's audit records, bundled once: the
+    // records differ only by (target, decision, outcome).
+    let actx = AuditCtx {
+        audit: Arc::clone(audit),
+        tool: name.clone(),
+        args: Arc::clone(&args),
+        digest: Arc::new(ArgsDigest::new()),
+        caller,
+    };
 
     // Extract and normalize the call context before any decision is made.
     let raw_path = args.get("path").and_then(Value::as_str);
@@ -406,16 +446,7 @@ async fn handle_tools_call(
             None => {
                 // Relative path or attempt to climb above `/`: fail-closed.
                 // The raw (rejected) path is the non-secret audit target.
-                try_audit(
-                    audit,
-                    &name,
-                    &args,
-                    Some(raw),
-                    Decision::Deny,
-                    "blocked_invalid_path",
-                    caller,
-                )
-                .await;
+                try_audit(&actx, Some(raw), Decision::Deny, "blocked_invalid_path").await;
                 return tool_result(
                     id,
                     format!("policy: path '{raw}' is not an absolute, normalizable path"),
@@ -469,16 +500,13 @@ async fn handle_tools_call(
     // 255 by validate_unit_name, and a package name is a few dozen characters.
     if let Some(t) = target.as_deref() {
         if t.len() > MAX_TARGET_BYTES {
+            // Audit the LENGTH, not the value: echoing 1 MiB of hostile text
+            // into the audit trail is the same flood, one file over.
             try_audit(
-                audit,
-                &name,
-                &args,
-                // Audit the LENGTH, not the value: echoing 1 MiB of hostile text
-                // into the audit trail is the same flood, one file over.
+                &actx,
                 Some(&format!("<target too long: {} bytes>", t.len())),
                 Decision::Deny,
                 "target_too_long",
-                caller,
             )
             .await;
             return tool_result(
@@ -498,16 +526,7 @@ async fn handle_tools_call(
     // refused fail-closed and audited (the rejection itself is a security
     // signal), never executed. Keyed by the unforgeable SO_PEERCRED uid.
     if !limiter.check(caller.uid, now_epoch_secs()) {
-        try_audit(
-            audit,
-            &name,
-            &args,
-            target.as_deref(),
-            Decision::Deny,
-            "rate_limited",
-            caller,
-        )
-        .await;
+        try_audit(&actx, target.as_deref(), Decision::Deny, "rate_limited").await;
         return tool_result(
             id,
             format!(
@@ -524,13 +543,10 @@ async fn handle_tools_call(
         let is_write = name == "fs.write";
         if let Some(pattern) = builtin_denied(path, is_write) {
             try_audit(
-                audit,
-                &name,
-                &args,
+                &actx,
                 target.as_deref(),
                 Decision::Deny,
                 "blocked_builtin_denylist",
-                caller,
             )
             .await;
             return tool_result(
@@ -572,55 +588,61 @@ async fn handle_tools_call(
     //
     // The blocking std::fs of the approval store runs on a blocking thread
     // (spawn_blocking), exactly like `execute_tool` below — never on the reactor.
-    let consumed = if matches!(decision, Decision::RequireApproval) {
+    // Both blocking store reads happen together, off the reactor, ONLY for a
+    // T2/T3 RequireApproval: (1) is there a fresh one-shot human grant, and — if
+    // not — (2) is OPEN MODE active (ADR-027)? A human grant is more specific
+    // (it names the approver), so it wins; open mode is the blanket, bounded,
+    // human-unlocked fallback. Neither ever runs for a Deny: an explicit deny
+    // rule, the default-deny, and the built-in denylist were all decided ABOVE
+    // and open mode cannot revive them — it only lifts the approval FLOOR.
+    let (consumed, open_mode) = if matches!(decision, Decision::RequireApproval) {
         let name_g = name.clone();
         let target_g = target.clone();
         let uid_g = caller.uid;
         let now_g = now_epoch_secs();
         let dir_g = approval_dir.to_path_buf();
+        let mode_g = mode_path.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            crate::approval::check_and_consume_grant(
+            let grant = crate::approval::check_and_consume_grant(
                 &dir_g,
                 &name_g,
                 target_g.as_deref(),
                 uid_g,
                 now_g,
-            )
+            );
+            // Consult open mode only when no human grant applied.
+            let open = grant.is_none() && crate::mode::is_open(&mode_g, now_g);
+            (grant, open)
         })
         .await
-        .unwrap_or(None) // a panic in the blocking task -> no grant (fail-closed)
+        .unwrap_or((None, false)) // a panic -> no grant, not open (fail-closed)
     } else {
-        None
+        (None, false)
     };
-    let approved = consumed.is_some();
+    let human_approved = consumed.is_some();
+    let approved = human_approved || open_mode;
     let decision = if approved { Decision::Allow } else { decision };
     let suffix = consumed
         .as_ref()
         .map(|c| approver_suffix(c.approver_uid))
         .unwrap_or_default();
-    let started_outcome = if approved {
-        format!("started_approved{suffix}")
+    // Distinct audit outcomes so the trail never conflates the three paths:
+    // a human one-shot approval, an autonomous open-mode auto-grant, or a plain
+    // allowed call. Open-mode calls are always attributable AS open-mode.
+    let (started_outcome, ok_outcome) = if human_approved {
+        (
+            format!("started_approved{suffix}"),
+            format!("ok_approved{suffix}"),
+        )
+    } else if open_mode {
+        ("started_open_mode".to_string(), "ok_open_mode".to_string())
     } else {
-        "started".to_string()
-    };
-    let ok_outcome = if approved {
-        format!("ok_approved{suffix}")
-    } else {
-        "ok".to_string()
+        ("started".to_string(), "ok".to_string())
     };
 
     match decision {
         Decision::Deny => {
-            try_audit(
-                audit,
-                &name,
-                &args,
-                target.as_deref(),
-                decision,
-                "blocked",
-                caller,
-            )
-            .await;
+            try_audit(&actx, target.as_deref(), decision, "blocked").await;
             tool_result(id, format!("policy: tool '{name}' is denied"), true)
         }
         Decision::RequireApproval => {
@@ -646,16 +668,7 @@ async fn handle_tools_call(
             .await
             .ok()
             .and_then(Result::ok);
-            try_audit(
-                audit,
-                &name,
-                &args,
-                target.as_deref(),
-                decision,
-                "pending_approval",
-                caller,
-            )
-            .await;
+            try_audit(&actx, target.as_deref(), decision, "pending_approval").await;
             let tier_str = tier.map(Tier::as_str).unwrap_or("?");
             let how = match &request_id {
                 Some(rid) => format!(
@@ -672,17 +685,7 @@ async fn handle_tools_call(
         }
         Decision::Allow => {
             // Fail-closed: if the audit trail cannot be written, nothing runs.
-            if !try_audit(
-                audit,
-                &name,
-                &args,
-                target.as_deref(),
-                decision,
-                &started_outcome,
-                caller,
-            )
-            .await
-            {
+            if !try_audit(&actx, target.as_deref(), decision, &started_outcome).await {
                 return tool_result(
                     id,
                     "audit log unavailable: refusing execution (fail-closed)".to_string(),
@@ -694,6 +697,7 @@ async fn handle_tools_call(
             let policy_exec = Arc::clone(policy);
             let caller_exec = caller;
             let audit_dir_exec = audit.dir().to_path_buf();
+            let mode_path_exec = mode_path.to_path_buf();
             // Tool bodies use blocking std::fs; keep the reactor responsive.
             let executed = tokio::task::spawn_blocking(move || {
                 execute_tool(
@@ -702,21 +706,13 @@ async fn handle_tools_call(
                     &policy_exec,
                     caller_exec,
                     &audit_dir_exec,
+                    &mode_path_exec,
                 )
             })
             .await;
             match executed {
                 Ok(Ok(text)) => {
-                    try_audit(
-                        audit,
-                        &name,
-                        &args,
-                        target.as_deref(),
-                        decision,
-                        &ok_outcome,
-                        caller,
-                    )
-                    .await;
+                    try_audit(&actx, target.as_deref(), decision, &ok_outcome).await;
                     // Feed the machine's own memory: record executed,
                     // state-changing actions as a reserved `tool_call` journal
                     // event (distinct from the forensic audit log). T0 reads and
@@ -728,28 +724,16 @@ async fn handle_tools_call(
                 }
                 Ok(Err(message)) => {
                     try_audit(
-                        audit,
-                        &name,
-                        &args,
+                        &actx,
                         target.as_deref(),
                         decision,
                         &format!("error: {message}"),
-                        caller,
                     )
                     .await;
                     tool_result(id, message, true)
                 }
                 Err(join_error) => {
-                    try_audit(
-                        audit,
-                        &name,
-                        &args,
-                        target.as_deref(),
-                        decision,
-                        "panic",
-                        caller,
-                    )
-                    .await;
+                    try_audit(&actx, target.as_deref(), decision, "panic").await;
                     tool_result(id, format!("internal error: {join_error}"), true)
                 }
             }
@@ -876,6 +860,25 @@ fn approver_suffix(approver_uid: Option<u32>) -> String {
     }
 }
 
+/// Lazily-computed, per-call FNV digest of the tool arguments, shared between
+/// the `started` and final audit records of one call (both always carried the
+/// same digest — same arguments). `OnceLock` so the serialization + hash run at
+/// most once per call, and only on the blocking pool, never on the reactor.
+type ArgsDigest = std::sync::OnceLock<String>;
+
+/// Everything constant across ONE `tools/call`'s audit records — the log
+/// handle, the tool name, the parsed arguments with their lazily-computed
+/// digest, and the caller identity. Built once per call in
+/// `handle_tools_call`; the individual records then differ only by
+/// `(target, decision, outcome)`.
+struct AuditCtx {
+    audit: Arc<AuditLog>,
+    tool: String,
+    args: Arc<Value>,
+    digest: Arc<ArgsDigest>,
+    caller: Caller,
+}
+
 /// Append one audit record from the async path WITHOUT parking the reactor on
 /// disk I/O. `AuditLog::record` holds the chain mutex across an open, a write
 /// and a deliberate fsync — milliseconds on NVMe, tens on slower media — and it
@@ -886,23 +889,23 @@ fn approver_suffix(approver_uid: Option<u32>) -> String {
 /// a failure) before proceeding — only WHERE the wait happens moves. A panic in
 /// the audit task counts as an audit failure (fail-closed), like an I/O error.
 async fn try_audit(
-    audit: &Arc<AuditLog>,
-    tool: &str,
-    args: &Arc<Value>,
+    ctx: &AuditCtx,
     target: Option<&str>,
     decision: Decision,
     outcome: &str,
-    caller: Caller,
 ) -> bool {
-    let audit = Arc::clone(audit);
-    let tool = tool.to_string();
-    let args = Arc::clone(args);
+    let audit = Arc::clone(&ctx.audit);
+    let tool = ctx.tool.clone();
+    let args = Arc::clone(&ctx.args);
+    let digest = Arc::clone(&ctx.digest);
+    let caller = ctx.caller;
     let target = target.map(str::to_string);
     let outcome = outcome.to_string();
     tokio::task::spawn_blocking(move || {
-        match audit.record(
+        let d = digest.get_or_init(|| crate::audit::fnv1a_64_hex(args.to_string().as_bytes()));
+        match audit.record_with_digest(
             &tool,
-            &args,
+            d,
             target.as_deref(),
             decision.as_str(),
             &outcome,
@@ -1132,6 +1135,24 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             }}),
         ),
         (
+            "agent.activity",
+            Tier::T0,
+            "YOUR OWN recent governed tool calls, newest first, from the audit \
+             trail — CONFINED to your uid (never another user's). The 'deeds' \
+             counterpart to agent.thinking ('thoughts') and policy.capabilities \
+             (the static map): it INCLUDES your refusals (decision deny / \
+             require_approval), so you learn the policy boundaries you actually \
+             hit, not only the ones you can read. Optional 'window_seconds' \
+             (default 3600, max 3600) and 'limit' (default/max 200). Returns \
+             { activity: [{ ts_unix, when, tool, target, decision, outcome, pid \
+             }], count, total_in_window, truncated, window_seconds, uid }. \
+             Read-only; exposes nothing agents.list would not for your own uid.",
+            json!({"type": "object", "properties": {
+                "window_seconds": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1}
+            }}),
+        ),
+        (
             "policy.check",
             Tier::T0,
             "Classify a HYPOTHETICAL tool call WITHOUT executing it: returns the \
@@ -1158,6 +1179,25 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
              context constraints); anything no allow rule covers is default-denied. \
              Read-only, takes no arguments.",
             json!({"type": "object", "properties": {}}),
+        ),
+        (
+            "user.model",
+            Tier::T0,
+            "The machine's DERIVED, TRANSPARENT understanding of YOU — how you \
+             work — and a deterministic anticipation of your next moves (ADR-028, \
+             symbiose). Folded from data VibeOS already holds under governance, \
+             CONFINED to your uid (never another user): your explicit \
+             preferences (user-memory fold), your patterns and rhythm and the \
+             friction you hit (from the audit trail), what the agent has observed \
+             (recent journal notes), and 'anticipations' — your most likely next \
+             governed actions ranked by a frequency×recency heuristic, each with \
+             its reason. NOT a trained predictor, NOT hidden profiling, NOT raw \
+             keystrokes: every field is derived from records you can inspect, and \
+             it exposes nothing memory.query + agent.activity would not for your \
+             own uid. Optional 'window_seconds' (default 7d, max 30d). Read-only.",
+            json!({"type": "object", "properties": {
+                "window_seconds": {"type": "integer", "minimum": 1}
+            }}),
         ),
     ]
 }
@@ -1285,9 +1325,10 @@ fn execute_tool(
     policy: &PolicyEngine,
     caller: Caller,
     audit_dir: &std::path::Path,
+    mode_path: &std::path::Path,
 ) -> Result<String, String> {
     match name {
-        "os.status" => os_status(),
+        "os.status" => os_status(mode_path),
         "fs.read" => crate::tools::fs::fs_read(args, policy, caller),
         "fs.write" => crate::tools::fs::fs_write(args, policy, caller),
         "pkg.install" => Ok(json!({
@@ -1309,6 +1350,8 @@ fn execute_tool(
         "agent.thinking" => agent_thinking(args),
         "agent.sessions" => agent_sessions(),
         "agents.list" => agents_list(args, caller, audit_dir),
+        "agent.activity" => agent_activity(args, caller, audit_dir),
+        "user.model" => crate::tools::user_model::user_model(args, caller, audit_dir),
         "policy.check" => policy_check(args, policy),
         "policy.capabilities" => crate::tools::policy_tool::capabilities(policy),
         _ => Err(format!("unknown tool: {name}")),
@@ -1480,14 +1523,51 @@ fn proc_comm(pid: u64) -> Option<String> {
     }
 }
 
+/// Longest roster window `agents.list` accepts (its `window_seconds` clamp
+/// ceiling) — the tail cache below never needs records older than this.
+const MAX_ROSTER_WINDOW_SECS: u64 = 3600;
+
+/// Per-file incremental state for `read_recent_audit`. The audit files are
+/// append-only (single writer behind the chain mutex), so bytes once parsed
+/// never change: each probe reads and parses only the DELTA appended since the
+/// previous one, instead of re-reading the whole 2 × 512 KiB window on every
+/// HUD poll.
+struct AuditTail {
+    /// Byte offset up to which the file has been parsed — always the offset
+    /// just after a `'\n'` (only complete lines are ever consumed).
+    parsed_to: u64,
+    /// Parsed records `(ts_secs, record)` in file order, purged below the
+    /// maximum roster window and hard-capped.
+    records: std::collections::VecDeque<(u64, Value)>,
+}
+
+/// Hard cap on cached records per file. A fresh 512 KiB window holds at most
+/// ~3500 records (a record line is ≥ ~150 bytes), so this cap can never make
+/// the cache return LESS than the plain windowed scan it replaces.
+const TAIL_CACHE_MAX_RECORDS: usize = 8192;
+
 /// Read a bounded tail of the audit trail as parsed records with `ts >= cutoff`.
 /// Best-effort (skips unreadable/corrupt lines) and read-only — used ONLY to
 /// derive the `agents.list` roster, never for chain verification. Bounds the
-/// read to the last `MAX_TAIL_BYTES` of the two most recent daily files, so it
-/// stays cheap regardless of how large the audit log has grown.
-fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
+/// read to the last `MAX_TAIL_BYTES` of the two most recent daily files, and
+/// keeps an incremental per-file cache (see [`AuditTail`]) so a steady-state
+/// probe costs one `stat` plus the few lines appended since the previous one.
+///
+/// Invalidation is fail-safe in every uncertain case: a file whose size SHRANK
+/// (the startup torn-tail rollback) is rescanned from scratch with the plain
+/// windowed scan; entries for files that left the two-most-recent set are
+/// dropped (daily rotation); a delta that does not yet end in `'\n'` leaves the
+/// incomplete line unconsumed for the next probe (the writer emits the line and
+/// its newline as separate writes, so a reader can observe the gap).
+///
+/// `pub(crate)` so the `user.model` derivation (ADR-028) can reuse the same
+/// bounded, cached per-uid audit view instead of re-reading the trail.
+pub(crate) fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
     const MAX_TAIL_BYTES: u64 = 512 * 1024;
+    use std::collections::HashMap;
     use std::io::{Read, Seek, SeekFrom};
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, AuditTail>>> = OnceLock::new();
 
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -1505,45 +1585,122 @@ fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
     // Two most recent daily files cover any short window across a midnight roll.
     let recent: Vec<std::path::PathBuf> = files.iter().rev().take(2).rev().cloned().collect();
 
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Rotation: drop cached state for THIS dir's files that left the recent
+    // set. Other directories' entries are none of this call's business (tests
+    // and dev overrides run several audit dirs in one process).
+    cache.retain(|p, _| p.parent() != Some(dir) || recent.contains(p));
+
+    let purge_before = now_epoch_secs().saturating_sub(MAX_ROSTER_WINDOW_SECS);
     let mut out = Vec::new();
     for path in recent {
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        let start = meta.len().saturating_sub(MAX_TAIL_BYTES);
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            continue;
+        let len = meta.len();
+
+        let needs_fresh_scan = match cache.get(&path) {
+            Some(tail) => len < tail.parsed_to, // shrank: torn-tail rollback
+            None => true,
         };
-        if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        if f.read_to_end(&mut bytes).is_err() {
-            continue;
-        }
-        let buf = String::from_utf8_lossy(&bytes);
-        let mut lines = buf.lines();
-        // A mid-file seek likely lands inside a line; drop that first partial.
-        if start > 0 {
-            lines.next();
-        }
-        for line in lines {
-            if line.trim().is_empty() {
+        if needs_fresh_scan {
+            // Plain windowed scan (the pre-cache behavior), seeding the cache.
+            let start = len.saturating_sub(MAX_TAIL_BYTES);
+            let Ok(mut f) = std::fs::File::open(&path) else {
+                cache.remove(&path);
+                continue;
+            };
+            if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
+                cache.remove(&path);
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
-                let ts = v
-                    .get("ts_unix_ms")
-                    .and_then(Value::as_u64)
-                    .map(|ms| ms / 1000)
-                    .unwrap_or(0);
-                if ts >= cutoff_secs {
-                    out.push(v);
+            let mut bytes = Vec::new();
+            if f.read_to_end(&mut bytes).is_err() {
+                cache.remove(&path);
+                continue;
+            }
+            let mut records = std::collections::VecDeque::new();
+            // Only complete lines are consumed; a torn trailing line stays
+            // unparsed and unconsumed until its newline lands.
+            let consumed = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+            let buf = String::from_utf8_lossy(&bytes[..consumed]);
+            let mut lines = buf.lines();
+            // A mid-file seek likely lands inside a line; drop that first partial.
+            if start > 0 {
+                lines.next();
+            }
+            for line in lines {
+                push_audit_line(&mut records, line);
+            }
+            cache.insert(
+                path.clone(),
+                AuditTail {
+                    parsed_to: start + consumed as u64,
+                    records,
+                },
+            );
+        } else if let Some(tail) = cache.get_mut(&path) {
+            if len > tail.parsed_to {
+                // Append-only delta: parsed_to sits just after a '\n', so the
+                // delta starts on a line boundary.
+                if let Ok(mut f) = std::fs::File::open(&path) {
+                    if f.seek(SeekFrom::Start(tail.parsed_to)).is_ok() {
+                        let mut bytes = Vec::new();
+                        if f.read_to_end(&mut bytes).is_ok() {
+                            let consumed =
+                                bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+                            let buf = String::from_utf8_lossy(&bytes[..consumed]);
+                            for line in buf.lines() {
+                                push_audit_line(&mut tail.records, line);
+                            }
+                            tail.parsed_to += consumed as u64;
+                        }
+                    }
                 }
             }
         }
+
+        if let Some(tail) = cache.get_mut(&path) {
+            // Bound the cache: drop records past the maximum roster window,
+            // then enforce the hard cap (oldest first).
+            while tail
+                .records
+                .front()
+                .is_some_and(|(ts, _)| *ts < purge_before)
+            {
+                tail.records.pop_front();
+            }
+            while tail.records.len() > TAIL_CACHE_MAX_RECORDS {
+                tail.records.pop_front();
+            }
+            out.extend(
+                tail.records
+                    .iter()
+                    .filter(|(ts, _)| *ts >= cutoff_secs)
+                    .map(|(_, v)| v.clone()),
+            );
+        }
     }
     out
+}
+
+/// Parse one audit line into `(ts_secs, record)` and push it (best-effort:
+/// blank or corrupt lines are skipped, exactly like the pre-cache scan did).
+fn push_audit_line(records: &mut std::collections::VecDeque<(u64, Value)>, line: &str) {
+    if line.trim().is_empty() {
+        return;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(line) {
+        let ts = v
+            .get("ts_unix_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| ms / 1000)
+            .unwrap_or(0);
+        records.push_back((ts, v));
+    }
 }
 
 /// agents.list (T0): a live roster of the CALLER'S OWN recently active agent
@@ -1674,7 +1831,94 @@ fn agents_list(
     .to_string())
 }
 
-fn os_status() -> Result<String, String> {
+/// agent.activity (T0): the caller's OWN recent governed tool calls, in
+/// chronological order, derived from the audit trail — the "deeds" half of the
+/// AI-citizen self-knowledge, complementing `agent.thinking` (thoughts) and
+/// `policy.capabilities` (the static map of rights). Where `agents.list` gives a
+/// per-pid ROSTER and deliberately EXCLUDES the caller's own process, this is the
+/// mirror: the caller's OWN footprint, including its REFUSALS — so a citizen
+/// learns the policy boundaries empirically (a `deny`/`require_approval` it hit)
+/// on top of the manifest it can read statically.
+///
+/// Confinement is identical to `agents.list` (the same underlying data, self-
+/// scoped): CONFINED to the requesting uid (SO_PEERCRED); an unidentified caller
+/// sees nothing. It exposes no field an agent could not already obtain from
+/// `agents.list` for its own uid — the audit trail itself stays root-only and on
+/// the built-in denylist, unreadable via `fs.read` (no new leak; same reasoning
+/// as ADR-023).
+///
+/// Anti-DoS: reached through `handle_tools_call` (per-uid rate limiter first,
+/// call audited); the window is a bounded audit tail and the row count is capped.
+fn agent_activity(
+    args: &Value,
+    caller: Caller,
+    audit_dir: &std::path::Path,
+) -> Result<String, String> {
+    const DEFAULT_WINDOW_SECS: u64 = 3600;
+    const MAX_ROWS: usize = 200;
+    let window = args
+        .get("window_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_WINDOW_SECS)
+        .clamp(1, MAX_ROSTER_WINDOW_SECS);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| (n as usize).clamp(1, MAX_ROWS))
+        .unwrap_or(MAX_ROWS);
+    let now = now_epoch_secs();
+    let cutoff = now.saturating_sub(window);
+
+    // Fail-closed confinement: no SO_PEERCRED uid -> nothing (per-uid view only).
+    let Some(uid) = caller.uid else {
+        return Ok(json!({
+            "activity": [],
+            "count": 0,
+            "window_seconds": window,
+            "note": "no caller uid (SO_PEERCRED); activity is confined per-uid"
+        })
+        .to_string());
+    };
+
+    // The audit tail is chronological; keep only THIS uid's records, newest last.
+    let mut rows: Vec<Value> = read_recent_audit(audit_dir, cutoff)
+        .into_iter()
+        .filter(|r| r.get("caller_uid").and_then(Value::as_u64) == Some(u64::from(uid)))
+        .map(|r| {
+            let ts = r
+                .get("ts_unix_ms")
+                .and_then(Value::as_u64)
+                .map(|ms| ms / 1000)
+                .unwrap_or(0);
+            json!({
+                "ts_unix": ts,
+                "when": utc_iso8601(ts),
+                "tool": r.get("tool").and_then(Value::as_str).unwrap_or(""),
+                "target": r.get("target").cloned().unwrap_or(Value::Null),
+                "decision": r.get("decision").cloned().unwrap_or(Value::Null),
+                "outcome": r.get("outcome").cloned().unwrap_or(Value::Null),
+                "pid": r.get("caller_pid").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+
+    // Newest first, then cap: an agent resuming a session wants its LAST actions.
+    rows.reverse();
+    let total = rows.len();
+    rows.truncate(limit);
+
+    Ok(json!({
+        "activity": rows,
+        "count": rows.len(),
+        "total_in_window": total,
+        "truncated": total > rows.len(),
+        "window_seconds": window,
+        "uid": uid,
+    })
+    .to_string())
+}
+
+fn os_status(mode_path: &std::path::Path) -> Result<String, String> {
     let uptime_seconds = std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|s| s.split_whitespace().next().map(str::to_string))
@@ -1687,12 +1931,17 @@ fn os_status() -> Result<String, String> {
     });
     let (mem_total_kb, mem_available_kb) = read_meminfo();
     let mounts = read_mounts();
+    // Operating mode (ADR-027) — the DANGER PANEL feed. The HUD polls os.status,
+    // so shipping the mode here means a live "AUTONOMOUS / OPEN MODE" banner with
+    // zero new tool. Read-only, fail-safe (governed on any uncertainty).
+    let mode = crate::mode::status(mode_path, now_epoch_secs());
     Ok(json!({
         "uptime_seconds": uptime_seconds,
         "loadavg_1_5_15": loadavg,
         "mem_total_kb": mem_total_kb,
         "mem_available_kb": mem_available_kb,
         "mounts": mounts,
+        "mode": mode,
         "note": "std-only approximation: free disk space needs statvfs (libc), \
                  so v0.1 reports mounted block devices without usage figures"
     })
@@ -2037,6 +2286,8 @@ mod tests {
         assert_eq!(tool_tier("sectools.list"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
+        assert_eq!(tool_tier("agent.activity"), Some(Tier::T0));
+        assert_eq!(tool_tier("user.model"), Some(Tier::T0));
         assert_eq!(
             tool_tier("disk.wipe"),
             None,
@@ -2046,8 +2297,8 @@ mod tests {
 
     #[test]
     fn tool_catalog_is_built_once_and_cached() {
-        // Same allocation on every call: the registry (18 tuples, each with a
-        // json! schema tree) must never regress to being rebuilt per lookup —
+        // Same allocation on every call: the registry (each tuple with a json!
+        // schema tree) must never regress to being rebuilt per lookup —
         // tool_tier runs on every tools/call and once per audit record walked
         // by the agents.list roster loop.
         assert!(std::ptr::eq(tool_catalog(), tool_catalog()));
@@ -2132,6 +2383,113 @@ mod tests {
         assert_eq!(tool_tier("agent.sessions"), Some(Tier::T0));
     }
 
+    /// One hand-written audit line for the tail-cache tests (only the fields
+    /// `read_recent_audit` actually reads).
+    fn tail_rec(tool: &str, ts_ms: u64) -> String {
+        json!({"ts_unix_ms": ts_ms, "tool": tool, "caller_uid": 1000, "caller_pid": 42}).to_string()
+    }
+
+    /// Fresh scratch audit dir for a tail-cache test. Each test uses its OWN
+    /// dir: the incremental cache is keyed by file path, so distinct dirs mean
+    /// independent cache state.
+    fn tail_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vibed-tail-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn recent_audit_tail_is_incremental_and_sees_appends() {
+        let dir = tail_test_dir("incr");
+        let file = dir.join("vibed-2099-01-01.jsonl");
+        let now_ms = now_epoch_secs() * 1000;
+        let cutoff = now_epoch_secs().saturating_sub(120);
+
+        std::fs::write(
+            &file,
+            format!("{}\n{}\n", tail_rec("t1", now_ms), tail_rec("t2", now_ms)),
+        )
+        .unwrap();
+        let first = read_recent_audit(&dir, cutoff);
+        assert_eq!(first.len(), 2, "seed scan reads both records: {first:?}");
+
+        // Append-only growth: the next probe must return the delta too.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            writeln!(f, "{}", tail_rec("t3", now_ms)).unwrap();
+        }
+        let second = read_recent_audit(&dir, cutoff);
+        assert_eq!(second.len(), 3, "delta record must appear: {second:?}");
+        assert!(
+            second.iter().any(|r| r["tool"] == "t3"),
+            "the appended record is present: {second:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_audit_tail_rescans_after_truncation() {
+        let dir = tail_test_dir("trunc");
+        let file = dir.join("vibed-2099-01-01.jsonl");
+        let now_ms = now_epoch_secs() * 1000;
+        let cutoff = now_epoch_secs().saturating_sub(120);
+
+        std::fs::write(
+            &file,
+            format!("{}\n{}\n", tail_rec("t1", now_ms), tail_rec("t2", now_ms)),
+        )
+        .unwrap();
+        assert_eq!(read_recent_audit(&dir, cutoff).len(), 2);
+
+        // Startup torn-tail rollback shrinks the file: the cache must notice
+        // (size < parsed_to) and rescan from scratch, not serve stale records.
+        std::fs::write(&file, format!("{}\n", tail_rec("t1", now_ms))).unwrap();
+        let after = read_recent_audit(&dir, cutoff);
+        assert_eq!(after.len(), 1, "shrunk file must be rescanned: {after:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_audit_tail_leaves_a_torn_line_until_its_newline_lands() {
+        let dir = tail_test_dir("torn");
+        let file = dir.join("vibed-2099-01-01.jsonl");
+        let now_ms = now_epoch_secs() * 1000;
+        let cutoff = now_epoch_secs().saturating_sub(120);
+
+        // One complete record, then a record whose newline has not landed yet
+        // (the writer emits the line and its '\n' as separate writes).
+        std::fs::write(
+            &file,
+            format!("{}\n{}", tail_rec("t1", now_ms), tail_rec("t2", now_ms)),
+        )
+        .unwrap();
+        let first = read_recent_audit(&dir, cutoff);
+        assert_eq!(
+            first.len(),
+            1,
+            "the un-terminated line is not consumed: {first:?}"
+        );
+
+        // The newline lands: the next probe parses the now-complete line.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            f.write_all(b"\n").unwrap();
+        }
+        let second = read_recent_audit(&dir, cutoff);
+        assert_eq!(second.len(), 2, "completed line is now parsed: {second:?}");
+        assert!(second.iter().any(|r| r["tool"] == "t2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn agents_list_confines_to_caller_uid_and_excludes_self() {
         let dir = std::env::temp_dir().join(format!("vibed-agents-list-{}", std::process::id()));
@@ -2201,6 +2559,87 @@ mod tests {
         assert_eq!(out2["count"], 0, "an unidentified caller sees nothing");
 
         assert_eq!(tool_tier("agents.list"), Some(Tier::T0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_activity_is_own_uid_chronological_and_includes_refusals() {
+        let dir = std::env::temp_dir().join(format!("vibed-agent-activity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = AuditLog::new(dir.clone());
+
+        let me = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(111),
+        };
+        let stranger = Caller {
+            uid: Some(2000),
+            gid: Some(2000),
+            pid: Some(333),
+        };
+
+        // My own footprint: an allow, then a refusal, in this order.
+        log.record("os.status", &json!({}), None, "allow", "ok", me)
+            .unwrap();
+        // A stranger's record between mine must never appear in my activity.
+        log.record(
+            "fs.read",
+            &json!({}),
+            Some("/home/b/y"),
+            "allow",
+            "ok",
+            stranger,
+        )
+        .unwrap();
+        log.record(
+            "fs.read",
+            &json!({}),
+            Some("/etc/shadow"),
+            "deny",
+            "blocked_builtin_denylist",
+            me,
+        )
+        .unwrap();
+
+        let out: Value =
+            serde_json::from_str(&agent_activity(&json!({}), me, &dir).unwrap()).unwrap();
+        let act = out["activity"].as_array().unwrap();
+
+        // Exactly my two records — the stranger's is confined out.
+        assert_eq!(act.len(), 2, "only my own uid's records: {out}");
+        // Newest first: the refusal is the most recent action.
+        assert_eq!(act[0]["tool"], "fs.read");
+        assert_eq!(
+            act[0]["decision"], "deny",
+            "refusals are surfaced, not hidden"
+        );
+        assert_eq!(act[0]["outcome"], "blocked_builtin_denylist");
+        assert_eq!(act[0]["target"], "/etc/shadow");
+        assert_eq!(act[1]["tool"], "os.status");
+        assert!(act
+            .iter()
+            .all(|r| r["tool"] != "fs.read" || r["target"] != "/home/b/y"));
+
+        // limit caps the rows but reports the true total in the window.
+        let capped: Value =
+            serde_json::from_str(&agent_activity(&json!({"limit": 1}), me, &dir).unwrap()).unwrap();
+        assert_eq!(capped["count"], 1);
+        assert_eq!(capped["total_in_window"], 2);
+        assert_eq!(capped["truncated"], true);
+
+        // No SO_PEERCRED uid -> nothing (fail-closed, per-uid view).
+        let anon = Caller {
+            uid: None,
+            gid: None,
+            pid: Some(9),
+        };
+        let out2: Value =
+            serde_json::from_str(&agent_activity(&json!({}), anon, &dir).unwrap()).unwrap();
+        assert_eq!(out2["count"], 0, "an unidentified caller sees nothing");
+
+        assert_eq!(tool_tier("agent.activity"), Some(Tier::T0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

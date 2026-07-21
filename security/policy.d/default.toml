@@ -206,10 +206,10 @@ reason = "Read-only, bounded tail of an autonomous session's captured reasoning 
 
 [[rule]]
 id = "agent-observability"
-tools = ["agent.sessions", "agents.list"]
+tools = ["agent.sessions", "agents.list", "agent.activity"]
 tier = "T0"
 action = "allow"
-reason = "Read-only HUD observability. agent.sessions lists reasoning-session ids (discovery for agent.thinking). agents.list is a per-uid roster derived from the audit trail, CONFINED to the caller's own uid (never another user's activity). Bounded output, rate-limited like any tool."
+reason = "Read-only HUD/self observability, all CONFINED to the caller's own uid. agent.sessions lists reasoning-session ids (discovery for agent.thinking). agents.list is a per-uid roster (other pids) derived from the audit trail. agent.activity is the caller's OWN recent governed tool calls incl. its refusals (ADR-026) — the 'deeds' half of AI-citizen self-knowledge, exposing nothing agents.list would not for the same uid. Bounded output, rate-limited like any tool."
 
 [[rule]]
 id = "policy-check"
@@ -224,6 +224,13 @@ tools = ["policy.capabilities"]
 tier = "T0"
 action = "allow"
 reason = "Read-only capability manifest DERIVED from the loaded policy (tools/tier/approval/target constraints) so the agent plans in reality instead of discovering limits by refusal. Indicative only; the authoritative decision stays the per-call evaluation, so it can never over-promise."
+
+[[rule]]
+id = "user-model"
+tools = ["user.model"]
+tier = "T0"
+action = "allow"
+reason = "Read-only, DERIVED and TRANSPARENT model of how the human works, for symbiosis (ADR-028). Folded from data VibeOS already holds under governance — the user-memory profile and the audit trail CONFINED to the caller's uid — plus recent typed journal notes; anticipations are a deterministic frequency×recency heuristic, never a trained predictor. No NEW leak (same underlying data as memory.query + agent.activity for the same uid), no new surveillance (never the human's raw keystrokes), local and user-owned (the memory belongs to its user). Bounded output, rate-limited like any tool."
 
 [[rule]]
 id = "memory-append"

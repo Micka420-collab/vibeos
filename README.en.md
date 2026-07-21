@@ -17,6 +17,42 @@
 
 > ℹ️ This is a translation of the main README. VibeOS is a French-first project: the in-depth documents under `docs/` are maintained in French (the project's canonical language). This page links to them directly.
 
+## 👋 New here? VibeOS in 2 minutes
+
+**The idea in one picture.** Picture a highly secured building. The AI is not an app you install and that then does whatever it likes: it is a **resident bound by a set of rules**, with rights and duties — not a guest handed the keyring. To act on the system (install software, restart a service, touch the disk), it must go through the building's **warden**, a program called `vibed`. The warden checks the rulebook, lets authorized actions through, **calls you — the owner — for anything risky**, and records every move in a **tamper-evident ledger**. That's all of VibeOS in one image: the AI has real powers, but governed ones.
+
+**What it is.** VibeOS is a Linux operating system (like Ubuntu or Fedora) built for *coding by talking to AI agents* — code assistants like Claude Code that write and run code for you. That's *vibecoding*.
+
+**How it differs from an ordinary Linux.** Two things. It is **immutable**: you don't tinker with the core system while it runs, you swap the whole image in one block — and if an update breaks something, you roll back to the previous state in one move. And the AI isn't an app bolted on top: it is wired into the foundations, governed by rules from the start.
+
+**Who it's for, and where it stands.** Today, mostly for the curious and for contributors who want to understand the project or move it forward. It is **not yet** an OS ready to install for everyone: the project is **pre-alpha**, and to date **no image has been booted on real hardware** — everything this repository claims is proven by automated tests, not by a screen anyone has seen. The honest status (done / in progress / to do) lives in **[STATUS.md](STATUS.md)**.
+
+**How it works, in 4 beats:**
+
+1. **The machine is born blank.** The image is the same for everyone and carries no personal data. On the very first boot, a sequence called *Genesis* creates the machine's memory, which belongs to you alone. *(Encryption of that memory is planned for a later phase — for now it is created in cleartext, and the project says so plainly.)*
+2. **The AI asks the warden.** An agent (Claude Code, a local model via ollama…) sends its system-action requests to the warden `vibed`, instead of doing whatever it wants as root.
+3. **A rule decides; you approve the risky.** The warden ranks every action from **T0** (observe, no risk) to **T3** (destructive). The harmless passes on its own; **modifying the system or touching the disk requires your explicit approval**. When in doubt, or when no rule matches, everything is **denied by default**.
+4. **Everything is traced.** Each call is written to an *append-only* log (you add, you never rewrite) and cryptographically chained: you can always answer "who did what, when, and with whose authorization."
+
+**Mini-glossary** (the words that recur everywhere below):
+
+| Word | In plain terms |
+|---|---|
+| **immutable** | the core system is read-only; a failed update is fixed by rolling back one block, no scar left |
+| **vibecoding** | programming by describing what you want to an AI that writes the code |
+| **AI agent** | an assistant that doesn't only talk: it reads files, runs commands (e.g. Claude Code) |
+| **`vibed`** | the "warden": the system program every privileged agent action goes through |
+| **MCP** | the standard language agents use to talk to `vibed` (a single, controlled front door) |
+| **policy / T0→T3** | the "rulebook" that ranks each action by risk level and decides who may run it |
+| **audit log** | the "tamper-evident ledger" that keeps a trace of every move |
+| **Genesis** | the sequence that creates the machine's memory on the very first boot |
+
+> Want the *why* rather than the *how*? Read the manifesto **[VISION.md](VISION.md)**. For the layered architecture and diagrams, see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+>
+> The rest of this README is the **technical version** of what you just read — denser, but telling exactly the same story.
+
+---
+
 VibeOS is an **AI-native, immutable, secure-by-design** Linux distribution dedicated to *vibecoding*. Derived from Fedora Kinoite (KDE Plasma 6) and built as an image with bootc/OSTree, it exposes system control to AI agents through a strict contract — a system daemon (`vibed`), an MCP server, a policy engine and an audit log — rather than raw shell access. The OS ships **blank**: its memory is created on first boot by a *Genesis* sequence and belongs to its user, and no one else (LUKS encryption of that memory lands in **Phase 3** — see [ROADMAP.md](ROADMAP.md)). A multi-year project: the v0.1 foundation is in place — signed multi-arch image, two ISOs, `vibed` daemon running at boot, vibecoding desktop delivered.
 
 > 📊 **Where does the project stand?** The living status (done / in progress / to do) is in **[STATUS.md](STATUS.md)**.
@@ -29,7 +65,7 @@ VibeOS is an **AI-native, immutable, secure-by-design** Linux distribution dedic
 The OS image contains **no factory memory**. On first boot, `vibeos-genesis.service` (guarded by `ConditionPathExists=!/var/lib/vibeos/memory/.initialized`) runs `/usr/libexec/vibeos/genesis.sh` and builds the machine's memory from scratch under `/var/lib/vibeos/memory` — **in cleartext in v0.1**; LUKS/TPM2 volume encryption is a **Phase 3** deliverable. **Amnesic mode** (inspired by Tails) recreates that memory in tmpfs **on every boot** — nothing survives shutdown: the **systemd generator** is **delivered** (enabled by the `vibeos.amnesic=1` kernel parameter); its VM validation remains **Phase 3**. Full spec in [docs/MEMORY.md](docs/MEMORY.md).
 
 ### 🤖 AI as a citizen of the OS — vibed + MCP + policies
-> **Status:** the `vibed` binary is **embedded in the image** (compiled multi-stage in `os/Containerfile`, installed at `/usr/bin/vibed`). At boot, `vibed.service` (preset-enabled) starts, **loads and enforces the installed policy** (`/etc/vibeos/policy.d/`, fail-closed), **serves the MCP server** on `/run/vibed/mcp.sock` and **audits** every call under `/var/lib/vibeos`. On the client side, the image ships the **Claude Code MCP config** (`/etc/skel/.claude.json`): the `vibeos` server is discovered **with no manual setup** (prerequisite: the `vibeos-agents` group). The **per-tool sandbox mechanism** ([ADR-019](docs/DECISIONS.md)) is delivered — hardened transient systemd units + the low-privilege `vibed-tool` helper, exercised by the `sandbox.probe` (T1) tool which judges the confinement actually obtained — but its **proof on real hardware remains to be done** (machine-gated); also still to come: dedicated SELinux `vibed_t`, `User=vibed`, and external TPM/Rekor anchoring of the audit chain (**Phase 4**). The `vibed` crate is tested (299 green tests, including 9 end-to-end MCP integration tests over a socket + 3 policy tests); the audit log is **SHA-256 hash-chained** (`vibed --verify-audit`).
+> **Status:** the `vibed` binary is **embedded in the image** (compiled multi-stage in `os/Containerfile`, installed at `/usr/bin/vibed`). At boot, `vibed.service` (preset-enabled) starts, **loads and enforces the installed policy** (`/etc/vibeos/policy.d/`, fail-closed), **serves the MCP server** on `/run/vibed/mcp.sock` and **audits** every call under `/var/lib/vibeos`. On the client side, the image ships the **Claude Code MCP config** (`/etc/skel/.claude.json`): the `vibeos` server is discovered **with no manual setup** (prerequisite: the `vibeos-agents` group). The **per-tool sandbox mechanism** ([ADR-019](docs/DECISIONS.md)) is delivered — hardened transient systemd units + the low-privilege `vibed-tool` helper, exercised by the `sandbox.probe` (T1) tool which judges the confinement actually obtained — but its **proof on real hardware remains to be done** (machine-gated); also still to come: dedicated SELinux `vibed_t`, `User=vibed`, and external TPM/Rekor anchoring of the audit chain (**Phase 4**). The `vibed` crate is tested (346 green tests, including 9 end-to-end MCP integration tests over a socket + 3 policy tests); the audit log is **SHA-256 hash-chained** (`vibed --verify-audit`).
 
 The `vibed` system daemon (Rust, tokio, `vibed.service` unit) exposes OS control via an **MCP server** (JSON-RPC 2.0) on the unix socket `/run/vibed/mcp.sock`. Every agent action goes through a **policy engine** (`/etc/vibeos/policy.d/*.toml`, first matching rule wins, default-deny) organized into capability tiers:
 
@@ -42,7 +78,7 @@ The `vibed` system daemon (Rust, tokio, `vibed.service` unit) exposes OS control
 
 Every tool call is recorded in an **append-only JSONL audit log, SHA-256 hash-chained, rotated per UTC day** (`/var/lib/vibeos/audit/vibed-<date>.jsonl`), with the caller's identity (uid/gid/pid) — any tampering is detected by `vibed --verify-audit`. External anchoring of the chain (TPM/Rekor) remains **Phase 4**.
 
-The **T2/T3 human-approval flow** is delivered on the plumbing side: a request creates a traced entry, the operator runs `vibectl approve <id>`, and a **single-use grant** (bound to `(tool, target, uid)`, short-lived) authorizes the re-call — an agent can **never** approve its own request (root-only store), and the audit records *who* approved (`ok_approved(by_uid=N)`). **Per-uid rate-limiting** (token bucket) bounds a runaway or compromised agent (anti-flood, audited refusal). **First real T2 backend delivered**: `svc.restart` actually restarts a systemd unit behind the approval, with a **target allowlist** (access/audit/approval units — `sshd`, `vibed`, `dbus`, `user@*`… — are refused **before** the approval queue) and the unit name canonicalized before the decision. `pkg.install` stays a stub (backend deferred on an immutable OS, [ADR-016](docs/DECISIONS.md)). Current tool surface (18 — the `tools/list` catalog is authoritative): T0 `os.status`/`fs.read`/`fs.list`/`svc.status`/`log.read`/`sectools.list`/`memory.query`/`agent.thinking`/`agent.sessions`/`agents.list`/`policy.check`/`policy.capabilities`, T1 `fs.write`/`memory.append`/`sandbox.probe`, T2 `svc.restart`/`pkg.install`/`deploy.plan` — `deploy.plan` is **denied by default** (the shipped policy carries no `[rule.deploy]` rule: fail-closed until the operator allowlists targets, [ADR-021](docs/DECISIONS.md)). The `browser.*` modules ([ADR-022](docs/DECISIONS.md)) and `os.propose` ([ADR-024](docs/DECISIONS.md), to be ratified) exist in the code but are **out of the catalog** — deliberately inert until their governed path is wired. The Plasma/HUD approval dialog arrives in **Phase 4**.
+The **T2/T3 human-approval flow** is delivered on the plumbing side: a request creates a traced entry, the operator runs `vibectl approve <id>`, and a **single-use grant** (bound to `(tool, target, uid)`, short-lived) authorizes the re-call — an agent can **never** approve its own request (root-only store), and the audit records *who* approved (`ok_approved(by_uid=N)`). **Per-uid rate-limiting** (token bucket) bounds a runaway or compromised agent (anti-flood, audited refusal). **First real T2 backend delivered**: `svc.restart` actually restarts a systemd unit behind the approval, with a **target allowlist** (access/audit/approval units — `sshd`, `vibed`, `dbus`, `user@*`… — are refused **before** the approval queue) and the unit name canonicalized before the decision. `pkg.install` stays a stub (backend deferred on an immutable OS, [ADR-016](docs/DECISIONS.md)). Current tool surface (20 — the `tools/list` catalog is authoritative): T0 `os.status`/`fs.read`/`fs.list`/`svc.status`/`log.read`/`sectools.list`/`memory.query`/`agent.thinking`/`agent.sessions`/`agents.list`/`agent.activity`/`user.model`/`policy.check`/`policy.capabilities`, T1 `fs.write`/`memory.append`/`sandbox.probe`, T2 `svc.restart`/`pkg.install`/`deploy.plan` — `deploy.plan` is **denied by default** (the shipped policy carries no `[rule.deploy]` rule: fail-closed until the operator allowlists targets, [ADR-021](docs/DECISIONS.md)). The `browser.*` modules ([ADR-022](docs/DECISIONS.md)) and `os.propose` ([ADR-024](docs/DECISIONS.md), to be ratified) exist in the code but are **out of the catalog** — deliberately inert until their governed path is wired. The Plasma/HUD approval dialog arrives in **Phase 4**.
 
 ### 🔒 Immutability & verifiable security
 Delivered in v0.1: read-only root, atomic updates and factory rollback (bootc/OSTree), SELinux `enforcing` (Fedora's targeted policy), OS images **signed with sigstore/cosign in CI**, base image pinned by digest and AI CLIs pinned to exact versions. Planned: measured boot chain **UEFI Secure Boot → UKI → dm-verity/composefs** (**Phase 4**), generalization of the per-tool sandbox (systemd-run/seccomp mechanism delivered and exercised by `sandbox.probe` — [ADR-019](docs/DECISIONS.md); landlock and generalization: **Phase 3**), dedicated SELinux policy `vibed_t` (**Phase 4**). Image reference: `ghcr.io/micka420-collab/vibeos`.
@@ -202,7 +238,7 @@ podman build -t vibeos:dev -f os/Containerfile .
 | **Last update** | 2026-07-21 |
 | **OS image** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — amd64 + arm64 manifest, **cosign-signed** (Rekor) |
 | **ISO** | amd64 (7.0 GB) + arm64 (6.3 GB) — CI artifacts of the `v0.1.0-dev` release |
-| **Build** | Green CI (native runners, ~15 min/arch) · `bootc container lint` OK · 299 green `vibed` tests (+ 17 Zed extension tests + 73 HUD client checks) |
+| **Build** | Green CI (native runners, ~15 min/arch) · `bootc container lint` OK · 346 green `vibed` tests (+ 17 Zed extension tests + 73 HUD client checks) |
 | **Reference machine** | Ryzen 7 3700X + RTX 3070 Ti + 16 GB — [docs/HARDWARE.md](docs/HARDWARE.md) |
 | **Expect** | Breakage, rewrites, zero stability guarantee |
 
