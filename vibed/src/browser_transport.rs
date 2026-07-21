@@ -3,8 +3,9 @@
 //!
 //! Ce module fait de l'**I/O** (contrairement au codec `cdp`, pur) mais reste **mince** :
 //! il ne fait que déplacer des octets. Le cadrage (NUL-délimité) est le travail du codec ;
-//! la corrélation et la sécurité, celui de `CdpSession`. Le lancement de `chromium`, la
-//! boucle `run_browser` et le proxy CONNECT sont des incréments ultérieurs.
+//! la corrélation et la sécurité, celui de `CdpSession`. Le **lancement** de `chromium`
+//! ([`spawn_chromium`]) atterrit ici ; la boucle `run_browser` (pilotage d'un batch
+//! d'actions) et le proxy CONNECT sont des incréments ultérieurs.
 //!
 //! **Contrat `CdpChannel` respecté ici** (cf. sa doc) : `send` écrit **intégralement**
 //! (`write_all`), `recv` est un **read bloquant** et ne renvoie `Ok(vide)` que sur un
@@ -12,25 +13,29 @@
 //! `RuntimeMaxSec` de l'unité transitoire durcie (ADR-019/022) : un `chromium` qui ne
 //! répond jamais fait tuer l'unité entière, pas boucler `vibed`.
 //!
-//! **Invariants que l'incrément `run_browser` DEVRA tenir** (revue Fable 5) :
+//! **Invariants du lancement** (revue Fable 5) — les deux fds/stdout sont désormais **tenus
+//! par [`spawn_chromium`]** ; SIGPIPE reste à la charge du **`main` du helper** :
 //! - **SIGPIPE doit être ignoré** dans le process helper : un pipe n'a pas d'équivalent
 //!   `MSG_NOSIGNAL`, donc la disposition process-wide est la seule garde. Un `chromium`
 //!   hostile qui ferme sa lecture pendant un `write_all` lèverait sinon SIGPIPE et
 //!   **tuerait le helper par signal** avant qu'il n'émette son erreur bornée. Le runtime
 //!   Rust std installe `SIG_IGN` avant `main` (donc sûr aujourd'hui — `write_all` renvoie
 //!   `EPIPE`), mais `run_browser` doit le **réaffirmer** (`libc::signal(SIGPIPE, SIG_IGN)`)
-//!   pour survivre à un futur flag de build ou une entrée non-std.
-//! - les fds du pipe doivent être créés **`O_CLOEXEC`** et `dup2` **uniquement** sur les
-//!   fds 3/4 de l'enfant ; ce sont les **seuls** fds supplémentaires que `chromium` hérite.
-//! - `chromium` ne doit **PAS** hériter du **stdout** du helper : ce stdout EST le canal de
-//!   résultat `systemd-run --pipe` que `vibed` parse — un `chromium` hostile le forgerait.
-//!   Rediriger le stdio de l'enfant vers null / stderr capturé.
+//!   pour survivre à un futur flag de build ou une entrée non-std. **(Pas dans `spawn_chromium`
+//!   — c'est une disposition process-wide, pas par-spawn.)**
+//! - les fds du pipe sont créés **`O_CLOEXEC`** et `dup2` **uniquement** sur les fds 3/4 de
+//!   l'enfant ; ce sont les **seuls** fds supplémentaires que `chromium` hérite. ✔ [`spawn_chromium`]
+//! - `chromium` n'hérite **PAS** du **stdout** du helper : ce stdout EST le canal de résultat
+//!   `systemd-run --pipe` que `vibed` parse — un `chromium` hostile le forgerait. Le stdio de
+//!   l'enfant est redirigé vers `/dev/null`. ✔ [`spawn_chromium`]
 
 #![cfg(unix)]
 
 use std::fs::File;
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::io::OwnedFd;
+use std::io::{Error, ErrorKind, Read, Write};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
 
 use crate::cdp::CdpChannel;
 
@@ -185,6 +190,167 @@ pub fn attach_page<C: crate::cdp::CdpChannel>(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "browser: Target.attachToTarget sans sessionId — refusé".to_string())
+}
+
+/// Lance `chromium-headless` en mode `--remote-debugging-pipe` et rend le processus enfant
+/// ainsi que le [`PipeChannel`] déjà branché sur les descripteurs CDP. Le pilotage passe par
+/// les **fds 3** (chromium **lit** les commandes) et **4** (chromium **écrit** les réponses),
+/// la convention `--remote-debugging-pipe` — jamais un port TCP.
+///
+/// **Invariants tenus ici (ADR-022, revue Fable 5)** :
+/// - **stdout de l'enfant → `/dev/null`** : le stdout du helper EST le canal de résultat
+///   `systemd-run --pipe` que `vibed` parse ; un `chromium` hostile qui en hériterait le
+///   **forgerait**. Le CDP passe par le fd 4 **séparé**, jamais par stdout.
+/// - **seuls les fds 3/4** atteignent l'enfant : les deux extrémités **côté helper** du pipe
+///   sont `O_CLOEXEC` (créées via `pipe2`) et se ferment donc à l'`exec` ; l'enfant n'hérite
+///   d'**aucun** autre descripteur du helper.
+/// - **placement robuste sur 3/4** : les extrémités côté enfant sont d'abord **relogées**
+///   au-dessus de 10 (`F_DUPFD_CLOEXEC`) avant le `dup2` vers 3/4 — ce qui évite l'écrasement
+///   croisé si l'allocation initiale tombait justement sur 3 ou 4 — puis le `FD_CLOEXEC` de
+///   3/4 est **explicitement retiré** (le `dup2` le retire déjà, sauf le cas `oldfd == newfd`).
+///
+/// **À la charge de l'appelant (`run_browser`)**, PAS ici : réaffirmer `SIGPIPE = SIG_IGN`
+/// (disposition **process-wide** du helper, pas par-spawn), et le garde-fou de **temps**
+/// (`RuntimeMaxSec` de l'unité transitoire — un `chromium` muet fait tuer l'unité, pas boucler).
+/// `chromium_bin` DOIT être le binaire `headless_shell` ; `profile_dir` un répertoire
+/// **éphémère** (ADR-022) ; `proxy` l'IP du proxy CONNECT (ou `None`). L'argv est **fixe**
+/// (cf. [`chromium_argv`]) — aucune entrée agent ne l'atteint.
+///
+/// Le `Child` rendu doit être **attendu/tué** par l'appelant ; laisser tomber le
+/// [`PipeChannel`] ferme les extrémités côté helper (l'enfant voit alors EOF sur sa lecture).
+pub fn spawn_chromium(
+    chromium_bin: &str,
+    profile_dir: &str,
+    proxy: Option<&str>,
+) -> std::io::Result<(Child, PipeChannel)> {
+    // Chemins ABSOLUS obligatoires (cohérent avec `run_cli` du helper deploy, Fable 5) : un
+    // `chromium_bin` relatif se résoudrait via le PATH hérité, un `profile_dir` relatif contre
+    // le cwd du helper — deux dérives évitables sur le chemin critique.
+    if !chromium_bin.starts_with('/') || !profile_dir.starts_with('/') {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "spawn_chromium: chromium_bin et profile_dir doivent être des chemins absolus",
+        ));
+    }
+
+    // Deux pipes O_CLOEXEC. Convention CDP : l'enfant LIT ses commandes sur le fd 3 et ÉCRIT
+    // ses réponses sur le fd 4.
+    //   commandes : le helper écrit sur `to_child_w`, l'enfant lit sur `to_child_r`  (→ fd 3)
+    //   réponses  : l'enfant écrit sur `from_child_w` (→ fd 4), le helper lit sur `from_child_r`
+    let (to_child_r, to_child_w) = cloexec_pipe()?;
+    let (from_child_r, from_child_w) = cloexec_pipe()?;
+
+    // Fds bruts côté enfant, capturés par valeur pour le `pre_exec` (qui tourne DANS l'enfant
+    // après le fork). Les `OwnedFd` correspondants restent vivants jusqu'après `spawn` — donc
+    // ouverts au moment du fork — puis sont fermés côté helper juste après.
+    let child_cmd_fd = to_child_r.as_raw_fd(); // deviendra le fd 3 de l'enfant
+    let child_resp_fd = from_child_w.as_raw_fd(); // deviendra le fd 4 de l'enfant
+
+    let argv = chromium_argv(chromium_bin, profile_dir, proxy);
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        // Env VERROUILLÉ comme l'argv (Fable 5) : l'unité durcie fournit déjà un env minimal,
+        // mais `env_clear` + `HOME=profile_dir` ferme l'autre moitié de l'`execve` (LD_PRELOAD,
+        // proxies d'env, XDG_*…) — même discipline que `run_cli`. HOME sur le profil éphémère
+        // garde toute écriture HOME-relative de chromium dans le profil jeté. (Env exact à
+        // revalider contre le vrai chromium à l'E2E — `headless_shell` tolère un env quasi-vide
+        // avec `--user-data-dir`.)
+        .env_clear()
+        .env("HOME", profile_dir)
+        .stdin(Stdio::null()) // chromium n'a aucune entrée standard à lire
+        .stdout(Stdio::null()) // ISOLATION du canal de résultat systemd-run (CDP = fd 4)
+        .stderr(Stdio::null()); // les diagnostics de chromium ne polluent pas le résultat
+
+    // SAFETY : le `pre_exec` ne fait que des appels **async-signal-safe** (`fcntl`, `dup2`) sur
+    // des fds capturés par valeur ; aucune allocation, aucun état verrouillé du parent touché.
+    unsafe {
+        cmd.pre_exec(move || place_cdp_fds(child_cmd_fd, child_resp_fd));
+    }
+
+    let child = cmd.spawn()?;
+
+    // Le helper n'a plus besoin des extrémités CÔTÉ ENFANT. Les fermer est **requis** : tant
+    // que le helper garde `from_child_w` ouvert, sa propre lecture sur `from_child_r` ne verrait
+    // jamais l'EOF quand chromium meurt (il resterait un écrivain vivant).
+    drop(to_child_r);
+    drop(from_child_w);
+
+    // Le helper écrit les commandes sur `to_child_w` (que chromium lit) et lit les réponses sur
+    // `from_child_r` (que chromium écrit).
+    Ok((child, PipeChannel::from_fds(to_child_w, from_child_r)))
+}
+
+/// Crée un pipe unidirectionnel `(read, write)` **possédé**, les deux extrémités `O_CLOEXEC`
+/// dès la création (`pipe2` — pas de fenêtre de course avant un `fcntl`), de sorte qu'aucune
+/// ne fuie à travers un `exec` non voulu.
+fn cloexec_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as RawFd; 2];
+    // SAFETY : `fds` est un tableau de 2 i32, exactement ce que `pipe2` attend.
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    if rc != 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY : `pipe2` vient de créer ces deux fds valides et possédés.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Place les extrémités côté enfant du pipe CDP sur les **fds 3 et 4** (convention
+/// `--remote-debugging-pipe`), **sans** `FD_CLOEXEC` (pour survivre à l'`exec`). Tourne DANS
+/// l'enfant après le fork : **uniquement des appels async-signal-safe**, aucune allocation.
+///
+/// **Contrainte (Fable 5) : seules les erreurs `Error::last_os_error()`/`from_raw_os_error`
+/// sont permises ici.** Un `Error::new(..., "msg")` **allouerait** post-fork (deadlock possible
+/// sur le lock malloc tenu par un autre thread au moment du fork) et son `raw_os_error()` serait
+/// `None` → remappé `EINVAL` par std, diagnostic perdu.
+fn place_cdp_fds(cmd_fd: RawFd, resp_fd: RawFd) -> std::io::Result<()> {
+    // SAFETY : appels bruts async-signal-safe ; on ne touche aucun état alloué du parent.
+    unsafe {
+        // 1) Reloger les sources AU-DESSUS de 10 (`F_DUPFD_CLOEXEC`) : si `cmd_fd`/`resp_fd`
+        //    valaient déjà 3 ou 4, un `dup2` direct risquerait d'écraser l'un par l'autre. Les
+        //    copies relogées sont `O_CLOEXEC` (elles se ferment à l'exec).
+        let tmp_cmd = libc::fcntl(cmd_fd, libc::F_DUPFD_CLOEXEC, 10);
+        if tmp_cmd < 0 {
+            return Err(Error::last_os_error());
+        }
+        let tmp_resp = libc::fcntl(resp_fd, libc::F_DUPFD_CLOEXEC, 10);
+        if tmp_resp < 0 {
+            return Err(Error::last_os_error());
+        }
+        // 2) Placer sur 3 (chromium lit) et 4 (chromium écrit). `dup2` retire `FD_CLOEXEC` de
+        //    la cible (sauf si `oldfd == newfd`, impossible ici car `tmp_* >= 10`).
+        if libc::dup2(tmp_cmd, 3) < 0 {
+            return Err(Error::last_os_error());
+        }
+        if libc::dup2(tmp_resp, 4) < 0 {
+            return Err(Error::last_os_error());
+        }
+        // 3) Réaffirmer l'absence de `FD_CLOEXEC` sur 3/4 (ceinture + bretelles).
+        if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+            return Err(Error::last_os_error());
+        }
+        if libc::fcntl(4, libc::F_SETFD, 0) < 0 {
+            return Err(Error::last_os_error());
+        }
+        // 4) Défense en profondeur (Fable 5) : marquer `CLOEXEC` **tout** fd `>= 5` (parasites
+        //    éventuels du helper — sockets futurs, `LISTEN_FDS`) **sans les fermer**. L'invariant
+        //    « seuls 3/4 atteignent l'enfant » ne doit pas dépendre de l'hygiène CLOEXEC de TOUT
+        //    le helper. `CLOSE_RANGE_CLOEXEC` et **non** un close : fermer casserait le pipe de
+        //    report d'échec d'`exec` de std (déjà CLOEXEC) — son EOF signifierait alors « exec
+        //    réussi » → `Ok` sur un enfant mort. Syscall **brut** (pas le wrapper glibc) :
+        //    indépendant de la version glibc, kernel >= 5.11 (trivialement tenu sur Fedora 44).
+        //    Nos fds temporaires (`tmp_* >= 10`) et les extrémités côté helper (déjà CLOEXEC)
+        //    sont couverts sans effet de bord ; 3/4 (< 5) restent hors de portée.
+        if libc::syscall(
+            libc::SYS_close_range,
+            5 as libc::c_long,
+            libc::c_uint::MAX as libc::c_long,
+            libc::CLOSE_RANGE_CLOEXEC as libc::c_long,
+        ) < 0
+        {
+            return Err(Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -483,5 +649,61 @@ mod tests {
             "doit refuser sans targetId : {err}"
         );
         peer.join().unwrap();
+    }
+
+    #[test]
+    fn spawn_chromium_wires_fds_3_and_4_and_isolates_stdout() {
+        // Faux « chromium » : un script qui échoue le fd 3 vers le fd 4 (`cat 0<&3 1>&4`) et
+        // IGNORE ses flags. Il prouve d'un coup les invariants du lancement :
+        //   - le helper écrit sur le fd 3 et l'enfant le reçoit (câblage commandes) ;
+        //   - l'enfant écrit sur le fd 4 et le helper le lit (câblage réponses) ;
+        //   - la réponse arrive par le fd 4, JAMAIS par stdout (mis à /dev/null par
+        //     spawn_chromium) — l'isolation du canal de résultat systemd-run.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("vibed-spawn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-chromium");
+        // Le `printf` forge une sortie sur SON stdout AVANT l'écho fd3→fd4 : si stdout fuyait
+        // dans le canal (le pipe réponses branché à la fois en stdout ET en fd 4), "FORGED\0"
+        // arriverait AVANT "PING\0" et l'assert d'égalité casserait. C'est le test NÉGATIF
+        // gratuit de l'isolation stdout (Fable 5) — avec stdout à /dev/null, "FORGED\0" est
+        // jeté et seul l'écho du fd 4 remonte.
+        std::fs::write(&fake, "#!/bin/sh\nprintf 'FORGED\\0'\nexec cat 0<&3 1>&4\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fake_bin = fake.to_string_lossy().into_owned();
+
+        // Réessaie la course ETXTBSY (fichier fraîchement écrit puis exécuté), comme les tests
+        // de sandbox.rs. Détection par errno, pas par chaîne (locale/formulation, Fable 5).
+        let (mut child, mut chan) = (|| {
+            for _ in 0..50 {
+                match spawn_chromium(&fake_bin, "/tmp/ephemeral-profile", None) {
+                    Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                        std::thread::sleep(std::time::Duration::from_millis(20))
+                    }
+                    other => return other,
+                }
+            }
+            spawn_chromium(&fake_bin, "/tmp/ephemeral-profile", None)
+        })()
+        .expect("spawn_chromium réussit");
+
+        chan.send(b"PING\0").unwrap();
+        // Accumule jusqu'à l'écho complet : une lecture de pipe peut fragmenter.
+        let mut got = Vec::new();
+        while got.len() < 5 {
+            let chunk = chan.recv().unwrap();
+            assert!(!chunk.is_empty(), "EOF inattendu avant l'écho complet");
+            got.extend_from_slice(&chunk);
+        }
+        assert_eq!(
+            got, b"PING\0",
+            "le helper doit relire sur le fd 4 ce qu'il a écrit sur le fd 3"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
