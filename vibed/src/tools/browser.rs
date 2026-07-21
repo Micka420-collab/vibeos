@@ -420,15 +420,25 @@ fn run_simple_action<C: CdpChannel>(
 }
 
 /// `click` : fonction CONSTANTE. Garde de TIER (Fable 5) — refuse un SUBMITTER de formulaire
-/// (`<button>` submit/défaut, `<input type=submit|image>`, ou un DESCENDANT via `closest`) : le
-/// POST mutant passe par `browser.submit` (T2). ⚠️ Une navigation par click (`<a href>`) n'est PAS
-/// gouvernée par `[rule.domains]` de `navigate` — c'est le PROXY egress qui la contrôle.
-const CLICK_FN: &str =
-    "function() { const b = this.closest ? this.closest('button, input') : null; \
-     if (b && b.form) { const t = (b.getAttribute('type') || \
-     (b.tagName === 'BUTTON' ? 'submit' : '')).toLowerCase(); \
-     if ((b.tagName === 'BUTTON' && t === 'submit') || \
-     (b.tagName === 'INPUT' && (t === 'submit' || t === 'image'))) \
+/// (`<button>` submit/défaut/**type invalide**, `<input type=submit|image>`, un DESCENDANT via
+/// `closest`, ou un `<label>` dont le contrôle est un submitter) : le POST mutant passe par
+/// `browser.submit` (T2). ⚠️ Une navigation par click (`<a href>`) n'est PAS gouvernée par
+/// `[rule.domains]` de `navigate` — c'est le PROXY egress qui la contrôle.
+///
+/// **Deux durcissements (Fable 5, BLOQUANT B2)** face à un site hostile :
+/// 1. On lit la **propriété IDL `type`** (état *normalisé* : `<button>` à type absent/invalide →
+///    `'submit'` par spec HTML), PAS `getAttribute('type')` (attribut brut) — sinon
+///    `<button type="foo">` (état Submit) échappait à la garde et se soumettait en T1.
+/// 2. Logique **deny-list** pour `<button>` : submitter SAUF `type` explicitement `reset`/`button`.
+/// 3. Un `<label>` transfère son activation à son **contrôle associé** (`this.control`) — on évalue
+///    la garde sur ce contrôle, sinon `closest('button,input')` rendait `null` (label ni l'un ni
+///    l'autre) et le submitter passait.
+const CLICK_FN: &str = "function() { let probe = this; \
+     if (this.tagName === 'LABEL' && this.control) probe = this.control; \
+     const b = probe.closest ? probe.closest('button, input') : null; \
+     if (b && b.form) { \
+     if ((b.tagName === 'BUTTON' && b.type !== 'reset' && b.type !== 'button') || \
+     (b.tagName === 'INPUT' && (b.type === 'submit' || b.type === 'image'))) \
      throw new Error('submitter de formulaire — utilisez browser.submit (T2)'); } \
      this.click(); }";
 
@@ -979,6 +989,33 @@ mod tests {
         assert!(
             f.contains("browser.submit"),
             "la garde anti-submitter T2 doit être dans la fonction : {f}"
+        );
+    }
+
+    #[test]
+    fn click_guard_uses_idl_type_and_covers_invalid_button_and_label() {
+        // (Fable 5, BLOQUANT B2) La garde submitter DOIT lire la propriété IDL `b.type` (état
+        // normalisé : un <button> à type absent/invalide → 'submit') et NON `getAttribute('type')`
+        // (attribut brut) — sinon `<button type="foo">` (état Submit) se soumet en T1, contournant
+        // la porte T2. Deny-list pour <button> (submitter sauf 'reset'/'button'), et un <label>
+        // transfère l'activation à son contrôle (`this.control`). Les tests n'exécutent pas le JS ;
+        // on verrouille la constante au niveau chaîne (comme les autres invariants de CLICK_FN).
+        let f = CLICK_FN;
+        assert!(
+            f.contains("b.type"),
+            "doit lire la propriété IDL `type` : {f}"
+        );
+        assert!(
+            !f.contains("getAttribute"),
+            "ne doit PLUS lire l'attribut brut getAttribute (contournable par type invalide) : {f}"
+        );
+        assert!(
+            f.contains("'reset'") && f.contains("'button'"),
+            "deny-list <button> (submitter sauf reset/button explicites) : {f}"
+        );
+        assert!(
+            f.contains("LABEL") && f.contains("this.control"),
+            "doit couvrir le <label> et son contrôle associé : {f}"
         );
     }
 
