@@ -283,30 +283,88 @@ jobs:
       contents: read
       packages: read # pull the arch image from ghcr.io
     steps:
+      # The amd64 image (NVIDIA/CUDA layer) is ~12 GB; syft additionally
+      # unpacks layers into its cache while scanning. On a default runner the
+      # scan was dying mid-run with no CVE data on recent builds — same failure
+      # the `iso` job below prevents with this exact reclaim. Do it here too,
+      # BEFORE anything pulls the image.
+      - name: Free disk space
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost
+          df -h /
+
       - name: Log in to ghcr.io (docker, for SBOM/scan pulls)
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login "${REGISTRY}" -u "${{ github.actor }}" --password-stdin
 
       # SPDX SBOM of the amd64 image (a concrete single-arch ref; the manifest
-      # list is not directly scannable). Auto-uploaded as a build artifact.
+      # list is not directly scannable). syft is PINNED (a floating "latest"
+      # made past breakages undiagnosable) and single-threaded: parallel layer
+      # workers multiply peak scratch usage, and disk pressure is the prime
+      # suspect for the mid-run deaths. Auto-uploaded as a build artifact.
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        env:
+          SYFT_PARALLELISM: "1"
         with:
           image: ${{ needs.setup.outputs.image }}:${{ github.sha }}-amd64
           format: spdx-json
           output-file: vibeos-amd64.spdx.json
           artifact-name: vibeos-sbom-amd64.spdx.json
+          syft-version: v1.19.0
 
-      # Advisory CVE scan: report CRITICAL/HIGH, never fail the build (exit 0).
-      - name: Trivy vulnerability scan (advisory)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      # Advisory CVE scan on the SBOM JUST PRODUCED — not on the image: a
+      # second ~12 GB pull is exactly the disk pressure this job died of.
+      # Table for humans in the log, JSON as an artifact, per-severity totals
+      # in the step summary. ADVISORY by contract (see job header): failures
+      # here must never mask the SBOM artifact, hence continue-on-error.
+      - name: Grype CVE scan (advisory, on the SBOM)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.87.0
+          grype sbom:vibeos-amd64.spdx.json --add-cpes-if-none -o table | tee grype-table.txt
+          grype sbom:vibeos-amd64.spdx.json --add-cpes-if-none -o json > grype-report.json
+          {
+            echo "## CVE scan (advisory, grype v0.87.0 on the SPDX SBOM)"
+            python3 - <<'PY'
+          import json
+          from collections import Counter
+          sev = Counter(
+              (m.get("vulnerability", {}).get("severity") or "Unknown")
+              for m in json.load(open("grype-report.json")).get("matches", [])
+          )
+          total = sum(sev.values())
+          print(f"- total matches: **{total}**")
+          for name in ("Critical", "High", "Medium", "Low", "Negligible", "Unknown"):
+              if sev.get(name):
+                  print(f"- {name}: {sev[name]}")
+          crit = sev.get("Critical", 0)
+          print(f"- zero unjustified Critical target: {'✅ met' if crit == 0 else f'❌ {crit} Critical to review'}")
+          PY
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CVE report (even on scan failure)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          image-ref: ${{ needs.setup.outputs.image }}:${{ github.sha }}-amd64
-          format: table
-          severity: CRITICAL,HIGH
-          exit-code: "0"
-          ignore-unfixed: true
+          name: vibeos-cve-report-amd64
+          path: |
+            grype-table.txt
+            grype-report.json
+          if-no-files-found: ignore
+
+      # Follow-up (not yet delivered, kept honest): an OpenSCAP baseline
+      # profile of the image. Running oscap against a bootc image from an
+      # Ubuntu runner needs a containerized scanner + the image filesystem
+      # exported — a separate increment, not silently dropped.
 
   iso:
     name: Build install ISO (${{ matrix.arch }})

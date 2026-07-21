@@ -527,6 +527,24 @@ fi
 # Cosmetic finale, guarded so it can never abort Genesis (see birth_ceremony).
 birth_ceremony || true
 
+# --- 5.7 Birth interview — best-effort, guarded --------------------------------
+# The interview (genesis-interview.sh) asks the human its first questions and
+# appends the answers to user/updates.jsonl (append-only, docs/MEMORY.md §3.3).
+# It runs AFTER the awakening (the citizen introduces itself first) and BEFORE
+# the sentinel, and it can NEVER fail Genesis: a missing script is a silent
+# skip, a failing one is logged and ignored. The interview carries its own
+# guards — it is a no-op without VIBEOS_INTERVIEW=1 plus a way to answer (TTY
+# or injected VIBEOS_INTERVIEW_* answers), so an unattended boot never blocks;
+# and it is idempotent on the crash-replay path, keying on its own source tag
+# in updates.jsonl (an append-only file cannot be "overwritten back" like the
+# other steps).
+INTERVIEW_SCRIPT="$(dirname -- "$0")/genesis-interview.sh"
+[ -f "${INTERVIEW_SCRIPT}" ] || INTERVIEW_SCRIPT="/usr/libexec/vibeos/genesis-interview.sh"
+if [ -f "${INTERVIEW_SCRIPT}" ]; then
+    VIBEOS_MEMORY_DIR="${MEMORY_DIR}" bash "${INTERVIEW_SCRIPT}" \
+        || log "birth interview failed (exit $?) — Genesis continues"
+fi
+
 # --- 6. Sentinel — MUST stay the last write ------------------------------------------
 printf '%s\n' "${BIRTH_TS}" > "${MEMORY_DIR}/.initialized"
 log "Genesis complete — memory born at ${BIRTH_TS} (mode=${MEMORY_MODE})"

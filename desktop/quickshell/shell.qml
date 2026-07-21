@@ -79,6 +79,13 @@ ShellRoot {
     // JSON-RPC id of the in-flight look-back. The poll also calls agent.thinking,
     // so the reply is claimed by REQUEST id, never by tool name or session id.
     property int reasoningSelectedReqId: -1
+    // ADR-027 danger panel: the `mode` block of os.status, mapped to the
+    // DangerBanner shape. Derived (not assigned in handleVibedLine) so it
+    // tracks BOTH the payload and the connection: when vibed is unreachable
+    // the HUD cannot know the mode, and the mapper's fail-safe (inactive)
+    // matches the daemon's own (governed on any uncertainty).
+    readonly property var modeBanner:
+        Vibed.modeBanner(root.vibedOnline ? root.osStatus : null)
 
     // Derived global state (DESIGN-SYSTEM §11.4 "État global"):
     //   offline (gray) -> ready -> agents active (mauve) -> approval waiting (peach pulse).
@@ -539,5 +546,14 @@ ShellRoot {
                 }
             }
         }
+    }
+
+    // ---- ADR-027 danger panel: AUTONOMOUS / OPEN mode alarm strip ----------
+    // Visible ONLY while the operator has unlocked open mode (os.status `mode`
+    // block -> Vibed.modeBanner, fail-safe inactive on governed / malformed /
+    // offline). Declared AFTER the bar's PanelWindow so the layer shell maps it
+    // second and its strut lands BELOW the bar, not over it.
+    DangerBanner {
+        banner: root.modeBanner
     }
 }

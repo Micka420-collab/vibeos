@@ -41,7 +41,11 @@
 //    os.status text payload:
 //      { uptime_seconds, loadavg_1_5_15: ["0.42","0.31","0.20"],
 //        mem_total_kb, mem_available_kb,
-//        mounts: [{device,mountpoint,fstype}, ...], note }
+//        mounts: [{device,mountpoint,fstype}, ...],
+//        mode: { mode: "governed"|"open", danger: bool,
+//                // present only while open (mode::status, ADR-027):
+//                expires_unix, remaining_secs, set_by_uid, reason },
+//        note }
 //    memory.query text payload:
 //      { initialized: true, query, scanned_files, matches: [{file}, ...] }
 //      or, before genesis has run:
@@ -278,6 +282,48 @@ function sessionsTruncationNote(data) {
     var shown = (typeof data.count === "number") ? data.count : 0;
     var total = (typeof data.total === "number") ? data.total : shown;
     return shown + " sessions les plus récentes sur " + total;
+}
+
+// Map the `mode` block of an os.status payload (ADR-027) into the DangerBanner
+// shape ({ active, danger, remainingLabel, reason, setByUid }).
+//
+// FAIL-SAFE, mirroring vibed's own mode::effective: the banner is active ONLY
+// when the payload carries mode.mode === "open" verbatim. Governed, an absent
+// or malformed block, a null payload — all read as inactive, because vibed
+// enforces governed in every one of those cases, and a HUD alarm for a mode
+// the daemon is not actually in would be a fabricated fact.
+//
+// The one asymmetry is deliberate: once the daemon HAS said "open", a missing
+// or junk secondary field (remaining_secs, set_by_uid, reason) must not hide
+// the alarm — hiding it is the unsafe direction. The banner stays up and the
+// unknown reads as unknown ("durée restante inconnue", blank uid), never as a
+// plausible invented value.
+function modeBanner(osStatus) {
+    var inactive = {
+        active: false, danger: false,
+        remainingLabel: "", reason: "", setByUid: ""
+    };
+    if (!osStatus || typeof osStatus !== "object") return inactive;
+    var m = osStatus.mode;
+    // Strict string equality: anything that is not exactly "open" is governed
+    // on the daemon side (mode.rs), so it must be inactive here too. A stray
+    // danger flag without the mode string does NOT raise the banner.
+    if (!m || typeof m !== "object" || m.mode !== "open") return inactive;
+    var remaining = (typeof m.remaining_secs === "number"
+                     && isFinite(m.remaining_secs) && m.remaining_secs >= 0)
+        ? m.remaining_secs : null;
+    return {
+        active: true,
+        danger: m.danger === true,
+        remainingLabel: remaining !== null
+            ? (formatDuration(remaining) + " restantes")
+            : "durée restante inconnue",
+        reason: (typeof m.reason === "string") ? m.reason : "",
+        // uid 0 (root) is the common operator — 0 must render, only a missing
+        // or non-numeric uid stays blank.
+        setByUid: (typeof m.set_by_uid === "number" && isFinite(m.set_by_uid))
+            ? ("uid " + m.set_by_uid) : ""
+    };
 }
 
 // Map an agents.list payload ({ agents:[{ uid,pid,name,tier,activity,

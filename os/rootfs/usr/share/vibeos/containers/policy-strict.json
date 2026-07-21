@@ -1,0 +1,32 @@
+{
+  "default": [
+    {
+      "type": "insecureAcceptAnything"
+    }
+  ],
+  "transports": {
+    "docker": {
+      "ghcr.io/micka420-collab/vibeos": [
+        {
+          "type": "sigstoreSigned",
+          "fulcio": {
+            "caPath": "/etc/pki/containers/fulcio_v1.crt.pem",
+            "oidcIssuer": "https://token.actions.githubusercontent.com",
+            "subjectEmail": "https://github.com/Micka420-collab/vibeos/.github/workflows/build-os.yml@refs/heads/main"
+          },
+          "rekorPublicKeyPath": "/etc/pki/containers/rekor.pub",
+          "signedIdentity": {
+            "type": "matchRepository"
+          }
+        }
+      ]
+    },
+    "docker-daemon": {
+      "": [
+        {
+          "type": "insecureAcceptAnything"
+        }
+      ]
+    }
+  }
+}
