@@ -17,6 +17,42 @@
 
 > ℹ️ Dies ist eine Übersetzung der Haupt-README. VibeOS ist ein französischsprachiges Projekt: Die ausführlichen Dokumente unter `docs/` werden auf Französisch gepflegt (der kanonischen Sprache des Projekts). Diese Seite verlinkt direkt darauf.
 
+## 👋 Neu hier? VibeOS in 2 Minuten
+
+**Die Idee in einem Bild.** Stellen Sie sich ein hochgesichertes Gebäude vor. Die künstliche Intelligenz ist darin keine App, die man installiert und die dann tut, was sie will: Sie ist ein **an eine Hausordnung gebundener Bewohner**, mit Rechten und Pflichten — kein Gast, dem man den Schlüsselbund überlässt. Um am System zu handeln (Software installieren, einen Dienst neu starten, die Platte anfassen), muss sie über den **Wächter** des Gebäudes gehen, ein Programm namens `vibed`. Der Wächter prüft die Hausordnung, lässt Erlaubtes durch, **ruft Sie — den Eigentümer — bei allem Riskanten an** und hält jede Handlung in einem **fälschungssicheren Register** fest. Das ist VibeOS in einem Bild: Die KI hat echte Macht, aber eine regierte.
+
+**Was es ist.** VibeOS ist ein Linux-Betriebssystem (wie Ubuntu oder Fedora), gebaut fürs *Programmieren im Dialog mit KI-Agenten* — Code-Assistenten wie Claude Code, die für Sie Code schreiben und ausführen. Das ist *Vibecoding*.
+
+**Wie es sich von einem gewöhnlichen Linux unterscheidet.** Zweierlei. Es ist **unveränderlich**: Man bastelt nicht am laufenden Kern herum, man tauscht das ganze Image in einem Block aus — und wenn ein Update etwas kaputt macht, kehrt man mit einem Handgriff zum vorigen Zustand zurück. Und die KI ist keine obendrauf gesetzte Anwendung: Sie ist ins Fundament verdrahtet, von Anfang an durch Regeln eingefasst.
+
+**Für wen, und wo es steht.** Heute vor allem für Neugierige und für Mitwirkende, die das Projekt verstehen oder voranbringen wollen. Es ist **noch kein** OS, das jeder installieren kann: Das Projekt ist **Pre-Alpha**, und bis heute **wurde kein Image auf echter Hardware gebootet** — alles, was dieses Repository behauptet, ist durch automatische Tests belegt, nicht durch einen Bildschirm, den jemand gesehen hätte. Der ehrliche Stand (erledigt / in Arbeit / offen) steht in **[STATUS.md](STATUS.md)**.
+
+**Wie es funktioniert, in 4 Schritten:**
+
+1. **Die Maschine wird leer geboren.** Das Image ist für alle gleich und enthält keine persönlichen Daten. Beim allerersten Start erzeugt eine Sequenz namens *Genesis* den Speicher der Maschine, der allein Ihnen gehört. *(Die Verschlüsselung dieses Speichers ist für eine spätere Phase geplant — vorerst wird er im Klartext erzeugt, und das Projekt sagt es offen.)*
+2. **Die KI fragt den Wächter.** Ein Agent (Claude Code, ein lokales Modell über ollama…) richtet seine System-Aktionswünsche an den Wächter `vibed`, statt als root zu tun, was er will.
+3. **Eine Regel entscheidet; Sie geben das Riskante frei.** Der Wächter stuft jede Aktion von **T0** (beobachten, ohne Risiko) bis **T3** (destruktiv) ein. Das Harmlose läuft allein durch; **das System zu ändern oder die Platte anzufassen erfordert Ihre ausdrückliche Freigabe**. Im Zweifel, oder wenn keine Regel passt, wird alles **standardmäßig verweigert**.
+4. **Alles wird protokolliert.** Jeder Aufruf wird in ein *Append-only*-Log geschrieben (man fügt hinzu, schreibt nie um) und kryptografisch verkettet: Man kann stets beantworten, „wer was wann und mit wessen Autorisierung getan hat".
+
+**Mini-Glossar** (die Wörter, die weiter unten überall wiederkehren):
+
+| Wort | Im Klartext |
+|---|---|
+| **unveränderlich** | der Systemkern ist nur lesbar; ein fehlgeschlagenes Update wird durch Zurückrollen um einen Block behoben, ohne Narbe |
+| **Vibecoding** | programmieren, indem man einer KI beschreibt, was man will, und sie den Code schreibt |
+| **KI-Agent** | ein Assistent, der nicht nur redet: Er liest Dateien, führt Befehle aus (z. B. Claude Code) |
+| **`vibed`** | der „Wächter": das Systemprogramm, über das jede privilegierte Agentenaktion läuft |
+| **MCP** | die Standardsprache, in der Agenten mit `vibed` reden (eine einzige, kontrollierte Eingangstür) |
+| **Policy / T0→T3** | die „Hausordnung", die jede Aktion nach Risikostufe einstuft und entscheidet, wer sie ausführen darf |
+| **Audit-Log** | das „fälschungssichere Register", das jede Handlung nachverfolgbar festhält |
+| **Genesis** | die Sequenz, die den Speicher der Maschine beim allerersten Start erzeugt |
+
+> Lieber das *Warum* als das *Wie*? Lesen Sie das Manifest **[VISION.md](VISION.md)**. Für die geschichtete Architektur und die Diagramme siehe **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+>
+> Der Rest dieser README ist die **technische Fassung** dessen, was Sie gerade gelesen haben — dichter, aber dieselbe Geschichte.
+
+---
+
 VibeOS ist eine **KI-native, unveränderliche, von Grund auf sichere** Linux-Distribution für das *Vibecoding*. Abgeleitet von Fedora Kinoite (KDE Plasma 6) und als Image mit bootc/OSTree gebaut, stellt sie die Systemsteuerung KI-Agenten über einen strikten Vertrag zur Verfügung – einen Systemdaemon (`vibed`), einen MCP-Server, eine Policy-Engine und ein Audit-Log – statt rohen Shell-Zugriff. Das Betriebssystem wird **leer** ausgeliefert: Sein Speicher wird beim ersten Start durch eine *Genesis*-Sequenz erzeugt und gehört seinem Benutzer, und niemandem sonst (die LUKS-Verschlüsselung dieses Speichers kommt in **Phase 3** – siehe [ROADMAP.md](ROADMAP.md)). Ein mehrjähriges Projekt: Das v0.1-Fundament steht – signiertes Multi-Arch-Image, zwei ISOs, `vibed`-Daemon beim Start aktiv, Vibecoding-Desktop ausgeliefert.
 
 > 📊 **Wo steht das Projekt?** Der lebende Status (erledigt / in Arbeit / offen) steht in **[STATUS.md](STATUS.md)**.

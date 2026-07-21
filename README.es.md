@@ -17,6 +17,42 @@
 
 > ℹ️ Esta es una traducción del README principal. VibeOS es un proyecto francófono: los documentos detallados en `docs/` se mantienen en francés (la lengua canónica del proyecto). Esta página enlaza directamente con ellos.
 
+## 👋 ¿Nuevo por aquí? VibeOS en 2 minutos
+
+**La idea en una imagen.** Imagina un edificio muy seguro. La inteligencia artificial no es ahí una app que instalas y que luego hace lo que quiere: es un **residente sujeto a un reglamento**, con derechos y deberes — no un invitado al que se le da el llavero. Para actuar sobre el sistema (instalar un programa, reiniciar un servicio, tocar el disco), debe pasar por el **guardián** del edificio, un programa llamado `vibed`. El guardián consulta el reglamento, deja pasar lo autorizado, **te llama a ti — el propietario — para todo lo arriesgado**, y anota cada gesto en un **registro inviolable**. Eso es todo VibeOS en una imagen: la IA tiene poderes reales, pero gobernados.
+
+**Qué es.** VibeOS es un sistema operativo Linux (como Ubuntu o Fedora) pensado para *programar dialogando con agentes de IA* — asistentes de código como Claude Code, que escriben y ejecutan código por ti. Eso es el *vibecoding*.
+
+**En qué se diferencia de un Linux normal.** Dos cosas. Es **inmutable**: no se trastea el núcleo del sistema mientras funciona, se reemplaza la imagen entera de un bloque — y si una actualización rompe algo, se vuelve al estado anterior de un gesto. Y la IA no es una aplicación puesta encima: está cableada en los cimientos, encuadrada por reglas desde el principio.
+
+**Para quién, y en qué punto está.** Hoy, sobre todo para los curiosos y para quienes contribuyen y quieren entender el proyecto o hacerlo avanzar. **Todavía no** es un SO listo para instalar por todos: el proyecto está en **pre-alpha**, y hasta la fecha **ninguna imagen se ha arrancado en hardware real** — todo lo que este repositorio afirma está probado por pruebas automáticas, no por una pantalla que alguien haya visto. El estado honesto (hecho / en curso / por hacer) vive en **[STATUS.md](STATUS.md)**.
+
+**Cómo funciona, en 4 tiempos:**
+
+1. **La máquina nace en blanco.** La imagen es la misma para todos y no contiene ningún dato personal. En el primer arranque, una secuencia llamada *Genesis* crea la memoria de la máquina, que solo te pertenece a ti. *(El cifrado de esa memoria está previsto para una fase posterior — de momento se crea en texto claro, y el proyecto lo dice sin rodeos.)*
+2. **La IA le pide al guardián.** Un agente (Claude Code, un modelo local vía ollama…) dirige sus peticiones de acción de sistema al guardián `vibed`, en lugar de hacer lo que quiera como root.
+3. **Una regla decide; tú validas lo arriesgado.** El guardián clasifica cada acción de **T0** (observar, sin riesgo) a **T3** (destructivo). Lo inofensivo pasa solo; **modificar el sistema o tocar el disco exige tu aprobación explícita**. En caso de duda, o si ninguna regla coincide, todo se **deniega por defecto**.
+4. **Todo queda trazado.** Cada llamada se escribe en un registro *append-only* (se añade, nunca se reescribe) y encadenado criptográficamente: siempre se puede responder a «quién hizo qué, cuándo y con qué autorización».
+
+**Mini-glosario** (las palabras que reaparecen por todas partes más abajo):
+
+| Palabra | En claro |
+|---|---|
+| **inmutable** | el núcleo del sistema es de solo lectura; una actualización fallida se repara volviendo atrás un bloque, sin cicatriz |
+| **vibecoding** | programar describiendo lo que quieres a una IA que escribe el código |
+| **agente de IA** | un asistente que no solo habla: lee archivos, ejecuta comandos (p. ej. Claude Code) |
+| **`vibed`** | el «guardián»: el programa de sistema por el que pasa toda acción privilegiada de un agente |
+| **MCP** | el lenguaje estándar con el que los agentes hablan con `vibed` (una única puerta de entrada controlada) |
+| **política / T0→T3** | el «reglamento» que clasifica cada acción por nivel de riesgo y decide quién puede ejecutarla |
+| **registro de auditoría** | el «registro inviolable» que guarda la traza de cada gesto |
+| **Genesis** | la secuencia que crea la memoria de la máquina en el primer arranque |
+
+> ¿Quieres el *porqué* más que el *cómo*? Lee el manifiesto **[VISION.md](VISION.md)**. Para la arquitectura por capas y los diagramas, véase **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+>
+> El resto de este README es la **versión técnica** de lo que acabas de leer — más densa, pero cuenta exactamente la misma historia.
+
+---
+
 VibeOS es una distribución de Linux **nativa para IA, inmutable y segura por diseño**, dedicada al *vibecoding*. Derivada de Fedora Kinoite (KDE Plasma 6) y construida como imagen con bootc/OSTree, expone el control del sistema a los agentes de IA a través de un contrato estricto —un demonio del sistema (`vibed`), un servidor MCP, un motor de políticas y un registro de auditoría— en lugar de acceso directo a la shell. El sistema operativo se entrega **en blanco**: su memoria se crea en el primer arranque mediante una secuencia *Genesis* y pertenece a su usuario, y a nadie más (el cifrado LUKS de esa memoria llega en la **Fase 3** — véase [ROADMAP.md](ROADMAP.md)). Proyecto plurianual: la base v0.1 está sentada —imagen multiarquitectura firmada, dos ISO, demonio `vibed` activo en el arranque, escritorio de vibecoding entregado.
 
 > 📊 **¿En qué punto está el proyecto?** El estado vivo (hecho / en curso / por hacer) está en **[STATUS.md](STATUS.md)**.
