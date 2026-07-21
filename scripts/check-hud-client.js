@@ -69,7 +69,7 @@ const EXPORTS = [
   "sessionsToHistory", "sessionsTruncationNote",
   "formatStamp", "formatDuration", "formatBytes", "reasoningToLive",
   "toolsCallRequestId", "toolsCallRequest", "parseToolResult", "parseLine",
-  "agentsListToRoster",
+  "agentsListToRoster", "modeBanner",
 ];
 
 // The library warns on a corrupt socket line — legitimate behaviour that one
@@ -242,6 +242,73 @@ for (const bad of [null, undefined, {}, { agents: [] }]) {
   check(`agentsListToRoster(${JSON.stringify(bad) || String(bad)}) does not throw`,
     threw === null, threw);
 }
+
+group("modeBanner: the ADR-027 danger banner must mean what it says");
+// Fixture: a REAL os.status payload with an open-mode block, shaped by vibed's
+// mode::status + mcp::os_status (mode.rs pins the same fields in its own
+// tests). Keep in sync with vibed/src/mode.rs `fn status`.
+const OS_STATUS_OPEN = {
+  uptime_seconds: 4242.42,
+  loadavg_1_5_15: ["0.42", "0.31", "0.20"],
+  mem_total_kb: 32768000, mem_available_kb: 16384000,
+  mounts: [{ device: "/dev/nvme0n1p3", mountpoint: "/sysroot", fstype: "btrfs" }],
+  mode: { mode: "open", danger: true, expires_unix: 1783470180,
+          remaining_secs: 1380, set_by_uid: 0, reason: "démo salon" },
+  note: "std-only approximation",
+};
+const on = V.modeBanner(OS_STATUS_OPEN);
+check("open -> active", on.active === true, JSON.stringify(on));
+check("open carries the danger flag", on.danger === true);
+check("remaining 1380s renders as human minutes",
+  on.remainingLabel === "23 min restantes", on.remainingLabel);
+check("the operator's reason travels verbatim", on.reason === "démo salon", on.reason);
+check("uid 0 (root, THE common operator) still renders (0 is not 'unknown')",
+  on.setByUid === "uid 0", on.setByUid);
+
+const governed = V.modeBanner({ mode: { mode: "governed", danger: false } });
+check("governed -> inactive (the banner must vanish, not linger)",
+  governed.active === false, JSON.stringify(governed));
+check("governed leaves every label blank",
+  governed.danger === false && governed.remainingLabel === ""
+    && governed.reason === "" && governed.setByUid === "", JSON.stringify(governed));
+
+// FAIL-SAFE, mirroring vibed's mode::effective: anything that is not exactly
+// mode.mode === "open" reads as governed on the daemon side, so it must read
+// as inactive here — a banner for a mode vibed is not in is a fabricated fact.
+// This includes a stray danger flag WITHOUT the mode string.
+for (const bad of [null, undefined, {}, "plain text",
+                   { mode: null }, { mode: "open" }, { mode: {} },
+                   { mode: { mode: "OPEN" } }, { mode: { mode: "governed", danger: true } },
+                   { mode: { danger: true, remaining_secs: 60 } },
+                   { mode: { mode: ["open"] } }]) {
+  let out = null, threw = null;
+  try { out = V.modeBanner(bad); } catch (e) { threw = e.message; }
+  check(`modeBanner(${JSON.stringify(bad) || String(bad)}) is inactive, never throws`,
+    threw === null && !!out && out.active === false, threw || JSON.stringify(out));
+}
+
+// remainingLabel edges: seconds under a minute, minutes, the hour boundary.
+const remain = (secs) => V.modeBanner({ mode: { mode: "open", danger: true,
+  remaining_secs: secs } }).remainingLabel;
+check("remaining 0s (expiry racing the poll) reads as 0 s, not negative",
+  remain(0) === "0 s restantes", remain(0));
+check("remaining 59s stays in seconds", remain(59) === "59 s restantes", remain(59));
+check("remaining 3600s crosses to hours", remain(3600) === "1 h restantes", remain(3600));
+
+// The deliberate asymmetry: once vibed HAS said "open", junk secondary fields
+// must not HIDE the alarm — hiding it is the unsafe direction. The unknowns
+// read as unknown instead of a plausible invention.
+const junky = V.modeBanner({ mode: { mode: "open", danger: "true",
+  remaining_secs: "1380", set_by_uid: "0", reason: 42 } });
+check("mode 'open' with junk fields still raises the banner", junky.active === true);
+check("junk danger does not read as the danger flag", junky.danger === false);
+check("junk remaining_secs reads unknown, never NaN",
+  junky.remainingLabel === "durée restante inconnue", junky.remainingLabel);
+check("junk set_by_uid stays blank, never invented", junky.setByUid === "");
+check("junk reason stays blank, never invented", junky.reason === "");
+const negRemain = V.modeBanner({ mode: { mode: "open", danger: true, remaining_secs: -5 } });
+check("a negative remaining_secs reads unknown (u64 on the wire — this is corruption)",
+  negRemain.remainingLabel === "durée restante inconnue", negRemain.remainingLabel);
 
 // NOTE — there is deliberately NO `historyKey` group here any more. An earlier
 // version of this file guarded a content-key that shell.qml compared before

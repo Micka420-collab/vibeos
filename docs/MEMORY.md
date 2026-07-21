@@ -331,6 +331,15 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
 7. Pose des `README.md` placeholders dans les cinq sous-répertoires.
 8. Premier événement du journal : `type: "genesis"` (portant le caractère né :
    nom/archétype/seed) dans le fichier du jour.
+8bis. **L'interview de naissance** (opt-in) : `genesis-interview.sh`, appelé
+   best-effort entre l'éveil et la sentinelle. Sans TTY sur stdin et sans
+   `VIBEOS_INTERVIEW=1`, c'est un no-op silencieux — un premier boot sans
+   surveillance n'est **jamais** bloqué. Opt-in : 4 questions (nom d'usage,
+   langue, domaine, style de collaboration) écrites en append-only dans
+   `user/updates.jsonl` (`profile.name`, `profile.lang`, `profile.domain`,
+   `preferences.collaboration`, source `genesis-interview`), échappées JSON
+   (anti-empoisonnement), idempotent (un rejeu ne double-écrit pas). Réponses
+   injectables par `VIBEOS_INTERVIEW_*` (testable en CI sans TTY).
 9. **L'éveil** : un bloc futuriste imprimé sur la console (stderr) révélant le
    citoyen qui vient de naître — purement cosmétique, gardé pour ne jamais
    pouvoir faire échouer Genesis.
@@ -454,12 +463,18 @@ aujourd'hui** : `vibed` n'applique encore aucune logique de rétention.
 humaine obligatoire, et laisse elle-même un événement `purge` dans le journal
 (on n'efface pas le fait d'avoir effacé).
 
-**Oubli total (factory reset)** : en v0.1, suppression du répertoire mémoire
-(dont `.initialized`) ; à partir de la Phase 3, destruction des en-têtes LUKS
-(`cryptsetup erase` + ré-initialisation du volume) — un effacement cryptographique,
-pas une simple suppression. Dans les deux cas la machine redevient vierge : au boot
-suivant, Genesis rejoue et une nouvelle `birth` est écrite. L'OS immuable est
-inchangé.
+**Oubli total (factory reset)** : ✅ livré — `vibectl memory reset --yes`
+(root-only ; sans `--yes`, la commande **refuse** et liste ce qui serait
+détruit). Elle supprime `.initialized`, les fichiers de naissance
+(`identity.toml`, `hardware.json`, `personality.toml`) et le **contenu** des
+sous-répertoires (`user/`, `projects/`, `journal/`, `knowledge/`,
+`reasoning/`) — sans toucher la racine ni les sous-répertoires (point de
+montage préservé, layout prêt pour le rejeu), ni les fichiers inconnus (elle ne
+détruit que ce qu'elle connaît). À partir de la Phase 3, s'y ajoutera la
+destruction des en-têtes LUKS (`cryptsetup erase` + ré-initialisation du
+volume) — un effacement cryptographique, pas une simple suppression. Dans les
+deux cas la machine redevient vierge : au boot suivant, Genesis rejoue et une
+nouvelle `birth` est écrite. L'OS immuable est inchangé.
 
 ---
 

@@ -1,0 +1,64 @@
+# vibeos.yaml — read sigstore (cosign) signatures for the VibeOS image.
+#
+# WHY THIS FILE EXISTS
+#
+# Release images at ghcr.io/micka420-collab/vibeos are signed by CI with cosign
+# KEYLESS (.github/workflows/build-os.yml, step "Sign manifest (cosign
+# keyless)"): the signature is pushed to the registry as a sigstore ATTACHMENT
+# (a `sha256-<digest>.sig` tag next to the image). c/image tooling (podman,
+# skopeo, bootc) only LOOKS for such attachments when the registry namespace
+# opts in here — without this file, a sigstoreSigned requirement could never
+# find any signature, and would reject even a correctly signed image for the
+# wrong reason.
+#
+# WHAT /usr/share/vibeos/containers/policy-strict.json (STAGED, JSON = no
+# comments) WOULD ENFORCE ONCE ACTIVATED
+#
+# The strict policy ships STAGED — deliberately NOT copied over
+# /etc/containers/policy.json, so the containers-common default stays active.
+# Reason: the second HONEST LIMIT below — activated today, the requirement
+# would fail-close the GENUINE image's own `bootc upgrade` path. Activation is
+# machine-gated (validate acceptance on a deployed box first):
+#
+#     cp /usr/share/vibeos/containers/policy-strict.json \
+#        /etc/containers/policy.json
+#
+# (and update scripts/check-containers-policy.py, whose check 0 pins the
+# staged-not-active state on purpose). Content of the staged policy:
+#
+#   * `default` stays `insecureAcceptAnything` — identical to the Fedora
+#     containers-common default (its `docker-daemon` entry is preserved too),
+#     so activating it leaves user podman/distrobox workflows unchanged.
+#   * The repo ghcr.io/micka420-collab/vibeos alone requires `sigstoreSigned`
+#     KEYLESS: a Fulcio-issued certificate (root CA pinned at
+#     /etc/pki/containers/fulcio_v1.crt.pem, sha256
+#     f989aa23def87c549404eadba767768d2a3c8d6d30a8b793f9f518a8eafd2cf5) from the
+#     GitHub Actions OIDC issuer, with inclusion proof against the public Rekor
+#     log (key pinned at /etc/pki/containers/rekor.pub, sha256
+#     dce5ef715502ec9f3cdfd11f8cc384b31a6141023d3e7595e9908a81cb6241bd). Both
+#     anchors are the exact upstream bytes from sigstore/root-signing (targets/
+#     fulcio_v1.crt.pem, targets/rekor.pub); scripts/check-containers-policy.py
+#     re-checks those digests in CI.
+#   * `signedIdentity: matchRepository` because cosign payloads carry the repo
+#     without a tag; the CI signs the multi-arch manifest digest that all tags
+#     (latest, <sha>, <version>) point to.
+#
+# HONEST LIMITS (verified against containers/image signature/fulcio_cert.go,
+# 2026-07-21 — do not restate these as solved without re-checking):
+#
+#   * `subjectEmail` is an EXACT match. Tag releases (refs/tags/v*) sign with
+#     that ref in the certificate identity, while this policy pins
+#     `@refs/heads/main` (the confirmed-dispatch release identity); one string
+#     cannot cover both. Any mismatch REJECTS — never accepts.
+#   * Today's c/image matches the identity against an E-MAIL SAN only; GitHub
+#     Actions keyless certificates carry a URI SAN. Until c/image can match URI
+#     identities, even the GENUINE release image is rejected by this
+#     requirement — WHICH IS WHY IT SHIPS STAGED, not active. The guaranteed
+#     property — an unsigned or wrongly-signed image is rejected (proven
+#     mechanically in CI by scripts/check-containers-policy.py) — holds on the
+#     staged file; end-to-end ACCEPTANCE of a genuine release at `bootc
+#     upgrade` on a deployed machine remains machine-gated and must be
+#     validated before activation.
+docker:
+  ghcr.io/micka420-collab:
+    use-sigstore-attachments: true

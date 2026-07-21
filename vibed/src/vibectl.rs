@@ -3,12 +3,13 @@
 //! `src/bin/vibectl.rs`.
 //!
 //! v0.1 perimeter: read-only memory status and audit-chain verification, the
-//! operator side of the approval flow (`approve`/`deny`, root-gated), and the
+//! operator side of the approval flow (`approve`/`deny`, root-gated), the
 //! **agent supervisor** (`agent run`/`stop`/`thinking`) that runs a CLI in
-//! structured mode and taps its reasoning stream (ADR-012/013). Truly
-//! destructive actions (factory reset = T3) are deliberately NOT here yet — they
-//! require the full human-approval flow (Phase 4) and must never be a bare CLI
-//! switch.
+//! structured mode and taps its reasoning stream (ADR-012/013), and the
+//! **memory factory reset** (`memory reset`, root + `--yes`). The reset is not
+//! a bare CLI switch: like `mode open`, it is an out-of-band HUMAN action —
+//! root-gated, confirmation-guarded, never exposed as an MCP tool — so the
+//! destructive decision stays with the operator, on the operator's channel.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
@@ -103,18 +104,19 @@ pub fn render_for_operator(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
-/// Only the operator (root) may grant or deny approvals. The approval store is
-/// already root-only at the filesystem level; this makes the trust boundary
-/// explicit and turns a would-be opaque "permission denied" into a clear
-/// message. Fail-closed: if the euid cannot be determined, refuse.
+/// Root gate for operator actions (`approve`/`deny`, `mode open`/`governed`,
+/// `memory reset`). The underlying stores are already root-only at the
+/// filesystem level; this makes the trust boundary explicit and turns a
+/// would-be opaque "permission denied" into a clear message. Fail-closed: if
+/// the euid cannot be determined, refuse.
 fn require_root(euid: Option<u32>) -> Result<(), Value> {
     match euid {
         Some(0) => Ok(()),
         Some(uid) => Err(json!({
-            "error": format!("must be root to approve/deny approvals (euid={uid}); use sudo")
+            "error": format!("must be root for this operator action (euid={uid}); use sudo")
         })),
         None => Err(json!({
-            "error": "cannot determine caller euid (/proc unavailable); refusing to approve/deny"
+            "error": "cannot determine caller euid (/proc unavailable); refusing operator action"
         })),
     }
 }
@@ -378,6 +380,155 @@ pub fn memory_projects_at(root: &Path) -> Value {
         }
         json!({ "projects": by_path.into_values().collect::<Vec<_>>() })
     })
+}
+
+// ---------------------------------------------------------------------------
+// `vibectl memory reset` — factory reset of the memory store.
+//
+// Like `mode open`, this is an OUT-OF-BAND HUMAN action: a root-only vibectl
+// command on the operator's own channel, never an MCP tool an agent could
+// reach. It deliberately does NOT write the vibed audit trail — that trail
+// records the agent's mediated actions, and this is the operator acting
+// directly, exactly like `mode open`/`mode governed`.
+// ---------------------------------------------------------------------------
+
+/// Genesis re-run marker at the store root: while it exists, the Genesis unit
+/// stays disarmed (`ConditionPathExists=!`); removing it re-arms Genesis for
+/// the next boot.
+const MEMORY_INIT_MARKER: &str = ".initialized";
+
+/// Birth files written once by Genesis (identity, hardware survey, drawn
+/// personality — ADR-029). Removed on reset so the Genesis replay re-creates
+/// them from scratch.
+const MEMORY_BIRTH_FILES: [&str; 3] = ["identity.toml", "hardware.json", "personality.toml"];
+
+/// Store subdirectories whose CONTENT is purged on reset. The directories
+/// themselves — and the store root, which may be a mount point — are kept, so
+/// the on-disk layout stays exactly what the Genesis replay expects.
+const MEMORY_SUBDIRS: [&str; 5] = ["user", "projects", "journal", "knowledge", "reasoning"];
+
+/// Remove one known file, best-effort: already absent is fine (the reset is
+/// idempotent); any other failure is collected and the purge continues.
+fn reset_remove_file(path: &Path, removed: &mut u64, errors: &mut Vec<String>) {
+    match std::fs::remove_file(path) {
+        Ok(()) => *removed += 1,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => errors.push(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Purge every entry INSIDE `dir` without removing `dir` itself. Best-effort:
+/// an absent subdirectory is fine (Genesis recreates the layout), and per-entry
+/// failures (e.g. EACCES) are collected while the purge continues. Each direct
+/// entry counts once, whether it is a file or a whole subtree.
+fn reset_purge_dir(dir: &Path, removed: &mut u64, errors: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            errors.push(format!("{}: {e}", dir.display()));
+            return;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // `file_type()` does not follow symlinks, so a symlinked entry is
+        // removed as a link — the purge never reaches outside the store.
+        let outcome = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match outcome {
+            Ok(()) => *removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => errors.push(format!("{}: {e}", path.display())),
+        }
+    }
+}
+
+/// `vibectl memory reset --yes` core: purge the memory store rooted at `root`
+/// and re-arm Genesis. Without `confirmed`, refuses with an explicit listing
+/// of what WOULD be destroyed (the CLI maps this to the `--yes` flag).
+///
+/// What it destroys is a CLOSED LIST — the init marker, the Genesis birth
+/// files, and the content of the known subdirectories. Anything ELSE at the
+/// store root (an operator's stray backup, `lost+found` on a dedicated
+/// filesystem, a file a newer schema added before this list learned about it)
+/// is deliberately left alone: a factory reset must never eat data this code
+/// did not write — least surprise beats completeness when mistakes are
+/// unrecoverable. The root and the subdirectories themselves are also kept
+/// (the root may be a mount point), so the layout is ready for the Genesis
+/// replay at next boot.
+///
+/// Best-effort: already-absent paths are fine (idempotent) and per-path
+/// failures land in `errors` while the purge continues. HONESTY: this is a
+/// file-level purge — the bytes remain recoverable on the underlying device
+/// until cryptographic erasure ships with LUKS (Phase 3).
+pub fn memory_reset_at(root: &Path, confirmed: bool) -> Result<Value, Value> {
+    if !confirmed {
+        return Err(json!({
+            "error": "memory reset is destructive and needs explicit confirmation: \
+                      re-run with --yes",
+            "would_remove": {
+                "root": root.to_string_lossy(),
+                "files": std::iter::once(MEMORY_INIT_MARKER)
+                    .chain(MEMORY_BIRTH_FILES)
+                    .collect::<Vec<_>>(),
+                "content_of": MEMORY_SUBDIRS,
+            },
+            "kept": "the store root and the subdirectories themselves \
+                     (mount point / layout preserved), plus anything not listed above",
+            "then": "Genesis re-runs at next boot and re-creates a fresh identity",
+        }));
+    }
+
+    let mut removed_files: u64 = 0;
+    let mut removed_entries: u64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    // The marker first: even if a later step fails, Genesis is already re-armed.
+    reset_remove_file(
+        &root.join(MEMORY_INIT_MARKER),
+        &mut removed_files,
+        &mut errors,
+    );
+    for name in MEMORY_BIRTH_FILES {
+        reset_remove_file(&root.join(name), &mut removed_files, &mut errors);
+    }
+    for sub in MEMORY_SUBDIRS {
+        reset_purge_dir(&root.join(sub), &mut removed_entries, &mut errors);
+    }
+
+    // "Re-armed" is measured, not assumed: Genesis runs at next boot iff the
+    // marker is actually gone (also true for a store that never existed).
+    let rearmed = !root.join(MEMORY_INIT_MARKER).exists();
+    Ok(json!({
+        "removed_files": removed_files,
+        "removed_entries": removed_entries,
+        "errors": errors,
+        "rearmed": rearmed,
+        "note": "file-level purge only: bytes remain on the device until cryptographic \
+                 erasure ships with LUKS (Phase 3)",
+    }))
+}
+
+/// `vibectl memory reset [--yes]` — production wrapper: root only (the same
+/// gate as `mode open`), default store root. `ok` is true only for a clean
+/// purge — any collected error flips the exit code so a partial reset is
+/// impossible to miss.
+pub fn memory_reset(confirmed: bool) -> (Value, bool) {
+    if let Err(e) = require_root(current_euid()) {
+        return (e, false);
+    }
+    match memory_reset_at(Path::new(mcp::MEMORY_DIR), confirmed) {
+        Ok(report) => {
+            let clean = report["errors"].as_array().map_or(true, |a| a.is_empty());
+            (report, clean)
+        }
+        Err(refusal) => (refusal, false),
+    }
 }
 
 /// `vibectl audit verify [dir]` — verify the tamper-evident audit chain across
@@ -893,6 +1044,133 @@ mod tests {
         assert_eq!(projs[0]["path"], "/home/dev/a", "sorted by path");
         assert_eq!(projs[1]["path"], "/home/dev/b");
         assert_eq!(projs[1]["name"], "b-new", "last write wins per path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // --- memory reset -------------------------------------------------------
+
+    /// A fully populated store: init marker, the three birth files, one file in
+    /// every known subdirectory, plus one NESTED directory (the purge must take
+    /// whole subtrees, not only flat files).
+    fn populated_store(tag: &str) -> std::path::PathBuf {
+        let root = scratch(tag);
+        for sub in ["user", "projects", "journal", "knowledge", "reasoning"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(root.join(".initialized"), "").unwrap();
+        std::fs::write(root.join("identity.toml"), "schema = 1\n").unwrap();
+        std::fs::write(root.join("hardware.json"), "{}").unwrap();
+        std::fs::write(root.join("personality.toml"), "schema = 1\n").unwrap();
+        std::fs::write(root.join("user").join("updates.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("projects").join("updates.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("journal").join("2026-07-21.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("knowledge").join("facts.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("reasoning").join("sess.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(root.join("knowledge").join("topics")).unwrap();
+        std::fs::write(root.join("knowledge").join("topics").join("x.md"), "x").unwrap();
+        root
+    }
+
+    #[test]
+    fn memory_reset_refuses_without_confirmation() {
+        let root = populated_store("reset-noyes");
+        let err = memory_reset_at(&root, false).unwrap_err();
+        let msg = err["error"].as_str().unwrap();
+        assert!(msg.contains("--yes"), "refusal must point at --yes: {msg}");
+        // The refusal says WHAT would be destroyed, so --yes is informed consent.
+        let files = err["would_remove"]["files"].as_array().unwrap();
+        assert!(files.iter().any(|f| f == "identity.toml"));
+        // And nothing was touched.
+        assert!(root.join(".initialized").exists());
+        assert!(root.join("identity.toml").exists());
+        assert!(root.join("user").join("updates.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_reset_purges_and_keeps_the_layout() {
+        let root = populated_store("reset-purge");
+        let report = memory_reset_at(&root, true).unwrap();
+        assert_eq!(
+            report["errors"].as_array().unwrap().len(),
+            0,
+            "clean purge: {report}"
+        );
+        assert_eq!(report["rearmed"], true);
+        assert_eq!(report["removed_files"], 4, "marker + 3 birth files");
+        assert_eq!(
+            report["removed_entries"], 6,
+            "5 subdir files + 1 nested directory"
+        );
+        for f in [
+            ".initialized",
+            "identity.toml",
+            "hardware.json",
+            "personality.toml",
+        ] {
+            assert!(!root.join(f).exists(), "{f} must be gone");
+        }
+        // Root and subdirectories survive, EMPTY: the mount point is intact and
+        // the layout is exactly what the Genesis replay expects.
+        assert!(root.is_dir(), "store root must survive");
+        for sub in ["user", "projects", "journal", "knowledge", "reasoning"] {
+            let dir = root.join(sub);
+            assert!(dir.is_dir(), "{sub}/ must survive the reset");
+            assert_eq!(
+                std::fs::read_dir(&dir).unwrap().count(),
+                0,
+                "{sub}/ must be empty"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_reset_is_idempotent() {
+        let root = populated_store("reset-idem");
+        memory_reset_at(&root, true).unwrap();
+        // Second run: nothing left to remove, and that is NOT an error.
+        let second = memory_reset_at(&root, true).unwrap();
+        assert_eq!(second["removed_files"], 0);
+        assert_eq!(second["removed_entries"], 0);
+        assert_eq!(second["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(second["rearmed"], true, "still re-armed");
+        // A store that never existed (unmounted amnesic tmpfs): same contract.
+        let absent = scratch("reset-absent");
+        let v = memory_reset_at(&absent, true).unwrap();
+        assert_eq!(v["removed_files"], 0);
+        assert_eq!(v["removed_entries"], 0);
+        assert_eq!(v["errors"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CONTRACT (least surprise): the reset destroys ONLY what it knows — the
+    /// init marker, the birth files, and the content of the known
+    /// subdirectories. An unexpected entry at the store root (an operator's
+    /// stray backup, `lost+found` on a dedicated filesystem, a file from a
+    /// newer schema) is preserved: a factory reset must never eat data this
+    /// code did not write, because until LUKS-level erasure exists (Phase 3)
+    /// its mistakes are unrecoverable.
+    #[test]
+    fn memory_reset_leaves_unknown_root_entries_alone() {
+        let root = populated_store("reset-stray");
+        std::fs::write(root.join("operator-backup.tar"), "precious").unwrap();
+        std::fs::create_dir_all(root.join("lost+found")).unwrap();
+        std::fs::write(root.join("lost+found").join("blob"), "x").unwrap();
+        let report = memory_reset_at(&root, true).unwrap();
+        assert_eq!(report["errors"].as_array().unwrap().len(), 0);
+        assert!(
+            root.join("operator-backup.tar").exists(),
+            "unknown root file preserved"
+        );
+        assert!(
+            root.join("lost+found").join("blob").exists(),
+            "unknown root directory preserved, content included"
+        );
+        assert!(
+            !root.join("identity.toml").exists(),
+            "known files are still purged"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

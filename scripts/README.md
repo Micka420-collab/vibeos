@@ -46,6 +46,7 @@ silence. Un check qui devient aveugle et répond vert est le pire des deux monde
 | `check-saas-sync.py` | `saas-tools.txt` ≠ couche 1d-ter du Containerfile | même dérive que la trousse cybersécu, prévenue en amont |
 | `check-saas-compose.py` | un modèle compose SaaS publiant un port hors loopback (0.0.0.0) | une base exposée au réseau local (souvent sans mdp fort en dev) = fuite |
 | `check-saas-compose-runtime.sh` | un modèle compose SaaS qui ne DÉMARRE pas (crash-loop, healthcheck cassé) | postgres-valkey livré crash-loopant sur postgres:18 — invisible au contrôle statique |
+| `check-containers-policy.py` | la policy client STAGED (`/usr/share/vibeos/containers/policy-strict.json`) devenue laxiste : exigence sigstoreSigned du repo vibeos retirée/affaiblie, ancre sigstore altérée, lecture des attachements coupée, ou policy activée prématurément (`/etc/containers/policy.json` dans os/rootfs) — preuve de rejet skopeo à l'appui | l'image était signée cosign en CI mais AUCUN client ne vérifiait — signer sans vérifier est du théâtre ; staged car c/image ne matche pas encore les SAN URI (l'image authentique serait rejetée) |
 | `check-log-hygiene.py` | un secret/contenu de fichier loggué en niveau `info` | critère de sortie Phase 2 (ROADMAP §4) |
 | `check-hud-client.js` | la couche JS du HUD qui traduit le format `vibed` | seule couche du HUD testable sans Qt |
 | `check-guards-wired.py` | un `check-*`/`verify-*` non exécuté en CI | 5 garde-fous câblés à la main, un par un |

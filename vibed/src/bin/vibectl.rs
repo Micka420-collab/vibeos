@@ -6,8 +6,10 @@
 //! supervisor** (`agent run`/`stop`/`thinking`) that runs a CLI under budget and
 //! taps its reasoning stream (ADR-012/013).
 //!
-//! Truly destructive actions (factory reset = T3) are intentionally absent: they
-//! require the full Phase 4 human-approval flow and must never be a bare switch.
+//! The one destructive command, `memory reset [--yes]` (root), purges the
+//! memory store and re-arms Genesis for the next boot. Like `mode open` it is
+//! an out-of-band operator action — root-gated, confirmation-guarded, never
+//! reachable through MCP. Cryptographic erasure arrives with LUKS (Phase 3).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -178,6 +180,9 @@ fn usage() -> ExitCode {
          \x20 vibectl memory mode           current memory mode (amnesic|persistent)\n\
          \x20 vibectl memory profile        current user profile (fold of updates)\n\
          \x20 vibectl memory projects       current project index (fold of updates)\n\
+         \x20 vibectl memory reset [--yes]  FACTORY RESET (root): purge the memory store and\n\
+         \x20                               re-arm Genesis at next boot; cryptographic erasure\n\
+         \x20                               arrives with LUKS (Phase 3) — DANGER\n\
          \x20 vibectl audit verify [DIR]    verify the tamper-evident audit chain\n\
          \x20 vibectl approvals list        pending T2/T3 human-approval requests\n\
          \x20 vibectl approve <ID>          grant a pending request (root)\n\
@@ -234,6 +239,20 @@ fn main() -> ExitCode {
             let out = vibectl::memory_projects_at(Path::new(MEMORY_DIR));
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             ExitCode::SUCCESS
+        }
+        ["memory", "reset", rest @ ..] => {
+            let mut confirmed = false;
+            for arg in rest {
+                match *arg {
+                    "--yes" => confirmed = true,
+                    other => {
+                        eprintln!("memory reset: unexpected argument '{other}' (only --yes)");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            let (report, ok) = vibectl::memory_reset(confirmed);
+            emit(report, ok)
         }
         ["audit", "verify"] | ["audit", "verify", _] => {
             let dir = parts.get(2).copied().unwrap_or(DEFAULT_AUDIT_DIR);

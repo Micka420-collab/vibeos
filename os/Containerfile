@@ -794,6 +794,18 @@ RUN HOME=/tmp claude --version \
 RUN test ! -e /etc/xdg/kdeglobals
 COPY os/rootfs/ /
 
+# Guard: os/rootfs ships the STAGED strict signature policy (keyless sigstore
+# requirement on ghcr.io/micka420-collab/vibeos — rationale, honest limits and
+# the activation procedure in /etc/containers/registries.d/vibeos.yaml). The
+# active /etc/containers/policy.json stays the containers-common default:
+# activating the strict file today would fail-close the genuine image's own
+# `bootc upgrade` (c/image URI-SAN limitation). Validate the staged JSON at
+# build time; structure + unsigned-image-rejection proof run in CI
+# (scripts/check-containers-policy.py).
+RUN python3 -m json.tool /usr/share/vibeos/containers/policy-strict.json > /dev/null \
+    && test ! -e /etc/containers/policy.json \
+       || ! grep -q micka420-collab /etc/containers/policy.json
+
 # --- Policy engine defaults ---------------------------------------------------
 # Source of truth lives in security/policy.d/ (owned by the security
 # subsystem). Installed to /etc so local admins can override via the OSTree
@@ -809,6 +821,11 @@ COPY security/policy.d/*.toml /etc/vibeos/policy.d/
 # v0.1: the script creates the memory directory layout in CLEAR TEXT (no
 # cryptsetup/mkfs/mount); LUKS + amnesic tmpfs are Phase 3 (docs/MEMORY.md).
 COPY --chmod=0755 memory/genesis.sh /usr/libexec/vibeos/genesis.sh
+# Birth interview — called best-effort by genesis.sh between the awakening and
+# the .initialized sentinel. Opt-in and self-guarded: a silent no-op unless
+# VIBEOS_INTERVIEW=1 plus a TTY on stdin (or injected VIBEOS_INTERVIEW_*
+# answers), so an unattended first boot is never blocked (docs/MEMORY.md §3.3).
+COPY --chmod=0755 memory/genesis-interview.sh /usr/libexec/vibeos/genesis-interview.sh
 
 # --- Desktop identity: VibeOS Dark theme assets ------------------------------
 # The design system lives in docs/DESIGN-SYSTEM.md. PHASE 2 STATUS: the Global

@@ -18,6 +18,13 @@
 #                 Python tomllib (canonical [[rule]] schema: id / tools /
 #                 tier / action / approval), mirroring vibed's fail-closed
 #                 load rules.
+#   * containers-policy
+#                 the client-side cosign verification policy
+#                 (os/rootfs/etc/containers/): structure checks, pinned
+#                 sigstore trust anchors, and a MECHANICAL skopeo proof that
+#                 an unsigned image is rejected by the
+#                 ghcr.io/micka420-collab/vibeos requirement. The effect on a
+#                 real `bootc upgrade` (deployed machine) stays machine-gated.
 
 name: ci
 
@@ -44,6 +51,12 @@ on:
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
       # os/Containerfile plus haut.
       - "os/rootfs/usr/share/vibeos/saas/**"
+      # Policy de vérification cosign côté client + ancres sigstore : sans ces
+      # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
+      # jamais le job containers-policy qui la garde. Même trou que pour
+      # os/Containerfile plus haut.
+      - "os/rootfs/etc/containers/**"
+      - "os/rootfs/etc/pki/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -69,6 +82,12 @@ on:
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
       # os/Containerfile plus haut.
       - "os/rootfs/usr/share/vibeos/saas/**"
+      # Policy de vérification cosign côté client + ancres sigstore : sans ces
+      # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
+      # jamais le job containers-policy qui la garde. Même trou que pour
+      # os/Containerfile plus haut.
+      - "os/rootfs/etc/containers/**"
+      - "os/rootfs/etc/pki/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -298,6 +317,10 @@ jobs:
           T="$(mktemp -d)"
           VIBEOS_MEMORY_DIR="$T/mem" bash memory/genesis.sh
           test -f "$T/mem/.initialized"
+          # Interview contract (a): a DEFAULT first boot — no TTY on stdin, no
+          # VIBEOS_INTERVIEW=1 — must not create user/updates.jsonl at all. The
+          # interview is opt-in; an unattended boot writes nothing to user/.
+          test ! -e "$T/mem/user/updates.jsonl"
           python3 - "$T/mem" <<'PY'
           import json, sys, pathlib
           root = pathlib.Path(sys.argv[1])
@@ -400,6 +423,9 @@ jobs:
           test "$births" -eq 1 \
             || { echo "FAIL: replayed partial run stamped $births births, expected 1"; exit 1; }
           echo "Genesis re-entrancy OK (replay after a partial run: still one birth)"
+          # The crash-replay above ran without VIBEOS_INTERVIEW: the interview
+          # wired into genesis.sh must have stayed a no-op on that path too.
+          test ! -e "$T/mem/user/updates.jsonl"
           # Amnesic marker written by genesis event data.
           VIBEOS_MEMORY_DIR="$T/mem2" VIBEOS_MEMORY_MODE=amnesic bash memory/genesis.sh
           grep -q '^mode = "amnesic"' "$T/mem2/identity.toml"
@@ -414,6 +440,57 @@ jobs:
             echo "FAIL: personality is not deterministic for a fixed machine_id"; exit 1
           fi
           echo "Genesis personality OK (deterministic character, birth aside)"
+
+          # --- Birth interview (genesis-interview.sh) --------------------------
+          # Scripted mode, contract (b): VIBEOS_INTERVIEW=1 + injected answers,
+          # no TTY needed. The COLLAB answer is deliberately hostile (newline,
+          # quotes, backslash): every recorded line must still parse as
+          # standalone JSON, or an answer could forge extra lines/keys in
+          # user/updates.jsonl (A1 poisoning).
+          VIBEOS_MEMORY_DIR="$T/mem" VIBEOS_INTERVIEW=1 \
+            VIBEOS_INTERVIEW_NAME="Ada Lovelace" \
+            VIBEOS_INTERVIEW_LANG="français" \
+            VIBEOS_INTERVIEW_DOMAIN="génie logiciel" \
+            VIBEOS_INTERVIEW_COLLAB=$'direct "et" concis\navec \\ des pièges' \
+            bash memory/genesis-interview.sh
+          python3 - "$T/mem/user/updates.jsonl" <<'PY'
+          import json, sys
+          lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+          entries = [json.loads(line) for line in lines]  # each line: valid JSON
+          assert [e["key"] for e in entries] == [
+              "profile.name", "profile.lang", "profile.domain",
+              "preferences.collaboration"], entries
+          for e in entries:
+              assert set(e) == {"ts", "key", "value", "source"}, e
+              assert e["source"] == "genesis-interview", e
+          values = {e["key"]: e["value"] for e in entries}
+          assert values["profile.name"] == "Ada Lovelace"
+          assert values["profile.lang"] == "français"
+          # The hostile answer round-trips intact — escaped, never re-shaped.
+          assert values["preferences.collaboration"] == 'direct "et" concis\navec \\ des pièges'
+          print("Interview scripted mode OK")
+          PY
+          # Contract (c): a REPLAY (same crash-recovery path genesis.sh takes)
+          # must append NOTHING — the source-tag guard trips, because an
+          # append-only file cannot be "overwritten back" to its prior state.
+          before_iv="$(sha256sum "$T/mem/user/updates.jsonl")"
+          VIBEOS_MEMORY_DIR="$T/mem" VIBEOS_INTERVIEW=1 \
+            VIBEOS_INTERVIEW_NAME="Ada Lovelace" \
+            bash memory/genesis-interview.sh
+          after_iv="$(sha256sum "$T/mem/user/updates.jsonl")"
+          test "$before_iv" = "$after_iv" \
+            || { echo "FAIL: interview replay appended duplicate lines"; exit 1; }
+          echo "Interview scripted + replay OK (no duplicate lines)"
+          # Wiring: a first boot that opts in records the answers THROUGH
+          # genesis.sh (best-effort call between the awakening and the
+          # sentinel) and Genesis still completes. Fresh dir: mem4 was already
+          # initialized by the awakening-capture run above.
+          VIBEOS_MEMORY_DIR="$T/mem5" VIBEOS_INTERVIEW=1 \
+            VIBEOS_INTERVIEW_NAME="Grace" VIBEOS_INTERVIEW_LANG="english" \
+            bash memory/genesis.sh
+          test -f "$T/mem5/.initialized"
+          grep -q '"key":"profile.name"' "$T/mem5/user/updates.jsonl"
+          echo "Interview wiring through genesis.sh OK"
           rm -rf "$T"
 
   policy:
@@ -497,3 +574,37 @@ jobs:
 
           sys.exit(1 if failed else 0)
           EOF
+
+  containers-policy:
+    name: containers — policy de signature (cosign côté client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # build-os.yml signe chaque release cosign keyless — signer sans que
+      # personne ne vérifie est du théâtre. Le garde vérifie la policy CLIENT
+      # STAGED (os/rootfs/usr/share/vibeos/containers/policy-strict.json —
+      # staged et non active : activée aujourd'hui elle rejetterait AUSSI
+      # l'image authentique, c/image ne matchant que les SAN e-mail ; le
+      # check 0 du garde épingle cet état volontairement) :
+      #   (a) JSON valide + structure : `default` resté permissif (podman
+      #       utilisateur intact), exigence sigstoreSigned KEYLESS (fulcio
+      #       OIDC GitHub Actions + rekor) sur ghcr.io/micka420-collab/vibeos,
+      #       ancres sigstore épinglées à l'octet près ;
+      #   (b) preuve de rejet MÉCANIQUE : une image OCI non signée construite
+      #       par le script passe sous le `default`, mais est REJETÉE
+      #       (« signature » dans l'erreur) par l'exigence du repo vibeos
+      #       extraite VERBATIM de la policy shippée. Exigence retirée ou
+      #       affaiblie => la copie passe => rouge.
+      # skopeo est préinstallé sur ubuntu-latest ; le garde échoue FERMÉ s'il
+      # manque. Portée honnête : ceci prouve le rejet par l'outillage c/image,
+      # pas l'effet au `bootc upgrade` d'une machine déployée (machine-gated)
+      # — limites détaillées dans os/rootfs/etc/containers/registries.d/vibeos.yaml.
+      - name: Policy conteneurs — structure + preuve de rejet (skopeo)
+        run: |
+          # skopeo est préinstallé sur ubuntu-latest — ceinture-bretelles au
+          # cas où l'image runner le retirerait : le garde échoue fermé sans.
+          command -v skopeo >/dev/null || { sudo apt-get update && sudo apt-get install -y skopeo; }
+          python3 scripts/check-containers-policy.py
