@@ -313,6 +313,20 @@ jobs:
           assert j, "no journal file written"
           ev = json.loads(open(j[0]).read().splitlines()[0])
           assert ev["type"] == "genesis" and ev["source"] == "genesis.sh"
+          # The genesis event carries the born character (name/archetype/seed).
+          persona = ev["data"]["personality"]
+          assert persona["name"] and persona["archetype"] and persona["seed"], persona
+          # personality.toml — the AI citizen's birth character (§3.8).
+          import re
+          p = (root / "personality.toml").read_text()
+          assert re.search(r"^schema = 1$", p, re.M), "personality schema must be 1"
+          assert re.search(r'^name = "', p, re.M) and re.search(r'^archetype = "', p, re.M)
+          assert "[traits]" in p and "[adaptation]" in p, "traits/adaptation tables"
+          caution = int(re.search(r"^caution = (\d+)$", p, re.M).group(1))
+          assert 50 <= caution <= 100, f"caution floor is 50, got {caution}"
+          for axis in ("curiosity", "initiative", "warmth", "concision", "playfulness"):
+              v = int(re.search(rf"^{axis} = (\d+)$", p, re.M).group(1))
+              assert 0 <= v <= 100, f"{axis} out of range: {v}"
           print("Genesis smoke test OK")
           PY
           # Idempotency, take 1 — the GUARD: with the sentinel present the script
@@ -342,6 +356,17 @@ jobs:
           # Amnesic marker written by genesis event data.
           VIBEOS_MEMORY_DIR="$T/mem2" VIBEOS_MEMORY_MODE=amnesic bash memory/genesis.sh
           grep -q '^mode = "amnesic"' "$T/mem2/identity.toml"
+
+          # Personality DETERMINISM: same host (same machine_id) => the same
+          # character born again, birth timestamp aside. This is the property
+          # that makes "the AI picks its own personality" reproducible rather
+          # than random, and keeps the soul stable across an amnesic reboot.
+          VIBEOS_MEMORY_DIR="$T/mem3" bash memory/genesis.sh
+          if ! diff <(grep -v '^birth = ' "$T/mem/personality.toml") \
+                    <(grep -v '^birth = ' "$T/mem3/personality.toml") >/dev/null; then
+            echo "FAIL: personality is not deterministic for a fixed machine_id"; exit 1
+          fi
+          echo "Genesis personality OK (deterministic character, birth aside)"
           rm -rf "$T"
 
   policy:

@@ -81,9 +81,10 @@ pub(crate) const JOURNAL_RESERVED_TYPES: [&str; 5] = [
 /// Memory sub-scopes addressable by memory.query's `scope` argument, mapped to
 /// their location in the store (relative path, is_directory). Keep in sync
 /// with the layout in docs/MEMORY.md §3.
-pub(crate) const MEMORY_SCOPES: [(&str, &str, bool); 6] = [
+pub(crate) const MEMORY_SCOPES: [(&str, &str, bool); 7] = [
     ("identity", "identity.toml", false),
     ("hardware", "hardware.json", false),
+    ("personality", "personality.toml", false),
     ("user", "user", true),
     ("projects", "projects", true),
     ("journal", "journal", true),
@@ -1059,14 +1060,15 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             "Query the VibeOS memory store (/var/lib/vibeos/memory): substring-match files by \
              name and content, returning each match WITH a bounded content snippet (read the \
              memory in one call, no follow-up fs.read). Optional 'scope' \
-             (identity/hardware/user/projects/journal/knowledge) and 'limit'. With 'fold': true \
-             on scope 'user' or 'projects', returns the CONSOLIDATED current view (last-write-wins \
-             fold of the append-only log) instead of raw matches (docs/MEMORY.md §9)",
+             (identity/hardware/personality/user/projects/journal/knowledge) and 'limit'. With \
+             'fold': true on scope 'user' or 'projects', returns the CONSOLIDATED current view \
+             (last-write-wins fold of the append-only log) instead of raw matches. Scope \
+             'personality' is the AI citizen's own character chosen at birth (docs/MEMORY.md §9)",
             json!({"type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "scope": {"type": "string",
-                          "enum": ["identity", "hardware", "user",
+                          "enum": ["identity", "hardware", "personality", "user",
                                    "projects", "journal", "knowledge"]},
                 "limit": {"type": "integer", "minimum": 1},
                 "fold": {"type": "boolean"}

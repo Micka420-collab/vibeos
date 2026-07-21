@@ -18,6 +18,24 @@ pub(crate) fn memory_query(args: &Value) -> Result<String, String> {
     memory_query_at(std::path::Path::new(MEMORY_DIR), args)
 }
 
+/// Case-insensitive (ASCII) substring test WITHOUT allocating a lowercased
+/// copy of the haystack. `needle` is already lowercased by the caller; matching
+/// folds ASCII case on the fly, so it differs from a full Unicode
+/// `to_lowercase().contains()` ONLY on non-ASCII case pairs (Turkish İ, German
+/// ß, …) — acceptable for a memory search, and it removes a per-file duplicate
+/// of up to MAX_MEMORY_SCAN_BYTES (64 KiB) that memory.query used to allocate
+/// for EVERY scanned file, on a path the HUD polls.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 /// Read up to MAX_MEMORY_SCAN_BYTES of `path` (bounded, O_NOFOLLOW) and return
 /// the UTF-8-lossy text plus whether the file exceeded the scan window. The
 /// bound caps the allocation; O_NOFOLLOW refuses a final component swapped for
@@ -183,11 +201,11 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
         // Read a bounded window ONCE and reuse it for both the content match
         // test and the returned snippet.
         let scanned = read_memory_scan(path);
-        let name_hit = !query.is_empty() && relative.to_lowercase().contains(&query);
+        let name_hit = !query.is_empty() && contains_ascii_ci(&relative, &query);
         let content_hit = !query.is_empty()
             && scanned
                 .as_ref()
-                .is_some_and(|(text, _)| text.to_lowercase().contains(&query));
+                .is_some_and(|(text, _)| contains_ascii_ci(text, &query));
         if !(query.is_empty() || name_hit || content_hit) {
             continue;
         }
@@ -540,6 +558,11 @@ mod tests {
             "schema = 1\nhostname = \"testhost\"\n",
         )
         .expect("write identity");
+        std::fs::write(
+            dir.join("personality.toml"),
+            "schema = 1\nname = \"Lumen\"\narchetype = \"sentinelle\"\n\n[traits]\ncaution = 71\n",
+        )
+        .expect("write personality");
         std::fs::write(dir.join("user").join("profile.toml"), "lang = \"fr\"\n")
             .expect("write profile");
         std::fs::write(
@@ -552,6 +575,38 @@ mod tests {
 
     fn parse_result(result: Result<String, String>) -> Value {
         serde_json::from_str(&result.expect("tool call succeeds")).expect("valid JSON payload")
+    }
+
+    #[test]
+    fn contains_ascii_ci_matches_case_insensitively_without_allocating() {
+        assert!(contains_ascii_ci("Hello WORLD", "world"));
+        assert!(contains_ascii_ci("preferences.EDITOR = neovim", "editor"));
+        assert!(contains_ascii_ci("abc", "abc"));
+        assert!(contains_ascii_ci("anything", ""), "empty needle matches");
+        assert!(!contains_ascii_ci("short", "longer-than-haystack"));
+        assert!(!contains_ascii_ci("hello", "xyz"));
+        // Fold is ASCII-only by design: the needle arrives already lowercased,
+        // and matching is symmetric via eq_ignore_ascii_case.
+        assert!(contains_ascii_ci("MixedCASE", "mixedcase"));
+    }
+
+    #[test]
+    fn memory_query_content_match_is_case_insensitive() {
+        let root = memory_scratch("qcasefold");
+        // The journal genesis line contains lowercase text; query in UPPERCASE
+        // must still hit it (ASCII case fold, no allocation).
+        let payload = parse_result(memory_query_at(&root, &json!({"query": "GENESIS"})));
+        assert!(
+            payload["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["file"]
+                    .as_str()
+                    .is_some_and(|f| f.starts_with("journal/"))),
+            "an uppercase query matches lowercase content: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -568,6 +623,25 @@ mod tests {
         // a scope never leaks files from another scope.
         let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
         assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_personality_scope_resolves_the_character() {
+        // The AI citizen's birth character (personality.toml, written by
+        // Genesis §3.8) is a first-class, addressable, read-only scope — so the
+        // HUD/agent can ask "who are you?" without walking the whole store.
+        let root = memory_scratch("qpersona");
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "personality"})));
+        assert_eq!(payload["scope"], "personality");
+        assert_eq!(payload["scanned_files"], 1);
+        assert_eq!(payload["matches"][0]["file"], "personality.toml");
+        assert!(
+            payload["matches"][0]["snippet"]
+                .as_str()
+                .is_some_and(|s| s.contains("archetype")),
+            "personality snippet carries the character: {payload}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -888,8 +962,8 @@ mod tests {
     #[test]
     fn memory_append_rejects_readonly_and_unknown_scopes() {
         let root = memory_scratch("ascope");
-        // identity/hardware are written by Genesis only — never via memory.append.
-        for scope in ["identity", "hardware"] {
+        // identity/hardware/personality are written by Genesis only — never via memory.append.
+        for scope in ["identity", "hardware", "personality"] {
             let err = memory_append_at(
                 &root,
                 &json!({"scope": scope, "entry": {"source": "x"}}),
