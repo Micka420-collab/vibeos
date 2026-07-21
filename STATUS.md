@@ -12,11 +12,13 @@
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
 > Dernière mise à jour : **2026-07-21 (session Fable 5)** — **perf couche basse** :
 > chemins chauds `vibed` corrigés (audit/journal hors du réacteur tokio, catalogue
-> d'outils en cache, 299 tests verts) + **première config noyau de l'image**
+> d'outils en cache) + **première config noyau de l'image**
 > ([ADR-025](docs/DECISIONS.md) : `sysctl.d` charges IA + zram `zstd`, chaque valeur
-> sourcée) + 18ᵉ invariant `kernel-tuning` du selfcheck. La mesure sur cible reste
-> machine-gated. *(Précédent : 2026-07-19, trousse SaaS complète dev→prod —
-> [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
+> sourcée) + 18ᵉ invariant `kernel-tuning` du selfcheck — **PR #166 mergée**. Puis,
+> en suite de session : **caches incrémentaux** sur les chemins sondés par le HUD
+> (queue d'audit, fold mémoire, têtes de sessions) + digest d'audit unique par appel
+> — 331 tests verts. La mesure sur cible reste machine-gated. *(Précédent :
+> 2026-07-19, trousse SaaS complète dev→prod — [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
 
 ## Vue d'ensemble
 
@@ -144,6 +146,13 @@
   - **`vibed` : trois correctifs du chemin chaud de `tools/call`**, invariants intacts (fsync d'audit et « audit durable avant exécution » inchangés) : l'écriture d'audit passe en `spawn_blocking` **awaité** (elle s'exécutait sur le réacteur tokio — chaque fsync figeait toutes les connexions, sondes HUD comprises) ; le journal mémoire best-effort part en fire-and-forget sur le pool bloquant ; `tool_catalog()` est construit une fois (`OnceLock`) au lieu d'être rebâti à chaque lookup de tier (jusqu'à des milliers de fois par sonde `agents.list`) ; les arguments passent en `Arc` (plus de clone profond d'un payload `fs.write` par appel). **299 tests verts** (287 lib + 9 intégration MCP + 3 politique), clippy/fmt/log-hygiene OK ; compteurs des 4 README recalés 191 → 299.
   - **[ADR-025](docs/DECISIONS.md) : réglage noyau pour charges IA, livré dans l'image** — première `sysctl.d` du dépôt (`os/rootfs/usr/lib/sysctl.d/50-vibeos-ai.conf` : jeu zram cohérent `page-cluster=0`/`swappiness=180`/watermarks, writeback borné 128/256 Mio, `inotify` instances 1024, TCP BBR autochargé) + drop-in zram `zstd` (`os/rootfs/usr/lib/systemd/zram-generator.conf.d/50-vibeos.conf`, fusion par option — le fichier vendor Fedora n'est jamais écrasé). Chaque valeur sourcée (noyau vm.rst, pop-os/default-settings#163, dist-git f44, tcp_cong.c) ; le cargo cult vérifié inutile sur f44 (`max_map_count`, `file-max`) est **absent**. Kernel Fedora générique conservé (config dédiée : Phase 7+), cmdline intouchée (UKI : Phase 4).
   - **Selfcheck : 18ᵉ invariant `kernel-tuning`** (sonde read-only : `vm.page-cluster=0` + module `tcp_bbr` autochargé ; image antérieure = SKIP) — [docs/BOOT-VALIDATION.md](docs/BOOT-VALIDATION.md) recalé. La **mesure sur cible reste machine-gated** : valeurs sourcées, pas encore mesurées sur la machine de référence.
+
+- **2026-07-21 (suite de session) — caches incrémentaux sur les chemins sondés par le HUD** (les « chantiers de suivi » listés dans la PR #166, mergée par la même session) :
+  - **Queue d'audit d'`agents.list` incrémentale** : les fichiers étant append-only (écrivain unique sous le mutex de chaîne), chaque sonde ne lit et ne parse plus que le **delta** ajouté depuis la précédente, au lieu de relire 2 × 512 Kio par sonde. Invalidation fail-safe : taille qui régresse (rollback de ligne déchirée au démarrage) = re-scan complet ; rotation quotidienne purgée ; ligne sans `\n` final laissée pour la sonde suivante ; borne dure sur le cache.
+  - **`memory.query fold:true` mémoïsé** par `(chemin, taille, mtime)` — c'était le seul coût par appel du démon qui croissait **sans borne** avec l'âge de la machine (re-fold de tout l'historique des updates à chaque sonde) ; désormais O(1) tant que le fichier n'a pas changé, re-fold complet sinon.
+  - **Têtes de sessions (`agent.sessions`) mémoïsées** : la première ligne d'un fichier append-only est immuable — son `ts_unix` n'est plus relu à chaque sonde (jusqu'à 200 open+read+parse évités par sonde) ; une tête absente (fichier déchiré) n'est jamais mise en cache et reste re-tentée.
+  - **Digest d'audit calculé une fois par appel** (`record_with_digest` + `OnceLock` partagé) : les deux records d'un même appel (`started` + final) portaient déjà le même digest mais re-sérialisaient chacun tout l'arbre d'arguments (jusqu'à ~1 Mio pour `fs.write`).
+  - **331 tests verts** (dont 7 nouveaux : incrémentalité, troncature, ligne déchirée, invalidation du fold, stabilité des têtes, parité des digests) ; clippy -D warnings (2 configs), log-hygiene, fmt OK ; compteurs des 4 README recalés 299 → 331.
 
 ## 📋 Reste à faire (court terme)
 

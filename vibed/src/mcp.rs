@@ -397,6 +397,15 @@ async fn handle_tools_call(
     // a `fs.write` payload close to MAX_LINE_BYTES used to be deep-cloned for
     // the execution task on every allowed call.
     let args = Arc::new(params.get("arguments").cloned().unwrap_or(Value::Null));
+    // Everything constant across THIS call's audit records, bundled once: the
+    // records differ only by (target, decision, outcome).
+    let actx = AuditCtx {
+        audit: Arc::clone(audit),
+        tool: name.clone(),
+        args: Arc::clone(&args),
+        digest: Arc::new(ArgsDigest::new()),
+        caller,
+    };
 
     // Extract and normalize the call context before any decision is made.
     let raw_path = args.get("path").and_then(Value::as_str);
@@ -406,16 +415,7 @@ async fn handle_tools_call(
             None => {
                 // Relative path or attempt to climb above `/`: fail-closed.
                 // The raw (rejected) path is the non-secret audit target.
-                try_audit(
-                    audit,
-                    &name,
-                    &args,
-                    Some(raw),
-                    Decision::Deny,
-                    "blocked_invalid_path",
-                    caller,
-                )
-                .await;
+                try_audit(&actx, Some(raw), Decision::Deny, "blocked_invalid_path").await;
                 return tool_result(
                     id,
                     format!("policy: path '{raw}' is not an absolute, normalizable path"),
@@ -469,16 +469,13 @@ async fn handle_tools_call(
     // 255 by validate_unit_name, and a package name is a few dozen characters.
     if let Some(t) = target.as_deref() {
         if t.len() > MAX_TARGET_BYTES {
+            // Audit the LENGTH, not the value: echoing 1 MiB of hostile text
+            // into the audit trail is the same flood, one file over.
             try_audit(
-                audit,
-                &name,
-                &args,
-                // Audit the LENGTH, not the value: echoing 1 MiB of hostile text
-                // into the audit trail is the same flood, one file over.
+                &actx,
                 Some(&format!("<target too long: {} bytes>", t.len())),
                 Decision::Deny,
                 "target_too_long",
-                caller,
             )
             .await;
             return tool_result(
@@ -498,16 +495,7 @@ async fn handle_tools_call(
     // refused fail-closed and audited (the rejection itself is a security
     // signal), never executed. Keyed by the unforgeable SO_PEERCRED uid.
     if !limiter.check(caller.uid, now_epoch_secs()) {
-        try_audit(
-            audit,
-            &name,
-            &args,
-            target.as_deref(),
-            Decision::Deny,
-            "rate_limited",
-            caller,
-        )
-        .await;
+        try_audit(&actx, target.as_deref(), Decision::Deny, "rate_limited").await;
         return tool_result(
             id,
             format!(
@@ -524,13 +512,10 @@ async fn handle_tools_call(
         let is_write = name == "fs.write";
         if let Some(pattern) = builtin_denied(path, is_write) {
             try_audit(
-                audit,
-                &name,
-                &args,
+                &actx,
                 target.as_deref(),
                 Decision::Deny,
                 "blocked_builtin_denylist",
-                caller,
             )
             .await;
             return tool_result(
@@ -611,16 +596,7 @@ async fn handle_tools_call(
 
     match decision {
         Decision::Deny => {
-            try_audit(
-                audit,
-                &name,
-                &args,
-                target.as_deref(),
-                decision,
-                "blocked",
-                caller,
-            )
-            .await;
+            try_audit(&actx, target.as_deref(), decision, "blocked").await;
             tool_result(id, format!("policy: tool '{name}' is denied"), true)
         }
         Decision::RequireApproval => {
@@ -646,16 +622,7 @@ async fn handle_tools_call(
             .await
             .ok()
             .and_then(Result::ok);
-            try_audit(
-                audit,
-                &name,
-                &args,
-                target.as_deref(),
-                decision,
-                "pending_approval",
-                caller,
-            )
-            .await;
+            try_audit(&actx, target.as_deref(), decision, "pending_approval").await;
             let tier_str = tier.map(Tier::as_str).unwrap_or("?");
             let how = match &request_id {
                 Some(rid) => format!(
@@ -672,17 +639,7 @@ async fn handle_tools_call(
         }
         Decision::Allow => {
             // Fail-closed: if the audit trail cannot be written, nothing runs.
-            if !try_audit(
-                audit,
-                &name,
-                &args,
-                target.as_deref(),
-                decision,
-                &started_outcome,
-                caller,
-            )
-            .await
-            {
+            if !try_audit(&actx, target.as_deref(), decision, &started_outcome).await {
                 return tool_result(
                     id,
                     "audit log unavailable: refusing execution (fail-closed)".to_string(),
@@ -707,16 +664,7 @@ async fn handle_tools_call(
             .await;
             match executed {
                 Ok(Ok(text)) => {
-                    try_audit(
-                        audit,
-                        &name,
-                        &args,
-                        target.as_deref(),
-                        decision,
-                        &ok_outcome,
-                        caller,
-                    )
-                    .await;
+                    try_audit(&actx, target.as_deref(), decision, &ok_outcome).await;
                     // Feed the machine's own memory: record executed,
                     // state-changing actions as a reserved `tool_call` journal
                     // event (distinct from the forensic audit log). T0 reads and
@@ -728,28 +676,16 @@ async fn handle_tools_call(
                 }
                 Ok(Err(message)) => {
                     try_audit(
-                        audit,
-                        &name,
-                        &args,
+                        &actx,
                         target.as_deref(),
                         decision,
                         &format!("error: {message}"),
-                        caller,
                     )
                     .await;
                     tool_result(id, message, true)
                 }
                 Err(join_error) => {
-                    try_audit(
-                        audit,
-                        &name,
-                        &args,
-                        target.as_deref(),
-                        decision,
-                        "panic",
-                        caller,
-                    )
-                    .await;
+                    try_audit(&actx, target.as_deref(), decision, "panic").await;
                     tool_result(id, format!("internal error: {join_error}"), true)
                 }
             }
@@ -876,6 +812,25 @@ fn approver_suffix(approver_uid: Option<u32>) -> String {
     }
 }
 
+/// Lazily-computed, per-call FNV digest of the tool arguments, shared between
+/// the `started` and final audit records of one call (both always carried the
+/// same digest — same arguments). `OnceLock` so the serialization + hash run at
+/// most once per call, and only on the blocking pool, never on the reactor.
+type ArgsDigest = std::sync::OnceLock<String>;
+
+/// Everything constant across ONE `tools/call`'s audit records — the log
+/// handle, the tool name, the parsed arguments with their lazily-computed
+/// digest, and the caller identity. Built once per call in
+/// `handle_tools_call`; the individual records then differ only by
+/// `(target, decision, outcome)`.
+struct AuditCtx {
+    audit: Arc<AuditLog>,
+    tool: String,
+    args: Arc<Value>,
+    digest: Arc<ArgsDigest>,
+    caller: Caller,
+}
+
 /// Append one audit record from the async path WITHOUT parking the reactor on
 /// disk I/O. `AuditLog::record` holds the chain mutex across an open, a write
 /// and a deliberate fsync — milliseconds on NVMe, tens on slower media — and it
@@ -886,23 +841,23 @@ fn approver_suffix(approver_uid: Option<u32>) -> String {
 /// a failure) before proceeding — only WHERE the wait happens moves. A panic in
 /// the audit task counts as an audit failure (fail-closed), like an I/O error.
 async fn try_audit(
-    audit: &Arc<AuditLog>,
-    tool: &str,
-    args: &Arc<Value>,
+    ctx: &AuditCtx,
     target: Option<&str>,
     decision: Decision,
     outcome: &str,
-    caller: Caller,
 ) -> bool {
-    let audit = Arc::clone(audit);
-    let tool = tool.to_string();
-    let args = Arc::clone(args);
+    let audit = Arc::clone(&ctx.audit);
+    let tool = ctx.tool.clone();
+    let args = Arc::clone(&ctx.args);
+    let digest = Arc::clone(&ctx.digest);
+    let caller = ctx.caller;
     let target = target.map(str::to_string);
     let outcome = outcome.to_string();
     tokio::task::spawn_blocking(move || {
-        match audit.record(
+        let d = digest.get_or_init(|| crate::audit::fnv1a_64_hex(args.to_string().as_bytes()));
+        match audit.record_with_digest(
             &tool,
-            &args,
+            d,
             target.as_deref(),
             decision.as_str(),
             &outcome,
@@ -1480,14 +1435,48 @@ fn proc_comm(pid: u64) -> Option<String> {
     }
 }
 
+/// Longest roster window `agents.list` accepts (its `window_seconds` clamp
+/// ceiling) — the tail cache below never needs records older than this.
+const MAX_ROSTER_WINDOW_SECS: u64 = 3600;
+
+/// Per-file incremental state for `read_recent_audit`. The audit files are
+/// append-only (single writer behind the chain mutex), so bytes once parsed
+/// never change: each probe reads and parses only the DELTA appended since the
+/// previous one, instead of re-reading the whole 2 × 512 KiB window on every
+/// HUD poll.
+struct AuditTail {
+    /// Byte offset up to which the file has been parsed — always the offset
+    /// just after a `'\n'` (only complete lines are ever consumed).
+    parsed_to: u64,
+    /// Parsed records `(ts_secs, record)` in file order, purged below the
+    /// maximum roster window and hard-capped.
+    records: std::collections::VecDeque<(u64, Value)>,
+}
+
+/// Hard cap on cached records per file. A fresh 512 KiB window holds at most
+/// ~3500 records (a record line is ≥ ~150 bytes), so this cap can never make
+/// the cache return LESS than the plain windowed scan it replaces.
+const TAIL_CACHE_MAX_RECORDS: usize = 8192;
+
 /// Read a bounded tail of the audit trail as parsed records with `ts >= cutoff`.
 /// Best-effort (skips unreadable/corrupt lines) and read-only — used ONLY to
 /// derive the `agents.list` roster, never for chain verification. Bounds the
-/// read to the last `MAX_TAIL_BYTES` of the two most recent daily files, so it
-/// stays cheap regardless of how large the audit log has grown.
+/// read to the last `MAX_TAIL_BYTES` of the two most recent daily files, and
+/// keeps an incremental per-file cache (see [`AuditTail`]) so a steady-state
+/// probe costs one `stat` plus the few lines appended since the previous one.
+///
+/// Invalidation is fail-safe in every uncertain case: a file whose size SHRANK
+/// (the startup torn-tail rollback) is rescanned from scratch with the plain
+/// windowed scan; entries for files that left the two-most-recent set are
+/// dropped (daily rotation); a delta that does not yet end in `'\n'` leaves the
+/// incomplete line unconsumed for the next probe (the writer emits the line and
+/// its newline as separate writes, so a reader can observe the gap).
 fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
     const MAX_TAIL_BYTES: u64 = 512 * 1024;
+    use std::collections::HashMap;
     use std::io::{Read, Seek, SeekFrom};
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, AuditTail>>> = OnceLock::new();
 
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -1505,45 +1494,122 @@ fn read_recent_audit(dir: &std::path::Path, cutoff_secs: u64) -> Vec<Value> {
     // Two most recent daily files cover any short window across a midnight roll.
     let recent: Vec<std::path::PathBuf> = files.iter().rev().take(2).rev().cloned().collect();
 
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Rotation: drop cached state for THIS dir's files that left the recent
+    // set. Other directories' entries are none of this call's business (tests
+    // and dev overrides run several audit dirs in one process).
+    cache.retain(|p, _| p.parent() != Some(dir) || recent.contains(p));
+
+    let purge_before = now_epoch_secs().saturating_sub(MAX_ROSTER_WINDOW_SECS);
     let mut out = Vec::new();
     for path in recent {
         let Ok(meta) = std::fs::metadata(&path) else {
             continue;
         };
-        let start = meta.len().saturating_sub(MAX_TAIL_BYTES);
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            continue;
+        let len = meta.len();
+
+        let needs_fresh_scan = match cache.get(&path) {
+            Some(tail) => len < tail.parsed_to, // shrank: torn-tail rollback
+            None => true,
         };
-        if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        if f.read_to_end(&mut bytes).is_err() {
-            continue;
-        }
-        let buf = String::from_utf8_lossy(&bytes);
-        let mut lines = buf.lines();
-        // A mid-file seek likely lands inside a line; drop that first partial.
-        if start > 0 {
-            lines.next();
-        }
-        for line in lines {
-            if line.trim().is_empty() {
+        if needs_fresh_scan {
+            // Plain windowed scan (the pre-cache behavior), seeding the cache.
+            let start = len.saturating_sub(MAX_TAIL_BYTES);
+            let Ok(mut f) = std::fs::File::open(&path) else {
+                cache.remove(&path);
+                continue;
+            };
+            if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
+                cache.remove(&path);
                 continue;
             }
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
-                let ts = v
-                    .get("ts_unix_ms")
-                    .and_then(Value::as_u64)
-                    .map(|ms| ms / 1000)
-                    .unwrap_or(0);
-                if ts >= cutoff_secs {
-                    out.push(v);
+            let mut bytes = Vec::new();
+            if f.read_to_end(&mut bytes).is_err() {
+                cache.remove(&path);
+                continue;
+            }
+            let mut records = std::collections::VecDeque::new();
+            // Only complete lines are consumed; a torn trailing line stays
+            // unparsed and unconsumed until its newline lands.
+            let consumed = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+            let buf = String::from_utf8_lossy(&bytes[..consumed]);
+            let mut lines = buf.lines();
+            // A mid-file seek likely lands inside a line; drop that first partial.
+            if start > 0 {
+                lines.next();
+            }
+            for line in lines {
+                push_audit_line(&mut records, line);
+            }
+            cache.insert(
+                path.clone(),
+                AuditTail {
+                    parsed_to: start + consumed as u64,
+                    records,
+                },
+            );
+        } else if let Some(tail) = cache.get_mut(&path) {
+            if len > tail.parsed_to {
+                // Append-only delta: parsed_to sits just after a '\n', so the
+                // delta starts on a line boundary.
+                if let Ok(mut f) = std::fs::File::open(&path) {
+                    if f.seek(SeekFrom::Start(tail.parsed_to)).is_ok() {
+                        let mut bytes = Vec::new();
+                        if f.read_to_end(&mut bytes).is_ok() {
+                            let consumed =
+                                bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+                            let buf = String::from_utf8_lossy(&bytes[..consumed]);
+                            for line in buf.lines() {
+                                push_audit_line(&mut tail.records, line);
+                            }
+                            tail.parsed_to += consumed as u64;
+                        }
+                    }
                 }
             }
         }
+
+        if let Some(tail) = cache.get_mut(&path) {
+            // Bound the cache: drop records past the maximum roster window,
+            // then enforce the hard cap (oldest first).
+            while tail
+                .records
+                .front()
+                .is_some_and(|(ts, _)| *ts < purge_before)
+            {
+                tail.records.pop_front();
+            }
+            while tail.records.len() > TAIL_CACHE_MAX_RECORDS {
+                tail.records.pop_front();
+            }
+            out.extend(
+                tail.records
+                    .iter()
+                    .filter(|(ts, _)| *ts >= cutoff_secs)
+                    .map(|(_, v)| v.clone()),
+            );
+        }
     }
     out
+}
+
+/// Parse one audit line into `(ts_secs, record)` and push it (best-effort:
+/// blank or corrupt lines are skipped, exactly like the pre-cache scan did).
+fn push_audit_line(records: &mut std::collections::VecDeque<(u64, Value)>, line: &str) {
+    if line.trim().is_empty() {
+        return;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(line) {
+        let ts = v
+            .get("ts_unix_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| ms / 1000)
+            .unwrap_or(0);
+        records.push_back((ts, v));
+    }
 }
 
 /// agents.list (T0): a live roster of the CALLER'S OWN recently active agent
@@ -2130,6 +2196,113 @@ mod tests {
             );
         }
         assert_eq!(tool_tier("agent.sessions"), Some(Tier::T0));
+    }
+
+    /// One hand-written audit line for the tail-cache tests (only the fields
+    /// `read_recent_audit` actually reads).
+    fn tail_rec(tool: &str, ts_ms: u64) -> String {
+        json!({"ts_unix_ms": ts_ms, "tool": tool, "caller_uid": 1000, "caller_pid": 42}).to_string()
+    }
+
+    /// Fresh scratch audit dir for a tail-cache test. Each test uses its OWN
+    /// dir: the incremental cache is keyed by file path, so distinct dirs mean
+    /// independent cache state.
+    fn tail_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vibed-tail-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn recent_audit_tail_is_incremental_and_sees_appends() {
+        let dir = tail_test_dir("incr");
+        let file = dir.join("vibed-2099-01-01.jsonl");
+        let now_ms = now_epoch_secs() * 1000;
+        let cutoff = now_epoch_secs().saturating_sub(120);
+
+        std::fs::write(
+            &file,
+            format!("{}\n{}\n", tail_rec("t1", now_ms), tail_rec("t2", now_ms)),
+        )
+        .unwrap();
+        let first = read_recent_audit(&dir, cutoff);
+        assert_eq!(first.len(), 2, "seed scan reads both records: {first:?}");
+
+        // Append-only growth: the next probe must return the delta too.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            writeln!(f, "{}", tail_rec("t3", now_ms)).unwrap();
+        }
+        let second = read_recent_audit(&dir, cutoff);
+        assert_eq!(second.len(), 3, "delta record must appear: {second:?}");
+        assert!(
+            second.iter().any(|r| r["tool"] == "t3"),
+            "the appended record is present: {second:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_audit_tail_rescans_after_truncation() {
+        let dir = tail_test_dir("trunc");
+        let file = dir.join("vibed-2099-01-01.jsonl");
+        let now_ms = now_epoch_secs() * 1000;
+        let cutoff = now_epoch_secs().saturating_sub(120);
+
+        std::fs::write(
+            &file,
+            format!("{}\n{}\n", tail_rec("t1", now_ms), tail_rec("t2", now_ms)),
+        )
+        .unwrap();
+        assert_eq!(read_recent_audit(&dir, cutoff).len(), 2);
+
+        // Startup torn-tail rollback shrinks the file: the cache must notice
+        // (size < parsed_to) and rescan from scratch, not serve stale records.
+        std::fs::write(&file, format!("{}\n", tail_rec("t1", now_ms))).unwrap();
+        let after = read_recent_audit(&dir, cutoff);
+        assert_eq!(after.len(), 1, "shrunk file must be rescanned: {after:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recent_audit_tail_leaves_a_torn_line_until_its_newline_lands() {
+        let dir = tail_test_dir("torn");
+        let file = dir.join("vibed-2099-01-01.jsonl");
+        let now_ms = now_epoch_secs() * 1000;
+        let cutoff = now_epoch_secs().saturating_sub(120);
+
+        // One complete record, then a record whose newline has not landed yet
+        // (the writer emits the line and its '\n' as separate writes).
+        std::fs::write(
+            &file,
+            format!("{}\n{}", tail_rec("t1", now_ms), tail_rec("t2", now_ms)),
+        )
+        .unwrap();
+        let first = read_recent_audit(&dir, cutoff);
+        assert_eq!(
+            first.len(),
+            1,
+            "the un-terminated line is not consumed: {first:?}"
+        );
+
+        // The newline lands: the next probe parses the now-complete line.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            f.write_all(b"\n").unwrap();
+        }
+        let second = read_recent_audit(&dir, cutoff);
+        assert_eq!(second.len(), 2, "completed line is now parsed: {second:?}");
+        assert!(second.iter().any(|r| r["tool"] == "t2"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
