@@ -257,12 +257,41 @@ pub(crate) fn run_action<C: CdpChannel>(
             "browser: run_action sans sessionId de page — refusé".to_string(),
         );
     }
-    if let BrowserAction::Submit { selector } = action {
-        return run_submit(session, page, selector);
-    }
-    match run_simple_action(session, action, page) {
-        Ok(v) => ActionOutcome::Completed(v),
-        Err(e) => ActionOutcome::Failed(e),
+    // click/fill/submit : binding par-objet à TROIS états (effet distant possible — POST d'un
+    // submit, d'un `onclick`/`onchange`). navigate/read/screenshot : sans effet distant via
+    // binding → `Ok`/`Err` simple.
+    match action {
+        BrowserAction::Click { selector } => run_object_action(
+            session,
+            page,
+            "click",
+            selector,
+            CLICK_FN,
+            json!([]),
+            json!({ "clicked": true }),
+        ),
+        BrowserAction::Fill { selector, value } => run_object_action(
+            session,
+            page,
+            "fill",
+            selector,
+            FILL_FN,
+            json!([{ "value": value }]),
+            json!({ "filled": true }),
+        ),
+        BrowserAction::Submit { selector } => run_object_action(
+            session,
+            page,
+            "submit",
+            selector,
+            SUBMIT_FN,
+            json!([]),
+            json!({ "submitted": true }),
+        ),
+        _ => match run_simple_action(session, action, page) {
+            Ok(v) => ActionOutcome::Completed(v),
+            Err(e) => ActionOutcome::Failed(e),
+        },
     }
 }
 
@@ -377,121 +406,110 @@ fn run_simple_action<C: CdpChannel>(
                 })?;
             Ok(json!({ "screenshot_png_base64": data }))
         }
-        BrowserAction::Click { selector } => {
-            // Binding par-objet (ADR-022) : le sélecteur est un PARAMÈTRE de `DOM.querySelector`,
-            // le nœud est lié en `this` d'une fonction CONSTANTE — JAMAIS d'interpolation.
-            //
-            // Garde de TIER (Fable 5 F1) : `click` est T1, mais cliquer un SUBMITTER de formulaire
-            // (`<button>` type submit/défaut, `<input type=submit|image>`) déclenche un POST
-            // mutant — c'est le plancher T2 de `submit`, et le danger double-POST qui a fait
-            // différer `submit`. On REFUSE ce cas (fonction TOUJOURS constante) : l'agent doit
-            // passer par `browser.submit`. `closest` couvre aussi un clic sur un DESCENDANT du
-            // bouton (qui bulle et soumettrait quand même).
-            //
-            // ⚠️ Navigation par click (Fable 5 F2) : un click sur `<a href=autre-hôte>` /
-            // `target=_blank` navigue SANS repasser par `[rule.domains]` de `navigate` ; le
-            // contrôle est le PROXY egress (comme les redirections). Invariant du câblage live :
-            // le proxy CONNECT DOIT atterrir AVANT que `browser.*` ne soit exposé.
-            let object_id = resolve_object(session, page, selector)?;
-            call_on_object(
-                session,
-                page,
-                &object_id,
-                "function() { const b = this.closest ? this.closest('button, input') : null; \
-                 if (b && b.form) { const t = (b.getAttribute('type') || \
-                 (b.tagName === 'BUTTON' ? 'submit' : '')).toLowerCase(); \
-                 if ((b.tagName === 'BUTTON' && t === 'submit') || \
-                 (b.tagName === 'INPUT' && (t === 'submit' || t === 'image'))) \
-                 throw new Error('submitter de formulaire — utilisez browser.submit (T2)'); } \
-                 this.click(); }",
-                json!([]),
-            )?;
-            Ok(json!({ "clicked": true }))
-        }
-        BrowserAction::Fill { selector, value } => {
-            let object_id = resolve_object(session, page, selector)?;
-            // La VALEUR est un ARGUMENT (`arguments[0]`), JAMAIS dans la source de la fonction —
-            // c'est ce qui garde `browser.evaluate` exclu même pour une valeur hostile. Garde
-            // anti-cloaking (Fable 5 F3) : une cible sans propriété `value` (contenteditable,
-            // élément générique) fait ÉCHOUER le fill au lieu de renvoyer `filled: true` menteur.
-            // (`<select>`/checkbox ONT `value` mais une sémantique différente — limite
-            // fonctionnelle assumée, pas un mensonge d'exécution.)
-            call_on_object(
-                session,
-                page,
-                &object_id,
-                "function(v) { if (!('value' in this)) \
-                 throw new Error('cible sans propriété value — fill inapplicable'); \
-                 this.focus(); this.value = v; \
-                 this.dispatchEvent(new Event('input', { bubbles: true })); \
-                 this.dispatchEvent(new Event('change', { bubbles: true })); }",
-                json!([{ "value": value }]),
-            )?;
-            Ok(json!({ "filled": true }))
-        }
-        // `submit` est routé vers `run_submit` par `run_action` (chemin à trois états) — jamais ici.
-        BrowserAction::Submit { .. } => {
-            unreachable!("browser.submit est routé vers run_submit par run_action")
+        // click/fill/submit sont routés vers `run_object_action` par `run_action` (chemin à trois
+        // états) et n'atteignent JAMAIS ici. Refus DÉFENSIF plutôt qu'un `unreachable!`/panic (Fable
+        // 5) — un panic dans un daemon sécurité est pire qu'une erreur si un futur appelant interne
+        // les envoyait par erreur.
+        BrowserAction::Click { .. } | BrowserAction::Fill { .. } | BrowserAction::Submit { .. } => {
+            Err(
+                "browser: verbe d'interaction routé hors de run_simple_action — bug interne"
+                    .to_string(),
+            )
         }
     }
 }
 
-/// Exécute `submit` avec le binding par-objet ET la sémantique à **trois états** (ADR-022 addendum,
-/// Fable 5). `submit` déclenche un POST **mutant** : contrairement aux autres verbes, un échec
-/// APRÈS émission du `callFunctionOn` (flux CDP cassé ⇒ session **empoisonnée**) NE PEUT PAS être
-/// `Failed` — le POST a peut-être tiré, un retry ferait un **double-POST** → `Indeterminate`. Un
-/// échec AVANT (resolve raté, ou exception page « pas un `<form>` ») reste `Failed` (rien n'est
-/// parti). La `functionDeclaration` est **constante** (invariant anti-`browser.evaluate`) ; elle
-/// exige que la cible soit un `<form>`.
-fn run_submit<C: CdpChannel>(
+/// `click` : fonction CONSTANTE. Garde de TIER (Fable 5) — refuse un SUBMITTER de formulaire
+/// (`<button>` submit/défaut, `<input type=submit|image>`, ou un DESCENDANT via `closest`) : le
+/// POST mutant passe par `browser.submit` (T2). ⚠️ Une navigation par click (`<a href>`) n'est PAS
+/// gouvernée par `[rule.domains]` de `navigate` — c'est le PROXY egress qui la contrôle.
+const CLICK_FN: &str =
+    "function() { const b = this.closest ? this.closest('button, input') : null; \
+     if (b && b.form) { const t = (b.getAttribute('type') || \
+     (b.tagName === 'BUTTON' ? 'submit' : '')).toLowerCase(); \
+     if ((b.tagName === 'BUTTON' && t === 'submit') || \
+     (b.tagName === 'INPUT' && (t === 'submit' || t === 'image'))) \
+     throw new Error('submitter de formulaire — utilisez browser.submit (T2)'); } \
+     this.click(); }";
+
+/// `fill` : fonction CONSTANTE ; la valeur est `arguments[0]`, JAMAIS interpolée. Garde
+/// anti-cloaking (Fable 5) : une cible sans propriété `value` (contenteditable, générique) échoue
+/// au lieu de mentir `filled: true`.
+const FILL_FN: &str = "function(v) { if (!('value' in this)) \
+     throw new Error('cible sans propriété value — fill inapplicable'); \
+     this.focus(); this.value = v; \
+     this.dispatchEvent(new Event('input', { bubbles: true })); \
+     this.dispatchEvent(new Event('change', { bubbles: true })); }";
+
+/// `submit` : fonction CONSTANTE ; exige un `<form>` puis `this.submit()` (soumission DOM brute,
+/// sans donner la main à un `onsubmit` de page hostile — choix de gouvernance).
+const SUBMIT_FN: &str =
+    "function() { if (this.tagName !== 'FORM') throw new Error('cible pas un <form>'); \
+     this.submit(); }";
+
+/// Cœur commun de **click/fill/submit** : le **binding par-objet** (`resolve_object` → `callFunctionOn`
+/// avec le nœud lié en `this` d'une fonction CONSTANTE) ET la sémantique à **trois états** (Fable 5).
+/// Ces trois verbes peuvent avoir un **effet distant** (POST d'un submit, d'un `onclick`/`onchange`)
+/// — d'où la distinction :
+/// - `resolve_object` raté, ou `exceptionDetails` (la fonction a levé) → **`Failed`** (rien n'a été
+///   exécuté côté page) ;
+/// - `callFunctionOn` échoué **APRÈS émission** (flux CDP cassé ⇒ session **empoisonnée**) →
+///   **`Indeterminate`** : l'effet distant a PEUT-ÊTRE eu lieu → **NE PAS réessayer** (double-effet) ;
+/// - `callFunctionOn` en `Err` **sans** poison → erreur applicative CDP (commande rejetée AVANT
+///   exécution) → **`Failed`**.
+///
+/// **Invariant load-bearing (Fable 5)** : la classification `Failed` du bras applicatif n'est correcte
+/// que parce que `function_declaration` est **synchrone** et `awaitPromise: false` — Chrome sérialise
+/// alors le `result` AVANT toute destruction de contexte (navigation committée). Rendre la fonction
+/// `async` / `awaitPromise: true` ferait qu'une erreur « context destroyed » APRÈS un effet distant
+/// arriverait en `Cdp` (non empoisonné) → `Failed` → double-effet. **Ne pas changer sans reclasser.**
+///
+/// **`success_body` n'est PAS un effet confirmé (Fable 5)** : `clicked`/`filled`/`submitted: true`
+/// signifie « la fonction a été invoquée sans lever », PAS « le POST/effet réseau a abouti »
+/// (`HTMLFormElement.submit()` sur un form détaché est un no-op silencieux ; `tagName` est spoofable).
+/// L'aval NE DOIT PAS traiter ce booléen comme une confirmation de mutation.
+fn run_object_action<C: CdpChannel>(
     session: &mut CdpSession<C>,
     page: &str,
+    verb: &str,
     selector: &str,
+    function_declaration: &str,
+    arguments: Value,
+    success_body: Value,
 ) -> ActionOutcome {
-    // resolve : tout échec ici est AVANT toute soumission → Failed (rien n'est parti).
+    // resolve : tout échec ici est AVANT toute exécution de la fonction → Failed (rien n'est parti).
     let object_id = match resolve_object(session, page, selector) {
         Ok(o) => o,
-        Err(e) => return ActionOutcome::Failed(format!("browser.submit: {e}")),
+        Err(e) => return ActionOutcome::Failed(format!("browser.{verb}: {e}")),
     };
     let r = session.call(
         "Runtime.callFunctionOn",
         json!({
             "objectId": object_id,
-            "functionDeclaration":
-                "function() { if (this.tagName !== 'FORM') throw new Error('cible pas un <form>'); \
-                 this.submit(); }",
-            "arguments": [],
+            "functionDeclaration": function_declaration,
+            "arguments": arguments,
             "returnByValue": true,
             "awaitPromise": false,
         }),
         Some(page),
     );
     match r {
-        // Réponse reçue : si la fonction a levé (`exceptionDetails`), le submit N'A PAS eu lieu →
-        // Failed. Sinon `this.submit()` a été appelé → Completed.
         Ok(resp) => {
             if resp.get("exceptionDetails").is_some() {
-                ActionOutcome::Failed(
-                    "browser.submit: exception côté page (cible pas un <form> ?) — refusé"
-                        .to_string(),
-                )
+                ActionOutcome::Failed(format!("browser.{verb}: exception côté page — refusé"))
             } else {
-                ActionOutcome::Completed(json!({ "submitted": true }))
+                ActionOutcome::Completed(success_body)
             }
         }
-        // `session.call` a échoué. **Empoisonnée** ⇒ erreur PROTOCOLE : le `callFunctionOn` est
-        // PARTI mais le flux s'est cassé → le POST a PEUT-ÊTRE tiré → **Indeterminate** (jamais
-        // Failed, sinon double-POST). **Non empoisonnée** ⇒ erreur applicative CDP (commande
-        // rejetée AVANT exécution) → Failed. `e` peut porter un message du pair : assaini.
         Err(e) => {
             let e = crate::cdp::sanitize_peer_text(&e);
             if session.is_poisoned() {
                 ActionOutcome::Indeterminate(format!(
-                    "browser.submit: flux CDP cassé APRÈS émission — POST indéterminé, NE PAS \
-                     réessayer : {e}"
+                    "browser.{verb}: flux CDP cassé APRÈS émission — effet distant indéterminé, NE \
+                     PAS réessayer : {e}"
                 ))
             } else {
-                ActionOutcome::Failed(format!("browser.submit: {e}"))
+                ActionOutcome::Failed(format!("browser.{verb}: {e}"))
             }
         }
     }
@@ -534,34 +552,6 @@ fn resolve_object<C: CdpChannel>(
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "browser: DOM.resolveNode sans objectId — refusé".to_string())
-}
-
-/// Exécute une fonction **constante** sur l'`objectId` (le nœud lié en `this`), avec des
-/// `arguments` éventuels (valeur d'un `fill` en `arguments[0]`) — **jamais d'interpolation**.
-/// Fail-closed : une exception côté page (`exceptionDetails`) est une erreur, pas un succès
-/// silencieux (même doctrine que `read`, Fable 5).
-fn call_on_object<C: CdpChannel>(
-    session: &mut CdpSession<C>,
-    page: &str,
-    object_id: &str,
-    function_declaration: &str,
-    arguments: Value,
-) -> Result<(), String> {
-    let r = session.call(
-        "Runtime.callFunctionOn",
-        json!({
-            "objectId": object_id,
-            "functionDeclaration": function_declaration,
-            "arguments": arguments,
-            "returnByValue": true,
-            "awaitPromise": false,
-        }),
-        Some(page),
-    )?;
-    if r.get("exceptionDetails").is_some() {
-        return Err("browser: l'action a levé une exception côté page — refusé".to_string());
-    }
-    Ok(())
 }
 
 /// Cap DUR d'actions par batch (ADR-022 addendum ratifié, Fable 5) : la garantie « chromium
@@ -667,6 +657,25 @@ pub(crate) fn parse_batch(payload: &Value) -> Result<BrowserBatch, String> {
             }
         }
         steps.push(plan_action(verb, s).map_err(|e| format!("browser.batch: étape {i}: {e}"))?);
+    }
+    // (Fable 5 F1, BLOQUANT) `submit` (POST mutant) DOIT être la DERNIÈRE étape (donc ≤1 par batch).
+    // Sinon un `submit` COMPLETED peut précéder une étape qui échoue → le batch devient "failed"
+    // (contractuellement REJOUABLE) alors que le POST a DÉJÀ tiré → double-POST, déclenchable par
+    // une page de confirmation hostile qui lève à la lecture (`read` fail-closed → step Failed).
+    // Terminal ⇒ un `submit` completed est toujours le dernier ⇒ batch "completed" (jamais rejoué) ;
+    // un `submit` failed/indeterminate en dernier ⇒ aucun submit antérieur n'a tiré ⇒ "failed"
+    // redevient idempotent et "indeterminate" porte seul le drapeau NE-PAS-RÉESSAYER.
+    if let Some(pos) = steps
+        .iter()
+        .position(|s| matches!(s, BrowserAction::Submit { .. }))
+    {
+        if pos != steps.len() - 1 {
+            return Err(
+                "browser.batch: 'submit' doit être la DERNIÈRE étape du batch (≤1 par batch, \
+                 anti double-POST) — refusé"
+                    .to_string(),
+            );
+        }
     }
     Ok(BrowserBatch { steps })
 }
@@ -1042,6 +1051,35 @@ mod tests {
         assert!(
             !f.contains("login"),
             "le sélecteur ne doit JAMAIS entrer dans la source : {f}"
+        );
+        // (Fable 5 F2) Verrou golden : `awaitPromise: false` — invariant load-bearing de la
+        // classification Failed/Indeterminate (fonction synchrone, résultat sérialisé AVANT toute
+        // destruction de contexte). Le passer à true casserait l'anti-double-POST.
+        assert_eq!(call["params"]["awaitPromise"], false);
+    }
+
+    #[test]
+    fn click_is_indeterminate_on_a_protocol_break_after_dispatch() {
+        // (Fable 5 F6) Un click peut muter (onclick → fetch POST). Comme submit, un callFunctionOn
+        // ÉMIS puis flux cassé (poison) → Indeterminate (effet distant indéterminé, ne pas
+        // réessayer) — l'unification via run_object_action ferme le trou onclick-POST.
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 5}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "O"}}})),
+            // pas de réponse au callFunctionOn (id 4) → poison après émission.
+        ]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#buy".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Indeterminate(_)),
+            "attendu Indeterminate : {out:?}"
         );
     }
 
@@ -1600,5 +1638,30 @@ mod tests {
             &json!({"steps": [{"verb": "fill", "selector": "#q", "value": "hi"}]})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn parse_batch_requires_submit_to_be_the_last_step() {
+        // (F1, BLOQUANT) submit non-terminal → refusé (anti double-POST par batch).
+        assert!(parse_batch(&json!({"steps": [
+            {"verb": "submit", "selector": "form"}, {"verb": "read"}
+        ]}))
+        .unwrap_err()
+        .contains("DERNIÈRE étape"));
+        // Deux submits → refusé (le 1er n'est pas le dernier).
+        assert!(parse_batch(&json!({"steps": [
+            {"verb": "submit", "selector": "a"}, {"verb": "submit", "selector": "b"}
+        ]}))
+        .unwrap_err()
+        .contains("DERNIÈRE étape"));
+        // submit EN DERNIER (le flux prévu navigate→fill→submit) → OK.
+        assert!(parse_batch(&json!({"steps": [
+            {"verb": "navigate", "url": "https://x.com"},
+            {"verb": "fill", "selector": "#q", "value": "hi"},
+            {"verb": "submit", "selector": "form"}
+        ]}))
+        .is_ok());
+        // submit seul (dernier ET premier) → OK.
+        assert!(parse_batch(&json!({"steps": [{"verb": "submit", "selector": "form"}]})).is_ok());
     }
 }
