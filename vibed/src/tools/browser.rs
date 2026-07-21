@@ -1,11 +1,15 @@
 //! `browser.*` — navigation web pilotée par l'IA, gouvernée (ADR-017 option C,
 //! ADR-022).
 //!
-//! **Pure et inerte** : cette couche mappe un verbe navigateur + ses arguments vers
-//! une [`BrowserAction`] validée, **agnostique du transport**. Rien ici ne lance
-//! `chromium`, ne parle CDP, ni n'atteint le réseau — le transport CDP
-//! (`run_browser` dans le helper) et le proxy CONNECT sont des incréments ultérieurs,
-//! revus séparément. La gouvernance est EN AMONT : `[rule.domains]` (déjà câblé via
+//! **Agnostique du transport** : cette couche mappe un verbe navigateur + ses arguments
+//! vers une [`BrowserAction`] validée ([`plan_action`]), parse un **batch** d'actions
+//! ([`parse_batch`]) et le **pilote** contre une [`CdpSession`] abstraite ([`run_batch`] :
+//! `attach_page` une fois, exécution en séquence, trois états, fail-closed, agrégat borné).
+//! Elle ne **lance** pas `chromium` (`browser_transport::spawn_chromium`), ne possède pas les
+//! fds/stdin-stdout du helper (le mode-entry `run_browser`, incrément suivant), et n'atteint
+//! pas le réseau — testée de bout en bout avec un `CdpChannel` factice, sans `chromium`. Le
+//! proxy CONNECT et le câblage dispatch sont des incréments ultérieurs. La gouvernance est
+//! EN AMONT dans `vibed` : `[rule.domains]` (déjà câblé via
 //! `derive_domain`/`CallContext.domain`) décide quel hôte `navigate` peut atteindre,
 //! et le plancher de tier (navigate/read/screenshot/click/fill = T1 ; submit = T2 —
 //! ADR-017 décision 2) s'applique avant qu'on arrive ici.
@@ -318,6 +322,115 @@ pub(crate) fn run_action<C: CdpChannel>(
             )
         }
     }
+}
+
+/// Cap DUR d'actions par batch (ADR-022 addendum ratifié, Fable 5) : la garantie « chromium
+/// jeté par appel » s'érode avec la longueur — un batch de 200 actions serait un `chromium`
+/// hostile vivant longtemps dans une unité approuvée **une fois**. On borne à un petit nombre.
+pub(crate) const MAX_BATCH_STEPS: usize = 16;
+
+/// Borne de l'**agrégat** remonté (ADR-022 addendum, Fable 5) : borner chaque résultat ne
+/// suffit pas ; 16 lectures de 1 Mio bâtiraient un JSON de 16 Mio que le cap du pipe
+/// tronquerait salement. On arrête le batch dès que le cumul des résultats dépasse ce seuil.
+const MAX_BATCH_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Un batch d'actions navigateur validées, exécuté par un **seul** `chromium` (modèle de
+/// session **batch éphémère**, ADR-022 addendum ratifié). Chaque action est déjà passée par
+/// [`plan_action`]. Les étapes `assert` déclaratives (vérif-avant-`submit`) sont un incrément
+/// ultérieur — non incluses ici pour ne pas porter un type inexécutable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrowserBatch {
+    pub steps: Vec<BrowserAction>,
+}
+
+/// Parse le **payload de contrôle** du batch (ce que `vibed` descend au helper sur stdin) :
+/// `{ "steps": [ { "verb": "navigate", "url": "…" }, … ] }`. **Fail-closed** : refuse un
+/// `steps` absent / non-tableau / **vide** / au-delà de [`MAX_BATCH_STEPS`], ou une étape sans
+/// `verb` / mal formée (déléguée à [`plan_action`], qui rejette verbe inconnu, URL non-http(s),
+/// caractères de contrôle…). La gouvernance (tier = max des verbes, `[rule.domains]` par
+/// `navigate`, screening des `fill`, approbation T2) est **en amont dans `vibed`**, avant l'envoi.
+pub(crate) fn parse_batch(payload: &Value) -> Result<BrowserBatch, String> {
+    let steps_json = payload
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "browser.batch: 'steps' manquant ou pas un tableau — refusé".to_string())?;
+    if steps_json.is_empty() {
+        return Err("browser.batch: batch vide — refusé".to_string());
+    }
+    if steps_json.len() > MAX_BATCH_STEPS {
+        return Err(format!(
+            "browser.batch: {} étapes > cap {MAX_BATCH_STEPS} — refusé (confinement)",
+            steps_json.len()
+        ));
+    }
+    let mut steps = Vec::with_capacity(steps_json.len());
+    for (i, s) in steps_json.iter().enumerate() {
+        let verb = s
+            .get("verb")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("browser.batch: étape {i} sans 'verb' — refusé"))?;
+        steps.push(plan_action(verb, s).map_err(|e| format!("browser.batch: étape {i}: {e}"))?);
+    }
+    Ok(BrowserBatch { steps })
+}
+
+/// Taille sérialisée (octets) d'un `Value`, pour la borne d'agrégat. Un `Value` déjà construit
+/// se sérialise toujours (clés String, ni NaN ni Inf) ; en cas d'échec improbable on compte 0.
+fn json_size(v: &Value) -> usize {
+    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
+}
+
+/// Exécute un [`BrowserBatch`] contre une `CdpSession` (un `chromium`, une page) et rend un
+/// résultat JSON **agrégé** et **opaque** (le contenu vient de pages hostiles). Modèle **batch
+/// éphémère** (ADR-022 addendum ratifié) :
+/// - **`attach_page` UNE fois** → le `sessionId` de page threadé dans chaque [`run_action`] ;
+/// - exécution **en séquence**, continuité au sein du batch (le `read` voit ce que le `navigate`
+///   précédent a chargé — c'est TOUT l'intérêt du batch vs process-par-verbe) ;
+/// - **trois états par action** (addendum, Fable 5) : `completed` (Ok), `failed` (Err), et
+///   `indeterminate` **réservé** au `submit` dont le POST est parti sans réponse (jamais
+///   `failed`, sinon double-POST au retry). Les verbes actuels (navigate/read/screenshot) sont
+///   des lectures/navigations **sans mutation distante** → jamais `indeterminate` ; cet état
+///   apparaîtra avec le binding de `submit` ;
+/// - **fail-closed** : une action non `completed` **arrête** le batch (les suivantes ne tirent
+///   pas — l'agent avait planifié en supposant le succès des précédentes) ;
+/// - **agrégat borné** : arrêt si le cumul des résultats dépasse [`MAX_BATCH_RESULT_BYTES`]
+///   (le cap du pipe côté `vibed` reste le garde-fou dur ultime).
+///
+/// Ne panique jamais : rend toujours un JSON décrivant ce qui a eu lieu (même un `attach`
+/// raté), pour que la ligne d'audit et l'agent voient l'état réel.
+pub(crate) fn run_batch<C: CdpChannel>(session: &mut CdpSession<C>, batch: &BrowserBatch) -> Value {
+    let page = match crate::browser_transport::attach_page(session) {
+        Ok(p) => p,
+        Err(e) => {
+            return json!({ "batch": "failed", "attached": false, "error": e, "steps": [] });
+        }
+    };
+
+    let mut results = Vec::with_capacity(batch.steps.len());
+    let mut agg_bytes = 0usize;
+    let mut batch_status = "completed";
+
+    for (i, action) in batch.steps.iter().enumerate() {
+        let (status, body) = match run_action(session, action, &page) {
+            Ok(v) => ("completed", v),
+            Err(e) => ("failed", json!({ "error": e })),
+        };
+        agg_bytes += json_size(&body);
+        results.push(json!({ "index": i, "status": status, "result": body }));
+
+        // Fail-closed : la première action non réussie arrête le batch.
+        if status != "completed" {
+            batch_status = status;
+            break;
+        }
+        // Borne d'agrégat : on ne lance pas l'action suivante si on a déjà trop accumulé.
+        if agg_bytes > MAX_BATCH_RESULT_BYTES {
+            batch_status = "truncated";
+            break;
+        }
+    }
+
+    json!({ "batch": batch_status, "attached": true, "steps": results })
 }
 
 #[cfg(test)]
@@ -679,5 +792,163 @@ mod tests {
             .unwrap_err()
             .contains("verbe inconnu"));
         assert!(plan_action("execute", &json!({})).is_err());
+    }
+
+    // ----- batch : parse_batch + run_batch (modèle de session batch, ADR-022 addendum) -----
+
+    #[test]
+    fn parse_batch_accepts_a_sequence_and_maps_each_step() {
+        let b = parse_batch(&json!({
+            "steps": [
+                { "verb": "navigate", "url": "https://github.com/x" },
+                { "verb": "read" },
+                { "verb": "screenshot" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(b.steps.len(), 3);
+        assert_eq!(
+            b.steps[0],
+            BrowserAction::Navigate {
+                host: "github.com".to_string(),
+                url: "https://github.com/x".to_string(),
+            }
+        );
+        assert_eq!(b.steps[1], BrowserAction::Read);
+        assert_eq!(b.steps[2], BrowserAction::Screenshot);
+    }
+
+    #[test]
+    fn parse_batch_is_fail_closed() {
+        // 'steps' absent / pas un tableau / vide.
+        assert!(parse_batch(&json!({})).unwrap_err().contains("manquant"));
+        assert!(parse_batch(&json!({"steps": "x"}))
+            .unwrap_err()
+            .contains("manquant"));
+        assert!(parse_batch(&json!({"steps": []}))
+            .unwrap_err()
+            .contains("vide"));
+        // Au-delà du cap.
+        let many: Vec<Value> = (0..MAX_BATCH_STEPS + 1)
+            .map(|_| json!({"verb": "read"}))
+            .collect();
+        assert!(parse_batch(&json!({ "steps": many }))
+            .unwrap_err()
+            .contains("cap"));
+        // Étape sans 'verb'.
+        assert!(parse_batch(&json!({"steps": [{"url": "https://x"}]}))
+            .unwrap_err()
+            .contains("sans 'verb'"));
+        // Verbe inconnu / args invalides → délégué à plan_action.
+        assert!(parse_batch(&json!({"steps": [{"verb": "evaluate"}]}))
+            .unwrap_err()
+            .contains("verbe inconnu"));
+        assert!(
+            parse_batch(&json!({"steps": [{"verb": "navigate", "url": "file:///x"}]})).is_err()
+        );
+    }
+
+    /// Fabrique un `FakeCdp` dont les 2 premières réponses satisfont `attach_page`
+    /// (createTarget id1 → targetId, attachToTarget id2 → sessionId), suivies de `rest`.
+    fn cdp_with_attach(rest: Vec<Vec<u8>>) -> FakeCdp {
+        let mut chunks = vec![
+            cdp_frame(json!({"id": 1, "result": {"targetId": "T1"}})),
+            cdp_frame(json!({"id": 2, "result": {"sessionId": "S1"}})),
+        ];
+        chunks.extend(rest);
+        FakeCdp::new(chunks)
+    }
+
+    #[test]
+    fn run_batch_attaches_once_then_runs_steps_in_sequence() {
+        // navigate (Page.enable id3, Page.navigate id4) puis read (Runtime.evaluate id5).
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {}})),
+            cdp_frame(json!({"id": 4, "result": {"frameId": "F1"}})),
+            cdp_frame(json!({"id": 5, "result": {"result": {"value": "<html>hi</html>"}}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Navigate {
+                    host: "github.com".to_string(),
+                    url: "https://github.com/x".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(&mut s, &batch);
+        assert_eq!(out["batch"], "completed");
+        assert_eq!(out["attached"], true);
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["status"], "completed");
+        assert_eq!(steps[0]["result"]["navigated"], "https://github.com/x");
+        assert_eq!(steps[1]["status"], "completed");
+        assert_eq!(steps[1]["result"]["html"], "<html>hi</html>");
+    }
+
+    #[test]
+    fn run_batch_is_fail_closed_and_stops_on_the_first_non_completed_step() {
+        // read (Runtime.evaluate id3) réussit ; click échoue (deferred, aucun appel CDP) →
+        // le batch s'arrête, le 2e read ne tire PAS.
+        let chan = cdp_with_attach(vec![cdp_frame(
+            json!({"id": 3, "result": {"result": {"value": "<html>a</html>"}}}),
+        )]);
+        let mut s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Read,
+                BrowserAction::Click {
+                    selector: "#x".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(&mut s, &batch);
+        assert_eq!(out["batch"], "failed");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2, "le 3e read ne doit PAS tirer (fail-closed)");
+        assert_eq!(steps[0]["status"], "completed");
+        assert_eq!(steps[1]["status"], "failed");
+        assert!(steps[1]["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("incrément suivant"));
+    }
+
+    #[test]
+    fn run_batch_reports_a_failed_attach_without_panicking() {
+        // createTarget id1 répond sans targetId → attach_page échoue → batch failed, attached=false.
+        let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {}}))]);
+        let mut s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![BrowserAction::Read],
+        };
+        let out = run_batch(&mut s, &batch);
+        assert_eq!(out["batch"], "failed");
+        assert_eq!(out["attached"], false);
+        assert_eq!(out["steps"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn run_batch_bounds_the_aggregate_and_stops_when_over_cap() {
+        // Un premier read renvoie un HTML > cap d'agrégat → batch "truncated", le 2e read
+        // ne tire pas.
+        let big = "x".repeat(MAX_BATCH_RESULT_BYTES + 1);
+        let chan = cdp_with_attach(vec![cdp_frame(
+            json!({"id": 3, "result": {"result": {"value": big}}}),
+        )]);
+        let mut s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![BrowserAction::Read, BrowserAction::Read],
+        };
+        let out = run_batch(&mut s, &batch);
+        assert_eq!(out["batch"], "truncated");
+        assert_eq!(
+            out["steps"].as_array().unwrap().len(),
+            1,
+            "le 2e read ne doit pas tirer après dépassement de la borne d'agrégat"
+        );
     }
 }
