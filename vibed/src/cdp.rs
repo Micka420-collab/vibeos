@@ -322,6 +322,16 @@ impl<C: CdpChannel> CdpSession<C> {
         self.chan
     }
 
+    /// La session est-elle **empoisonnée** (une erreur de PROTOCOLE/flux l'a avortée) ? Permet à
+    /// l'appelant de distinguer, après un [`Self::call`] en `Err`, une erreur **protocole** (la
+    /// commande est PARTIE mais le flux s'est cassé — poison) d'une erreur **applicative CDP** (le
+    /// pair a répondu `error` pour NOTRE id — pas de poison). Critique pour `browser.submit` : un
+    /// `callFunctionOn` de submit qui échoue APRÈS émission (poison) = POST peut-être parti =
+    /// `Indeterminate`, jamais `Failed` (sinon double-POST au retry — Fable 5).
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     /// Émet `method(params)` (optionnellement ciblé sur `session_id`) et renvoie le
     /// `result` de la réponse corrélée. Voir l'invariant sur [`CdpSession`].
     pub fn call(
