@@ -24,27 +24,33 @@ const MAX_REQUEST_LINE: usize = 512;
 
 /// Parse la **ligne de requête** HTTP CONNECT d'un client (`chromium`) et rend `(host, port)`.
 /// L'entrée est **hostile** : fail-closed sur tout écart (méthode ≠ CONNECT, autorité absente,
-/// port absent/invalide, host au charset non-hostname, ligne trop longue, non-UTF8, tokens en
-/// trop). Le `host` est renvoyé en **minuscules ASCII** (les noms d'hôte sont insensibles à la
-/// casse — le matching `[rule.domains]` en aval doit voir une forme canonique).
+/// port absent/invalide, ligne trop longue, non-UTF8, tokens en trop, host non canonique).
 ///
-/// N'accepte **que** des hosts de type nom-de-domaine (`[a-z0-9.-]`) : les littéraux IP (v4/v6)
-/// et l'userinfo (`@`) sont **refusés** — le modèle `[rule.domains]` est par-DOMAINE, et
-/// `chromium` derrière un proxy envoie `CONNECT domaine:443` (c'est le proxy qui résout le DNS).
-/// Un littéral IP en autorité serait donc soit une tentative de contournement de l'allowlist,
-/// soit hors-modèle : refusé.
+/// **Le host passe par [`crate::domain::is_valid_host`]** — la MÊME validation que `host_of`,
+/// donc la **précondition de `domain_match`** (Fable 5) : source de vérité UNIQUE, sinon le proxy
+/// et le lint `navigate` valideraient différemment le même domaine sur un couple de gardes egress.
+/// Sont donc refusés (en plus du charset `[a-z0-9-]`) : point de tête/queue (`example.com.`),
+/// label vide/> 63, tiret de bord, host > 253, non-ASCII, IPv6 `[::1]`, userinfo `@`. Le host est
+/// rendu en **minuscules ASCII** (forme canonique pour le matching). Les **littéraux IPv4** (que
+/// `is_valid_host` accepte structurellement) sont refusés en plus (modèle par-DOMAINE) ; `chromium`
+/// derrière un proxy envoie `CONNECT domaine:443`, c'est le proxy qui résout le DNS.
 pub fn parse_connect_target(request: &[u8]) -> Result<(String, u16), String> {
     // On ne lit QUE la première ligne (jusqu'au premier CRLF) — les en-têtes ne nous concernent
     // pas pour la cible.
-    let crlf = request
+    // Cherche le CRLF UNIQUEMENT dans les premiers `MAX_REQUEST_LINE + 2` octets — sinon un
+    // `chromium` hostile qui n'envoie jamais de CRLF ferait scanner tout le tampon (DoS de scan,
+    // Fable 5 F3). Auto-défensif quelle que soit la taille passée par le relais ; borne aussi la
+    // ligne à `MAX_REQUEST_LINE`.
+    let window = request.get(..MAX_REQUEST_LINE + 2).unwrap_or(request);
+    let crlf = window
         .windows(2)
         .position(|w| w == b"\r\n")
-        .ok_or_else(|| "proxy: requête CONNECT sans CRLF — refusé".to_string())?;
-    if crlf > MAX_REQUEST_LINE {
-        return Err(format!(
-            "proxy: ligne de requête CONNECT trop longue ({crlf} > {MAX_REQUEST_LINE}) — refusé"
-        ));
-    }
+        .ok_or_else(|| {
+            format!(
+                "proxy: CRLF absent dans les premiers {} octets — refusé",
+                MAX_REQUEST_LINE + 2
+            )
+        })?;
     let line = std::str::from_utf8(&request[..crlf])
         .map_err(|_| "proxy: ligne CONNECT non-UTF8 — refusé".to_string())?;
 
@@ -72,41 +78,48 @@ pub fn parse_connect_target(request: &[u8]) -> Result<(String, u16), String> {
     let (host, port_str) = authority
         .rsplit_once(':')
         .ok_or_else(|| "proxy: autorité CONNECT sans port — refusé".to_string())?;
-    if host.is_empty() {
-        return Err("proxy: host CONNECT vide — refusé".to_string());
-    }
-    // Charset host = nom de domaine strict : lettres/chiffres ASCII, `-`, `.`. Refuse userinfo
-    // (`@`), les crochets IPv6, les espaces, les caractères de contrôle — tout ce qui n'est pas
-    // un FQDN. (Le matching de sous-domaine ancré vit dans `domain`/`policy` ; ici on garantit
-    // juste une forme propre pour ce matching.)
-    if !host
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-    {
+    // Source de vérité UNIQUE : la MÊME validation que `host_of`/`domain_match` (Fable 5 F1).
+    // Sinon deux parseurs valident différemment le même domaine sur un couple de gardes egress,
+    // et le host que le proxy connecte diverge de celui que la politique croit avoir autorisé.
+    // `is_valid_host` rejette : vide, > 253, non-ASCII, point de TÊTE/QUEUE (`example.com.`),
+    // label vide (`a..b`) / > 63, tiret de bord (`-x`), charset hors `[a-z0-9-]` (donc IPv6
+    // `[::1]`, userinfo `@`, ctrl chars). On lowercase D'ABORD (elle suppose la minuscule).
+    let host = host.to_ascii_lowercase();
+    if !crate::domain::is_valid_host(&host) {
         return Err(format!(
-            "proxy: host CONNECT {host:?} non-hostname (IP littérale/userinfo/charset) — refusé"
+            "proxy: host CONNECT {host:?} non canonique (cf. domain::is_valid_host) — refusé"
         ));
     }
-    // Refuse un host qui serait un littéral IPv4 pur (ex `10.0.0.1`) : le modèle est par-domaine,
-    // et le charset seul le laisserait passer (chiffres + points). Heuristique : tous les labels
-    // numériques ⇒ ressemble à une IPv4 ⇒ refusé (un vrai FQDN a un TLD alphabétique).
+    // `is_valid_host` accepte `10.0.0.1` STRUCTURELLEMENT (labels numériques valides) : le modèle
+    // étant par-DOMAINE, on refuse EN PLUS les littéraux IPv4 (TLD tout-numérique). Le point de
+    // queue étant déjà exclu par `is_valid_host`, le TLD est non vide (ce qui referme le trou
+    // « `127.0.0.1.` » — Fable 5 F2). ⚠️ Le VRAI gate reste l'allowlist deny-par-défaut ; cette
+    // heuristique n'attrape que le décimal-pointé classique — ne JAMAIS la traiter comme LE gate
+    // IP (formes hex/octales passeraient — Fable 5 F5).
     if host
         .rsplit('.')
         .next()
-        .is_some_and(|tld| !tld.is_empty() && tld.bytes().all(|b| b.is_ascii_digit()))
+        .is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
     {
         return Err(format!(
             "proxy: host CONNECT {host:?} ressemble à une IP littérale — refusé (modèle par-domaine)"
         ));
     }
+    // Port : exiger tout-digit AVANT le parse (aligné sur `host_of` — refuse `+443`, espaces… que
+    // `u16::from_str` accepterait sinon, Fable 5 F4).
+    if port_str.is_empty() || !port_str.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "proxy: port CONNECT {port_str:?} invalide — refusé"
+        ));
+    }
     let port: u16 = port_str
         .parse()
-        .map_err(|_| format!("proxy: port CONNECT {port_str:?} invalide — refusé"))?;
+        .map_err(|_| format!("proxy: port CONNECT {port_str:?} hors bornes u16 — refusé"))?;
     if port == 0 {
         return Err("proxy: port CONNECT 0 — refusé".to_string());
     }
 
-    Ok((host.to_ascii_lowercase(), port))
+    Ok((host, port))
 }
 
 #[cfg(test)]
@@ -144,51 +157,91 @@ mod tests {
     }
 
     #[test]
-    fn requires_a_port() {
+    fn requires_a_valid_port() {
         assert!(parse_connect_target(b"CONNECT example.com HTTP/1.1\r\n")
             .unwrap_err()
             .contains("sans port"));
+        // Port vide.
         assert!(parse_connect_target(b"CONNECT example.com: HTTP/1.1\r\n")
             .unwrap_err()
-            .contains("invalide")); // port vide
+            .contains("invalide"));
+        // > u16::MAX : tout-digit donc passe le charset, rejeté au parse.
         assert!(
             parse_connect_target(b"CONNECT example.com:99999 HTTP/1.1\r\n")
                 .unwrap_err()
-                .contains("invalide")
-        ); // > u16::MAX
+                .contains("hors bornes")
+        );
+        // Port 0.
         assert!(parse_connect_target(b"CONNECT example.com:0 HTTP/1.1\r\n")
             .unwrap_err()
             .contains("port CONNECT 0"));
+        // (F4) `+443` : `u16::from_str` l'accepterait — on exige tout-digit AVANT le parse.
+        assert!(
+            parse_connect_target(b"CONNECT example.com:+443 HTTP/1.1\r\n")
+                .unwrap_err()
+                .contains("invalide")
+        );
     }
 
     #[test]
     fn rejects_non_domain_authorities() {
-        // Littéral IPv4 pur (contournement d'allowlist par-domaine).
+        // Littéral IPv4 pur (contournement d'allowlist par-domaine) — is_valid_host l'accepte
+        // structurellement, l'heuristique IP le refuse.
         assert!(parse_connect_target(b"CONNECT 10.0.0.1:443 HTTP/1.1\r\n")
             .unwrap_err()
             .contains("IP littérale"));
-        // Littéral IPv6 (crochets hors charset).
-        assert!(parse_connect_target(b"CONNECT [::1]:443 HTTP/1.1\r\n")
+        // IPv6, userinfo, host vide, ctrl char : rejetés par is_valid_host (« non canonique »).
+        for bad in [
+            &b"CONNECT [::1]:443 HTTP/1.1\r\n"[..],
+            &b"CONNECT user@evil.com:443 HTTP/1.1\r\n"[..],
+            &b"CONNECT :443 HTTP/1.1\r\n"[..],
+            &b"CONNECT ex\x07ample.com:443 HTTP/1.1\r\n"[..],
+        ] {
+            assert!(
+                parse_connect_target(bad)
+                    .unwrap_err()
+                    .contains("non canonique"),
+                "doit refuser {:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_canonical_hosts_the_domain_match_precondition() {
+        // (F1/F2, Fable 5) Toute forme que `domain::is_valid_host` rejette — la PRÉCONDITION de
+        // `domain_match` — DOIT être refusée ici, sinon le proxy et le lint `navigate` valident
+        // différemment le même domaine (différentiel de parseurs sur un couple de gardes egress).
+        for bad in [
+            "example.com.", // point de QUEUE (défait aussi l'anti-IP : cf. 127.0.0.1.)
+            ".example.com", // point de TÊTE
+            "a..b.com",     // label vide
+            "-example.com", // tiret de bord
+            "example-.com", // tiret de bord
+            "127.0.0.1.",   // IPv4 + point final (F2 : ne doit PAS passer comme domaine)
+        ] {
+            let req = format!("CONNECT {bad}:443 HTTP/1.1\r\n");
+            assert!(
+                parse_connect_target(req.as_bytes())
+                    .unwrap_err()
+                    .contains("non canonique"),
+                "doit refuser {bad:?}"
+            );
+        }
+        // Label > 63 octets rejeté (borné par is_valid_host, pas seulement par MAX_REQUEST_LINE).
+        let long_label = "a".repeat(64);
+        let req = format!("CONNECT {long_label}.com:443 HTTP/1.1\r\n");
+        assert!(parse_connect_target(req.as_bytes())
             .unwrap_err()
-            .contains("non-hostname"));
-        // Userinfo.
-        assert!(
-            parse_connect_target(b"CONNECT user@evil.com:443 HTTP/1.1\r\n")
-                .unwrap_err()
-                .contains("non-hostname")
-        );
-        // Host vide.
-        assert!(parse_connect_target(b"CONNECT :443 HTTP/1.1\r\n")
-            .unwrap_err()
-            .contains("host CONNECT vide"));
+            .contains("non canonique"));
     }
 
     #[test]
     fn is_fail_closed_on_malformed_lines() {
-        // Pas de CRLF.
-        assert!(parse_connect_target(b"CONNECT x:443 HTTP/1.1")
+        // Pas de CRLF (dans la fenêtre bornée).
+        assert!(parse_connect_target(b"CONNECT x.com:443 HTTP/1.1")
             .unwrap_err()
-            .contains("sans CRLF"));
+            .contains("CRLF absent"));
         // Version inattendue.
         assert!(parse_connect_target(b"CONNECT x.com:443 HTTP/2\r\n")
             .unwrap_err()
@@ -199,20 +252,15 @@ mod tests {
                 .unwrap_err()
                 .contains("token en trop")
         );
-        // Autorité absente.
+        // Autorité absente (2 espaces).
         assert!(parse_connect_target(b"CONNECT  HTTP/1.1\r\n").is_err());
-        // Ligne géante (anti-DoS).
+        // (F3) Pas de CRLF dans les premiers MAX_REQUEST_LINE+2 octets → refus AVANT de scanner
+        // tout le tampon (DoS de scan). Le CRLF est repoussé au-delà de la fenêtre.
         let mut giant = b"CONNECT ".to_vec();
         giant.extend(std::iter::repeat(b'a').take(MAX_REQUEST_LINE));
         giant.extend_from_slice(b".com:443 HTTP/1.1\r\n");
         assert!(parse_connect_target(&giant)
             .unwrap_err()
-            .contains("trop longue"));
-        // Caractère de contrôle dans le host (anti-spoof).
-        assert!(
-            parse_connect_target(b"CONNECT ex\x07ample.com:443 HTTP/1.1\r\n")
-                .unwrap_err()
-                .contains("non-hostname")
-        );
+            .contains("CRLF absent"));
     }
 }
