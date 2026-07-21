@@ -258,6 +258,7 @@ fn is_internal_v4(v4: Ipv4Addr) -> bool {
         || (a == 172 && (16..=31).contains(&b))  // 172.16.0.0/12
         || (a == 192 && b == 168)                // 192.168.0.0/16
         || (a == 192 && b == 0 && o[2] == 0)     // 192.0.0.0/24 IETF
+        || (a == 192 && b == 88 && o[2] == 99)   // 192.88.99.0/24 relais 6to4 anycast (déprécié)
         || (a == 198 && (b == 18 || b == 19))    // 198.18.0.0/15 benchmarking
         || a >= 224 // 224/4 multicast + 240/4 réservé + 255.255.255.255 broadcast
 }
@@ -269,6 +270,25 @@ fn is_internal_v6(v6: Ipv6Addr) -> bool {
         return is_internal_v4(v4);
     }
     let s = v6.segments();
+    // Préfixes de TRANSITION qui embarquent une IPv4 de destination que `to_ipv4()` NE convertit
+    // PAS (Fable 5, faux négatifs) — sur un hôte à transit NAT64 (cloud IPv6-only : AWS/GCP,
+    // 464XLAT) le dial atteint RÉELLEMENT l'IPv4. On ré-évalue l'IPv4 embarquée (un NAT64/6to4 vers
+    // une IPv4 publique reste externe — zéro faux positif).
+    // NAT64 well-known 64:ff9b::/96 (RFC 6052) : IPv4 dans les 32 bits bas.
+    if s[0] == 0x0064 && s[1] == 0xff9b {
+        if s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+            let v4 = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+            return is_internal_v4(v4);
+        }
+        // local-use 64:ff9b:1::/48 (RFC 8215) & autres sous-préfixes : offset IPv4 piégeux
+        // (octet « u ») → tout le /32 réservé NAT64 est bloqué fail-closed.
+        return true;
+    }
+    // 6to4 2002::/16 (RFC 3056, déprécié RFC 7526) : IPv4 de site en s[1]s[2].
+    if s[0] == 0x2002 {
+        let v4 = Ipv4Addr::new((s[1] >> 8) as u8, s[1] as u8, (s[2] >> 8) as u8, s[2] as u8);
+        return is_internal_v4(v4);
+    }
     let first = s[0];
     first == 0                                    // ::/16 et préfixes tout-zéro non mappés
         || (first & 0xff00) == 0xff00             // ff00::/8 multicast
@@ -343,13 +363,24 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",        // IPv4-mapped privé/loopback (rebinding !)
             "::ffff:169.254.169.254", // IPv4-mapped métadonnée
+            "::127.0.0.1",            // IPv4-compat (forme ::a.b.c.d)
+            "64:ff9b::7f00:1",        // NAT64 well-known → 127.0.0.1 (rebinding, Fable 5)
+            "64:ff9b::a9fe:a9fe",     // NAT64 → 169.254.169.254 métadonnée
+            "64:ff9b:1::1",           // NAT64 local-use /48 → bloc fail-closed
+            "2002:7f00:1::",          // 6to4 → 127.0.0.1
+            "2002:a9fe:a9fe::",       // 6to4 → 169.254.169.254 métadonnée
+            "2002:0a00:1::",          // 6to4 → 10.0.0.1 privé
+            "febf::1",                // borne haute fe80::/10
         ] {
             assert!(is_internal_ip(v6(ip)), "{ip} doit être interne");
         }
         for ip in [
             "2606:4700:4700::1111",
             "2001:4860:4860::8888",
-            "::ffff:8.8.8.8", // IPv4-mapped PUBLIC → autorisé
+            "::ffff:8.8.8.8",   // IPv4-mapped PUBLIC → autorisé
+            "64:ff9b::808:808", // NAT64 → 8.8.8.8 PUBLIC → externe (pas de sur-blocage)
+            "fec0::1",          // ex site-local déprécié → externe (borne fe80::/10)
+            "2001:db9::1",      // borne 2001:db8::/32
         ] {
             assert!(!is_internal_ip(v6(ip)), "{ip} doit être externe");
         }
