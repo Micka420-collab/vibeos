@@ -370,12 +370,14 @@ fn all_addrs_external(addrs: &[SocketAddr]) -> bool {
 fn resolve_bounded(host: &str, port: u16, timeout: Duration) -> io::Result<Vec<SocketAddr>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let host_owned = host.to_string();
-    std::thread::spawn(move || {
+    // `Builder::spawn` : un refus de l'OS rend `Err` (→ dial échoue → 502) au lieu de PANIQUER le
+    // thread de service (Fable 5, F1). Thread détaché (pas de join).
+    std::thread::Builder::new().spawn(move || {
         let res = (host_owned.as_str(), port)
             .to_socket_addrs()
             .map(|it| it.collect::<Vec<_>>());
         let _ = tx.send(res); // le récepteur peut être parti (timeout) → on ignore
-    });
+    })?;
     match rx.recv_timeout(timeout) {
         Ok(res) => res,
         Err(_) => Err(io::Error::new(
@@ -422,11 +424,12 @@ fn dial_safe(host: &str, port: u16) -> io::Result<TcpStream> {
 fn splice(client: TcpStream, upstream: TcpStream) -> io::Result<()> {
     let mut client_read = client.try_clone()?;
     let mut upstream_write = upstream.try_clone()?;
-    // Sens 1 (thread) : client → upstream.
-    let t = std::thread::spawn(move || {
+    // Sens 1 (thread) : client → upstream. `Builder::spawn` : un refus de l'OS rend `Err` (les deux
+    // sockets se ferment en remontant) au lieu de PANIQUER le thread de service (Fable 5, F1).
+    let t = std::thread::Builder::new().spawn(move || {
         let _ = io::copy(&mut client_read, &mut upstream_write);
         let _ = upstream_write.shutdown(Shutdown::Write);
-    });
+    })?;
     // Sens 2 (thread courant) : upstream → client.
     let mut upstream_read = upstream;
     let mut client_write = client;
@@ -490,6 +493,9 @@ const MAX_CONCURRENT_CONNS: usize = 64;
 /// Taille max de la config lue sur stdin (bind + allowlist). Une allowlist légitime tient largement
 /// dessous ; borne un `vibed` bogué ou un futur chemin non fiable.
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+/// Petit backoff sur une erreur d'`accept` PERSISTANTE (EMFILE/ENFILE) — évite le busy-loop 100 %
+/// CPU d'un `accept()` qui re-`Err` instantanément (Fable 5, F3). Le proxy survit aux transitoires.
+const ACCEPT_ERR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Parse la **config** que `vibed` descend au proxy sur stdin : `{ "bind": "127.66.0.1:8888",
 /// "allowed": ["github.com", "*.github.com"] }`. `bind` DOIT parser en `SocketAddr` **loopback**
@@ -509,6 +515,11 @@ fn parse_proxy_request(payload: &Value) -> Result<(SocketAddr, Vec<String>), Str
             "proxy: 'bind' {bind:?} doit être une adresse loopback (jamais routable) — refusé"
         ));
     }
+    if addr.port() == 0 {
+        return Err(format!(
+            "proxy: 'bind' {bind:?} port 0 (éphémère imprévisible) — refusé"
+        ));
+    }
     let allowed = payload
         .get("allowed")
         .and_then(Value::as_array)
@@ -520,20 +531,45 @@ fn parse_proxy_request(payload: &Value) -> Result<(SocketAddr, Vec<String>), Str
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // F2 (Fable 5) : refuser une allowlist contenant un pattern MALFORMÉ (règle morte silencieuse —
+    // le proxy appliquerait une allowlist subtilement différente de celle que vibed croit avoir
+    // descendue). Même doctrine que « vibed refuse de démarrer sur une politique invalide ».
+    for p in &allowed {
+        if !crate::domain::is_valid_pattern(p) {
+            return Err(format!(
+                "proxy: pattern d'allowlist {p:?} invalide — refusé"
+            ));
+        }
+    }
     Ok((addr, allowed))
+}
+
+/// Décrémente le compteur de connexions actives à la sortie du thread de service — **RAII**, donc
+/// AUSSI sur panique (unwinding). Sans lui, une panique dans `serve_connection` (ou dans les
+/// `Builder::spawn` internes refusés par l'OS sous `TasksMax` serré) sauterait le décrément → le
+/// compteur fuit → le proxy se fige à `MAX_CONCURRENT_CONNS` = DoS d'egress PERMANENT déclenchable
+/// par un `chromium` hostile (Fable 5, F1).
+struct ConnGuard(Arc<AtomicUsize>);
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Boucle d'`accept` : chaque connexion cliente est servie dans son propre thread par
 /// [`serve_connection`], avec un **plafond de connexions concurrentes** ([`MAX_CONCURRENT_CONNS`]).
 /// Ne retourne **jamais** (le proxy vit tant que `vibed` ne tue pas l'unité transitoire — ADR-019).
-/// Une erreur d'`accept` transitoire est ignorée (on continue à servir). Le compteur `active` n'est
-/// incrémenté que par cette boucle (unique accepteur) et décrémenté par les threads de service.
+/// Le compteur `active` n'est incrémenté que par cette boucle (unique accepteur) et décrémenté par
+/// le [`ConnGuard`] RAII de chaque thread de service.
 fn serve_listener(listener: TcpListener, allowed: Vec<String>) {
     let allowed = Arc::new(allowed);
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(client) = stream else {
-            continue; // erreur d'accept transitoire → on continue
+            // Erreur d'accept : un cas PERMANENT (EMFILE/ENFILE) re-`Err` instantanément et ferait
+            // un busy-loop 100 % CPU — petit backoff (Fable 5, F3), sans abandonner (transitoires).
+            std::thread::sleep(ACCEPT_ERR_BACKOFF);
+            continue;
         };
         if active.load(Ordering::Relaxed) >= MAX_CONCURRENT_CONNS {
             drop(client); // trop de connexions ouvertes → fermer immédiatement (fail-closed)
@@ -541,11 +577,17 @@ fn serve_listener(listener: TcpListener, allowed: Vec<String>) {
         }
         active.fetch_add(1, Ordering::Relaxed);
         let allowed = Arc::clone(&allowed);
-        let active = Arc::clone(&active);
-        std::thread::spawn(move || {
+        let active_c = Arc::clone(&active);
+        // `Builder::spawn` (pas `thread::spawn`) : un refus de l'OS (EAGAIN/ENOMEM) rend `Err` au
+        // lieu de PANIQUER le thread d'accept — ce qui tuerait le proxy entier. Sur refus, on annule
+        // l'incrément (le guard n'a jamais tourné) ; la connexion se ferme (drop de la closure).
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let _guard = ConnGuard(active_c); // décrémente à TOUTE sortie, panique incluse
             let _ = serve_connection(client, &allowed);
-            active.fetch_sub(1, Ordering::Relaxed);
         });
+        if spawned.is_err() {
+            active.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -596,13 +638,17 @@ mod tests {
         }))
         .unwrap_err()
         .contains("loopback"));
-        // bind malformé, champs manquants, allowed non-tableau, entrée non-chaîne → refus.
+        // bind malformé/port 0, champs manquants, allowed non-tableau/non-chaîne/pattern invalide
+        // → refus (F2 : pattern malformé = règle morte silencieuse).
         for bad in [
             serde_json::json!({ "bind": "pas une adresse", "allowed": [] }),
+            serde_json::json!({ "bind": "127.0.0.1:0", "allowed": [] }), // port 0
             serde_json::json!({ "allowed": [] }),
             serde_json::json!({ "bind": "127.0.0.1:1" }),
             serde_json::json!({ "bind": "127.0.0.1:1", "allowed": "x" }),
             serde_json::json!({ "bind": "127.0.0.1:1", "allowed": [1, 2] }),
+            serde_json::json!({ "bind": "127.0.0.1:1", "allowed": [""] }), // pattern vide invalide
+            serde_json::json!({ "bind": "127.0.0.1:1", "allowed": ["a..b.com"] }), // label vide
         ] {
             assert!(parse_proxy_request(&bad).is_err(), "doit refuser {bad}");
         }
