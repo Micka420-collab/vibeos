@@ -22,8 +22,14 @@
 //! ni de chemin. Tout écart d'un `chromium` hostile est **fail-closed**.
 
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+
+use serde_json::Value;
 
 /// Longueur maximale de la ligne de requête CONNECT (anti-DoS ; une autorité DNS légitime
 /// tient largement dessous — un FQDN fait au plus 253 octets).
@@ -477,9 +483,130 @@ fn set_idle_timeouts(s: &TcpStream, d: Duration) -> io::Result<()> {
     Ok(())
 }
 
+/// Nombre max de connexions concurrentes servies. Même avec les timeouts par-connexion, on borne
+/// le nombre de threads/FD qu'un `chromium` hostile peut ouvrir d'un coup (Fable 5, défense en
+/// profondeur anti-DoS). Au-delà, la nouvelle connexion est **fermée immédiatement** (fail-closed).
+const MAX_CONCURRENT_CONNS: usize = 64;
+/// Taille max de la config lue sur stdin (bind + allowlist). Une allowlist légitime tient largement
+/// dessous ; borne un `vibed` bogué ou un futur chemin non fiable.
+const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+
+/// Parse la **config** que `vibed` descend au proxy sur stdin : `{ "bind": "127.66.0.1:8888",
+/// "allowed": ["github.com", "*.github.com"] }`. `bind` DOIT parser en `SocketAddr` **loopback**
+/// (défense en profondeur : le proxy ne se lie JAMAIS à une adresse routable, même sur une config
+/// bogue). `allowed` = les patterns `[rule.domains]` **déjà approuvés** pour la session (le proxy
+/// est form-agnostique : il ne décide pas de l'allowlist, il l'applique). Fail-closed sur tout écart.
+fn parse_proxy_request(payload: &Value) -> Result<(SocketAddr, Vec<String>), String> {
+    let bind = payload
+        .get("bind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "proxy: champ 'bind' manquant ou non-chaîne — refusé".to_string())?;
+    let addr: SocketAddr = bind.parse().map_err(|_| {
+        format!("proxy: 'bind' {bind:?} n'est pas une adresse:port valide — refusé")
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(format!(
+            "proxy: 'bind' {bind:?} doit être une adresse loopback (jamais routable) — refusé"
+        ));
+    }
+    let allowed = payload
+        .get("allowed")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "proxy: champ 'allowed' manquant ou non-tableau — refusé".to_string())?
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_string).ok_or_else(|| {
+                "proxy: 'allowed' contient une entrée non-chaîne — refusé".to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((addr, allowed))
+}
+
+/// Boucle d'`accept` : chaque connexion cliente est servie dans son propre thread par
+/// [`serve_connection`], avec un **plafond de connexions concurrentes** ([`MAX_CONCURRENT_CONNS`]).
+/// Ne retourne **jamais** (le proxy vit tant que `vibed` ne tue pas l'unité transitoire — ADR-019).
+/// Une erreur d'`accept` transitoire est ignorée (on continue à servir). Le compteur `active` n'est
+/// incrémenté que par cette boucle (unique accepteur) et décrémenté par les threads de service.
+fn serve_listener(listener: TcpListener, allowed: Vec<String>) {
+    let allowed = Arc::new(allowed);
+    let active = Arc::new(AtomicUsize::new(0));
+    for stream in listener.incoming() {
+        let Ok(client) = stream else {
+            continue; // erreur d'accept transitoire → on continue
+        };
+        if active.load(Ordering::Relaxed) >= MAX_CONCURRENT_CONNS {
+            drop(client); // trop de connexions ouvertes → fermer immédiatement (fail-closed)
+            continue;
+        }
+        active.fetch_add(1, Ordering::Relaxed);
+        let allowed = Arc::clone(&allowed);
+        let active = Arc::clone(&active);
+        std::thread::spawn(move || {
+            let _ = serve_connection(client, &allowed);
+            active.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+}
+
+/// Entrée du **mode helper `proxy`** (ADR-022) : lit la config `{bind, allowed}` sur stdin (bornée),
+/// bind le listener, et sert jusqu'à ce que `vibed` tue l'unité. Ne retourne `Ok` jamais en
+/// fonctionnement normal (la boucle d'accept est infinie) ; `Err` sur config malformée ou bind raté
+/// (fail-closed). **Forme** (netns : `chromium` restreint à l'IP du proxy, proxy avec egress
+/// Internet) et **orchestration** (spawn concurrent au navigateur, teardown) = incrément suivant.
+pub fn run_proxy() -> Result<String, String> {
+    let mut payload = String::new();
+    io::stdin()
+        .take(MAX_CONFIG_BYTES)
+        .read_to_string(&mut payload)
+        .map_err(|e| format!("proxy: lecture de la config : {e}"))?;
+    let payload: Value = serde_json::from_str(payload.trim())
+        .map_err(|e| format!("proxy: config malformée : {e}"))?;
+    let (bind, allowed) = parse_proxy_request(&payload)?;
+    let listener = TcpListener::bind(bind).map_err(|e| format!("proxy: bind {bind} : {e}"))?;
+    serve_listener(listener, allowed); // ne retourne pas (accept infini)
+    Ok(String::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_proxy_request_validates_bind_loopback_and_allowlist() {
+        // Config valide.
+        let (addr, allowed) = parse_proxy_request(&serde_json::json!({
+            "bind": "127.66.0.1:8888",
+            "allowed": ["github.com", "*.github.com"]
+        }))
+        .unwrap();
+        assert_eq!(addr.to_string(), "127.66.0.1:8888");
+        assert_eq!(
+            allowed,
+            vec!["github.com".to_string(), "*.github.com".to_string()]
+        );
+        // bind NON loopback → refus (défense en profondeur : jamais routable).
+        assert!(parse_proxy_request(&serde_json::json!({
+            "bind": "0.0.0.0:8888", "allowed": []
+        }))
+        .unwrap_err()
+        .contains("loopback"));
+        assert!(parse_proxy_request(&serde_json::json!({
+            "bind": "8.8.8.8:443", "allowed": []
+        }))
+        .unwrap_err()
+        .contains("loopback"));
+        // bind malformé, champs manquants, allowed non-tableau, entrée non-chaîne → refus.
+        for bad in [
+            serde_json::json!({ "bind": "pas une adresse", "allowed": [] }),
+            serde_json::json!({ "allowed": [] }),
+            serde_json::json!({ "bind": "127.0.0.1:1" }),
+            serde_json::json!({ "bind": "127.0.0.1:1", "allowed": "x" }),
+            serde_json::json!({ "bind": "127.0.0.1:1", "allowed": [1, 2] }),
+        ] {
+            assert!(parse_proxy_request(&bad).is_err(), "doit refuser {bad}");
+        }
+    }
 
     #[test]
     fn read_request_head_stops_at_the_blank_line_without_eating_the_tunnel() {

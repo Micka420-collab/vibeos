@@ -614,8 +614,13 @@ pub mod helper {
             // `browser_transport` (`#![cfg(unix)]`) ; l'arm est absente hors unix → « unknown ».
             #[cfg(unix)]
             "browser" => crate::browser_transport::run_browser(),
+            // Mode proxy CONNECT — le seul chemin d'egress du navigateur (ADR-022). Spawné dans une
+            // unité partageant le netns de `chromium` (forme à trancher) ; lit `{bind, allowed}` sur
+            // stdin et sert jusqu'au teardown. Unix-only (sert un chromium unix-only).
+            #[cfg(unix)]
+            "proxy" => crate::proxy::run_proxy(),
             other => Err(format!(
-                "unknown vibed-tool mode {other:?} (known: probe, deploy, browser)"
+                "unknown vibed-tool mode {other:?} (known: probe, deploy, browser, proxy)"
             )),
         }
     }
