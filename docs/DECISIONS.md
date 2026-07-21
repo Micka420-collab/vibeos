@@ -1837,7 +1837,7 @@ Un **mode d'exploitation** à deux états, matérialisé par un enregistrement r
 
 ### Contexte
 
-C'est le prolongement direct de l'idéation « symbiose IA-citoyenne » ([ADR-023](#), agent.thinking, [ADR-026](#)) : après *ce que l'agent peut faire*, *pense* et *a fait*, vient *ce que la machine comprend de l'humain*. Deux tensions cadrent la conception :
+C'est le prolongement direct de l'idéation « symbiose IA-citoyenne » (ADR-023, agent.thinking, ADR-026) : après *ce que l'agent peut faire*, *pense* et *a fait*, vient *ce que la machine comprend de l'humain*. Deux tensions cadrent la conception :
 
 - **Vie privée.** « Analyser l'humain de fond en comble » touche au plus sensible. Or l'invariant du projet est que **la mémoire appartient à l'utilisateur et à personne d'autre**, et que l'OS est *security-first*. Un modèle de l'humain ne peut donc être ni caché, ni exfiltré, ni fondé sur une surveillance nouvelle.
 - **Honnêteté.** « Prédire/anticiper » ne doit pas survendre : pas de prédicteur entraîné boîte-noire présenté comme de la voyance.
@@ -1854,7 +1854,7 @@ Un outil **`user.model` (T0, lecture seule)** qui rend un **modèle DÉRIVÉ et 
 - **`anticipations`** : vos prochaines actions gouvernées les plus probables, classées par une **heuristique déterministe fréquence×récence**, **chacune avec sa raison** (« fait N fois, vu il y a Xs ») — jamais un score opaque.
 
 **Ce qui rend ça sûr et honnête, par conception :**
-- **Aucune fuite NOUVELLE** : les mêmes données sous-jacentes sont déjà accessibles à l'agent pour son propre uid via `memory.query` + `agent.activity` ; `user.model` ne fait que les **agréger** (même raisonnement qu'[ADR-023](#)/[ADR-026](#)). La trace d'audit reste root-only et sur la denylist.
+- **Aucune fuite NOUVELLE** : les mêmes données sous-jacentes sont déjà accessibles à l'agent pour son propre uid via `memory.query` + `agent.activity` ; `user.model` ne fait que les **agréger** (même raisonnement qu'ADR-023/ADR-026). La trace d'audit reste root-only et sur la denylist.
 - **Aucune surveillance nouvelle** : le modèle ne lit **jamais** les frappes clavier ni l'historique shell brut de l'humain (non captés, et hors éthique du projet). La symbiose est bâtie sur du signal **gouverné et transparent**, pas sur de l'espionnage.
 - **Local, possédé, effaçable** : le store est `/var/lib/vibeos/memory/` (« appartient à son utilisateur »). Chaque champ est inspectable ; rien de caché. Cœur de dérivation **pur** (`derive_user_model`) et déterministe — testable et auditable.
 - **Anticipation ≠ prédiction entraînée** : le champ le dit lui-même (`note`), et chaque anticipation porte sa raison.
@@ -1878,7 +1878,7 @@ Un outil **`user.model` (T0, lecture seule)** qui rend un **modèle DÉRIVÉ et 
 
 ### Contexte
 
-Genesis (le premier boot, [MEMORY.md §4.1](MEMORY.md)) écrivait jusqu'ici le **corps** de la machine (`identity.toml`, `hardware.json`) et le squelette mémoire. Il manquait **l'âme** : VibeOS présente l'IA comme un *citoyen* de l'OS ([ADR-023](#), [ADR-026](#)), or un citoyen a un caractère. Trois tensions cadrent la conception :
+Genesis (le premier boot, [MEMORY.md §4.1](MEMORY.md)) écrivait jusqu'ici le **corps** de la machine (`identity.toml`, `hardware.json`) et le squelette mémoire. Il manquait **l'âme** : VibeOS présente l'IA comme un *citoyen* de l'OS (ADR-023, ADR-026), or un citoyen a un caractère. Trois tensions cadrent la conception :
 
 - **Unicité authentique.** « Elle choisit sa personnalité à chaque installation » doit être **réel**, pas un tirage cosmétique identique partout — mais aussi **reproductible et testable**, pas un chaos aléatoire non déterministe (le projet interdit `Math.random`/horloge dans le code déterministe ; ici, en bash, même exigence morale).
 - **Hors-ligne.** Genesis tourne au premier boot, potentiellement sans réseau. Le caractère ne peut dépendre d'aucun appel distant.
@@ -1892,7 +1892,7 @@ Un fichier **`personality.toml`** (schema 1), **écrit une seule fois par Genesi
 
 2. **L'éveil visible (livré).** Genesis imprime sur la console (stderr, comme `log()`) un **bloc futuriste** révélant le citoyen : cadre, nom, archétype, ton, **jauges** de traits, et un manifeste de naissance (« Je nais sur cette machine. Je ne sais rien de vous — encore. Apprenons-nous. »). Purement cosmétique et **gardé** (`birth_ceremony || true`) : il ne peut jamais faire échouer Genesis. Couleur seulement sur un vrai terminal (`-t 2`, `NO_COLOR` absent, `TERM ≠ dumb`).
 
-3. **Naissance → symbiose (contrat livré, boucle à venir).** `[traits]` est un tempérament **de naissance**. La table `[adaptation]` **déclare** quel trait se réajuste à partir de quel champ du signal `user.model` ([ADR-028](#)) : `concision ← rhythm+preferences`, `warmth ← friction`, `initiative ← patterns`. C'est le **contrat d'évolution** — comment le caractère se **plie vers l'humain** (« il évolue vers vous ; il ne vous imite pas »). La **boucle de réécriture vivante** (un agent qui replie `user.model` dans le caractère au fil des interactions) est une **sur-couche (Phase 3)**.
+3. **Naissance → symbiose (contrat livré, boucle à venir).** `[traits]` est un tempérament **de naissance**. La table `[adaptation]` **déclare** quel trait se réajuste à partir de quel champ du signal `user.model` (ADR-028) : `concision ← rhythm+preferences`, `warmth ← friction`, `initiative ← patterns`. C'est le **contrat d'évolution** — comment le caractère se **plie vers l'humain** (« il évolue vers vous ; il ne vous imite pas »). La **boucle de réécriture vivante** (un agent qui replie `user.model` dans le caractère au fil des interactions) est une **sur-couche (Phase 3)**.
 
 **Ce qui rend ça sûr et honnête, par conception :**
 - **Déterministe et testable** : cœur de dérivation pur (même ancre ⇒ même caractère), vérifié par le smoke test Genesis en CI (naissance, plancher de `caution`, déterminisme birth-mis-à-part).
@@ -1903,12 +1903,12 @@ Un fichier **`personality.toml`** (schema 1), **écrit une seule fois par Genesi
 
 - **Tirer le caractère au hasard (horloge/`$RANDOM`)** : rejeté — non reproductible, non testable, et le caractère changerait à chaque rejeu Genesis après une coupure (deux âmes pour une machine). L'ancre stable donne l'unicité **sans** le chaos.
 - **Interroger l'humain à la naissance pour fixer le caractère** (brancher `agent/genesis_interview.py`) : c'est une **piste distincte et complémentaire** (Phase 3, cf. survol du reste-à-faire) — elle fonde le profil **de l'humain** (`user/`), pas l'âme **de la machine**. Les deux coexistent : la machine naît avec un tempérament, puis apprend l'humain. Ne pas coupler les deux évite de bloquer la naissance sur un TTY.
-- **Un caractère caché, optimisé pour l'agent seul** : rejeté — même principe qu'[ADR-028](#), la transparence pour l'humain est non négociable : « l'IA a un caractère » seulement via ce que vous pouvez lire (`personality.toml`).
+- **Un caractère caché, optimisé pour l'agent seul** : rejeté — même principe qu'ADR-028, la transparence pour l'humain est non négociable : « l'IA a un caractère » seulement via ce que vous pouvez lire (`personality.toml`).
 - **Faire modifier tout l'OS à la naissance pour « se personnaliser »** : hors sujet et impossible (racine immuable) — la personnalisation vit dans la mémoire possédée par l'utilisateur, pas dans l'image.
 
 ### Conséquences
 
 - Genesis fait naître un **citoyen avec un caractère**, unique par installation, visible dès le premier boot. La surface d'outils **ne bouge pas** (c'est un **scope** de `memory.query`, pas un nouvel outil) : les scopes mémoire passent de 6 à **7** (`personality`).
 - Le HUD et les agents peuvent lire « qui es-tu ? » en un appel (`memory.query` scope `personality`) — fondation pour un HUD qui **incarne** le caractère (ton, accent visuel) et pour la **cérémonie graphique** de naissance (Phase 3, dès qu'une ISO boote).
-- Fondation pour la **symbiose vivante** : la table `[adaptation]` donne le contrat que la future boucle repliera depuis `user.model` ([ADR-028](#)) ; le caractère se **plie vers l'humain** sans jamais l'imiter servilement, et sans surveillance nouvelle (il ne consomme que du signal déjà gouverné).
+- Fondation pour la **symbiose vivante** : la table `[adaptation]` donne le contrat que la future boucle repliera depuis `user.model` (ADR-028) ; le caractère se **plie vers l'humain** sans jamais l'imiter servilement, et sans surveillance nouvelle (il ne consomme que du signal déjà gouverné).
 - Résiduel assumé : la boucle d'adaptation vivante et la cérémonie graphique sont **Phase 3 / machine-gated** ; à la naissance le caractère est un **tempérament**, pas encore un miroir de l'humain (honnête par construction).

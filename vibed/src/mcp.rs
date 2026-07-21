@@ -117,10 +117,11 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "/etc/ipsec.secrets",       // IPsec PSK/keys
     "/etc/ipsec.d/private/**",  // IPsec private keys
     "/etc/pki/**/private/**",   // TLS/PKI private keys (public certs stay readable)
-    "**/.docker/config.json",   // registry auth tokens
-    "**/.kube/config",          // kubernetes cluster credentials
-    "**/.netrc",                // machine login credentials
-    "/root/**",                 // root's home directory
+    "**/.docker/config.json",   // registry auth tokens (Docker)
+    "**/.config/containers/auth.json", // Podman/skopeo/buildah registry authfile (image is Podman-first)
+    "**/.kube/config",                 // kubernetes cluster credentials
+    "**/.netrc",                       // machine login credentials
+    "/root/**",                        // root's home directory
     // OSTree/bootc symlinks /root -> /var/roothome, and the fs tools canonicalize
     // before re-checking, so the raw glob above must be mirrored on the canonical
     // spelling too (builtin_denied uses glob_match, which is alias-blind). Reads
@@ -160,7 +161,8 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "**/.local/share/opencode/**", // opencode auth.json + agent-internal state
     "**/.ollama/**",               // ollama keypair (id_ed25519)
     "**/.npmrc",                   // npm registry authTokens
-    "**/.git-credentials",         // plaintext git credentials store
+    "**/.git-credentials",         // plaintext git credentials store (home-root)
+    "**/.config/git/credentials",  // git-credential-store XDG fallback (git ships w/ gh, lazygit)
     "**/.config/sops/**",          // SOPS/age private keys (keys.txt)
 ];
 
@@ -2121,6 +2123,9 @@ mod tests {
         for path in [
             "/etc/vibeos/policy.d/default.toml",
             "/var/lib/vibeos/memory/identity.toml",
+            // The ADR-029 birth character: readable via memory.query, never
+            // writable (an agent must not overwrite its own soul).
+            "/var/lib/vibeos/memory/personality.toml",
         ] {
             assert!(
                 builtin_denied(path, true).is_some(),
@@ -2131,6 +2136,18 @@ mod tests {
                 "{path} must stay readable"
             );
         }
+        // The operating-mode record (ADR-027) is the no-self-escalation
+        // invariant: an agent must never fs.write it (to flip open mode). It
+        // stays READABLE — the mode is public anyway via os.status — so the
+        // denial is write-only, and that asymmetry is the point of this check.
+        assert!(
+            builtin_denied("/var/lib/vibeos/mode.json", true).is_some(),
+            "mode.json must be write-denied (no self-escalation)"
+        );
+        assert!(
+            builtin_denied("/var/lib/vibeos/mode.json", false).is_none(),
+            "mode.json stays readable (mode is public via os.status)"
+        );
     }
 
     #[test]
@@ -2230,6 +2247,8 @@ mod tests {
             "/home/dev/.ollama/id_ed25519",
             "/home/dev/.npmrc",
             "/home/dev/.git-credentials",
+            "/home/dev/.config/git/credentials", // git-credential-store XDG fallback
+            "/home/dev/.config/containers/auth.json", // Podman/skopeo/buildah authfile
             "/home/dev/.config/sops/age/keys.txt",
         ] {
             assert!(
@@ -2304,6 +2323,33 @@ mod tests {
         // tool_tier runs on every tools/call and once per audit record walked
         // by the agents.list roster loop.
         assert!(std::ptr::eq(tool_catalog(), tool_catalog()));
+    }
+
+    #[test]
+    fn memory_scopes_match_the_query_catalog_enum() {
+        // ADR-029 had to add "personality" in TWO hand-maintained places:
+        // MEMORY_SCOPES (drives the tool logic) and the JSON-schema `scope`
+        // enum advertised in the memory.query catalog entry. If they drift,
+        // memory.query either advertises a scope it rejects or hides one it
+        // accepts — a silent observability bug on a governed read surface.
+        let entry = tool_catalog()
+            .iter()
+            .find(|(name, ..)| *name == "memory.query")
+            .expect("memory.query is in the catalog");
+        let enum_scopes: std::collections::BTreeSet<&str> = entry
+            .3
+            .pointer("/properties/scope/enum")
+            .and_then(|v| v.as_array())
+            .expect("memory.query schema has properties.scope.enum")
+            .iter()
+            .map(|v| v.as_str().expect("scope enum entries are strings"))
+            .collect();
+        let table_scopes: std::collections::BTreeSet<&str> =
+            MEMORY_SCOPES.iter().map(|(name, ..)| *name).collect();
+        assert_eq!(
+            enum_scopes, table_scopes,
+            "memory.query scope enum and MEMORY_SCOPES have drifted"
+        );
     }
 
     #[test]

@@ -78,6 +78,7 @@ reason = "Read-only file access and directory listing outside the audit trail, s
 [rule.paths]
 denied = [
   "/var/lib/vibeos/audit/**",  # audit trail: agents must never read or probe it
+  "/var/lib/vibeos/approvals/**", # approval store: agents must not read or forge grants
   "/etc/shadow*",              # /etc/shadow and /etc/shadow- (password hashes)
   "/etc/gshadow*",             # group password hashes
   "**/.ssh/**",                # SSH key material, wherever it lives
@@ -92,10 +93,12 @@ denied = [
   "/etc/ipsec.secrets",        # IPsec PSK/keys
   "/etc/ipsec.d/private/**",   # IPsec private keys
   "/etc/pki/**/private/**",    # TLS/PKI private keys (public certs stay readable)
-  "**/.docker/config.json",    # container registry auth tokens
+  "**/.docker/config.json",    # container registry auth tokens (Docker)
+  "**/.config/containers/auth.json", # Podman/skopeo/buildah registry authfile (Podman-first image)
   "**/.kube/config",           # kubernetes cluster credentials
   "**/.netrc",                 # machine login credentials
   "/root/**",                  # root's home directory
+  "/var/roothome/**",          # canonical form of /root on OSTree (matcher is alias-blind)
   "/proc/*/environ",           # process environments may leak secrets
   "/proc/**/environ",          # ...including /proc/<pid>/task/<tid>/environ
   "/proc/**/cmdline",          # command lines may carry secrets/tokens
@@ -123,7 +126,8 @@ denied = [
   "**/.local/share/opencode/**", # opencode auth.json + agent-internal state
   "**/.ollama/**",             # ollama keypair (id_ed25519)
   "**/.npmrc",                 # npm registry authTokens
-  "**/.git-credentials",       # plaintext git credentials store
+  "**/.git-credentials",       # plaintext git credentials store (home-root)
+  "**/.config/git/credentials", # git-credential-store XDG fallback
   "**/.config/sops/**",        # SOPS/age private keys (keys.txt)
 ]
 
@@ -181,6 +185,7 @@ denied = [
   "/var/lib/vibeos/memory/**",
   "/var/lib/vibeos/audit/**",
   "/etc/vibeos/policy.d/**",
+  "/var/lib/vibeos/mode.json", # no-self-escalation (ADR-027): an agent must never write itself into open mode
 ]
 
 [[rule]]

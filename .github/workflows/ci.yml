@@ -319,16 +319,63 @@ jobs:
           # personality.toml — the AI citizen's birth character (§3.8).
           import re
           p = (root / "personality.toml").read_text()
+          def field(name):
+              m = re.search(rf'^{name} = "(.*)"$', p, re.M)
+              assert m, f"{name} missing from personality.toml"
+              return m.group(1)
           assert re.search(r"^schema = 1$", p, re.M), "personality schema must be 1"
-          assert re.search(r'^name = "', p, re.M) and re.search(r'^archetype = "', p, re.M)
+          name, archetype, tone = field("name"), field("archetype"), field("tone")
           assert "[traits]" in p and "[adaptation]" in p, "traits/adaptation tables"
-          caution = int(re.search(r"^caution = (\d+)$", p, re.M).group(1))
-          assert 50 <= caution <= 100, f"caution floor is 50, got {caution}"
-          for axis in ("curiosity", "initiative", "warmth", "concision", "playfulness"):
+          traits = {}
+          for axis in ("curiosity", "caution", "initiative", "warmth", "concision", "playfulness"):
               v = int(re.search(rf"^{axis} = (\d+)$", p, re.M).group(1))
               assert 0 <= v <= 100, f"{axis} out of range: {v}"
+              traits[axis] = v
+          assert traits["caution"] >= 50, f"caution floor is 50, got {traits['caution']}"
+          # Archetype must be the dominant axis, first-max-wins (mirrors the -gt
+          # chain in genesis.sh): a wrong-but-stable label would pass a mere
+          # presence check and survive the determinism diff.
+          order = [("caution", "sentinelle"), ("curiosity", "exploratrice"),
+                   ("initiative", "stratège"), ("warmth", "compagne"),
+                   ("concision", "artisane"), ("playfulness", "muse")]
+          best_axis, best_arch, best_val = order[0][0], order[0][1], traits[order[0][0]]
+          for axis, arch in order[1:]:
+              if traits[axis] > best_val:
+                  best_axis, best_arch, best_val = axis, arch, traits[axis]
+          assert archetype == best_arch, f"archetype {archetype!r} != dominant {best_arch!r} ({traits})"
+          # Tone follows the threshold ladder in genesis.sh.
+          if traits["concision"] >= 66: exp_tone = "concis et direct"
+          elif traits["warmth"] >= 66: exp_tone = "chaleureux et pédagogue"
+          elif traits["playfulness"] >= 66: exp_tone = "vif et curieux"
+          else: exp_tone = "posé et précis"
+          assert tone == exp_tone, f"tone {tone!r} != expected {exp_tone!r} ({traits})"
+          # The journal's character must AGREE with personality.toml (a reordered
+          # printf arg would otherwise pass the truthiness check above).
+          assert persona["name"] == name, (persona["name"], name)
+          assert persona["archetype"] == archetype, (persona["archetype"], archetype)
+          assert persona["seed"] == field("seed"), (persona["seed"], field("seed"))
           print("Genesis smoke test OK")
           PY
+
+          # fnv1a32 known-answer test: the determinism diff proves two runs AGREE,
+          # not that the hash is CORRECT. Pin canonical FNV-1a/32 vectors so a
+          # wrong offset/prime/mask (still deterministic) is caught.
+          eval "$(sed -n '/^fnv1a32() {/,/^}/p' memory/genesis.sh)"
+          for pair in ":2166136261" "a:3826002220" "foobar:3214735720" "hello:1335831723"; do
+            in="${pair%%:*}"; want="${pair##*:}"; got="$(fnv1a32 "$in")"
+            test "$got" = "$want" || { echo "FAIL fnv1a32('$in')=$got want $want"; exit 1; }
+          done
+          echo "Genesis fnv1a32 known-answer OK"
+
+          # The awakening (birth_ceremony) is delivered but called `|| true`, so a
+          # future breakage would print nothing and stay green. Capture stderr and
+          # assert it ran to the LAST line (the manifesto), proving no mid-abort.
+          VIBEOS_MEMORY_DIR="$T/mem4" bash memory/genesis.sh 2>"$T/awaken.log" >/dev/null
+          grep -q "un citoyen s'éveille" "$T/awaken.log"
+          grep -q '▓' "$T/awaken.log"      # trait gauges rendered
+          grep -q 'Apprenons-nous' "$T/awaken.log"  # printed LAST → block completed
+          grep -qF "$(sed -n 's/^name = "\(.*\)"$/\1/p' "$T/mem4/personality.toml")" "$T/awaken.log"
+          echo "Genesis awakening OK (ceremony ran to completion)"
           # Idempotency, take 1 — the GUARD: with the sentinel present the script
           # must exit immediately and touch nothing.
           before="$(find "$T/mem" -type f | sort | xargs sha256sum)"

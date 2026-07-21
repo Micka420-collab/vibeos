@@ -132,17 +132,24 @@ else
 fi
 
 # ADR-029: once Genesis ran, the AI citizen has a BORN character. Verify the
-# soul file exists and carries a schema + name. Skipped before first boot (the
-# genesis-done row already covers "Genesis did not run").
+# soul file exists and carries a schema + name. Three graded outcomes:
+#   * Genesis not run yet            -> SKIP (genesis-done already flags this)
+#   * personality.toml ABSENT        -> SKIP, NOT fail: a box first-booted under
+#     a pre-ADR-029 image stamped .initialized without it, and Genesis is
+#     one-shot (it won't re-run to back-generate). A healthy upgraded machine
+#     must not flip the whole selfcheck red.
+#   * present but schema/name missing -> FAIL: genuine corruption.
 persona="$MEMORY_DIR/personality.toml"
 if [ ! -e "$MEMORY_DIR/.initialized" ]; then
     row SKIP "ai-personality" "Genesis not run yet — no character born"
-elif [ -f "$persona" ] && grep -q '^schema = ' "$persona" && grep -q '^name = "' "$persona"; then
+elif [ ! -e "$persona" ]; then
+    row SKIP "ai-personality" "no personality.toml — image predates ADR-029 (character not back-generated; Genesis is one-shot)"
+elif grep -q '^schema = ' "$persona" && grep -q '^name = "' "$persona"; then
     ai_name="$(sed -n 's/^name = "\(.*\)"$/\1/p' "$persona" | head -n1)"
     ai_arch="$(sed -n 's/^archetype = "\(.*\)"$/\1/p' "$persona" | head -n1)"
     row PASS "ai-personality" "citizen born: ${ai_name:-?} (${ai_arch:-?}) — ADR-029"
 else
-    missing "ai-personality" "$persona missing or malformed (Genesis ran but no character)"
+    missing "ai-personality" "$persona present but malformed (schema/name missing)"
 fi
 
 if have systemctl; then

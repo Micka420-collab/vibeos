@@ -135,9 +135,13 @@ toml_escape() {
 # depend on an external tool or a PATH lookup (same standard the header states
 # for every command this script runs as root). The accumulator is masked to 32
 # bits at every step, so bash's 64-bit signed arithmetic never overflows into
-# undefined territory. Input is read byte-by-byte (`'c` yields a byte value),
-# which is deterministic for the ASCII anchors used (machine_id, hostname).
+# undefined territory. `LC_ALL=C` (function-local) forces byte semantics: without
+# it, in a UTF-8 locale `${s:i:1}` walks CODE POINTS, so a non-ASCII hostname
+# fallback would hash differently per locale. The primary anchor (machine_id) is
+# hex ASCII and unaffected either way; this keeps the fallback path deterministic
+# too. ASCII inputs hash identically under C and UTF-8, so pinned vectors hold.
 fnv1a32() {
+    local LC_ALL=C LC_CTYPE=C
     local s=$1 h=2166136261 i code
     for (( i = 0; i < ${#s}; i++ )); do
         printf -v code '%d' "'${s:i:1}"
@@ -225,11 +229,20 @@ get_hostname() {
 }
 
 get_machine_id() {
+    local id=''
     if [ -r /etc/machine-id ]; then
-        cat /etc/machine-id
-    else
-        printf 'unknown'
+        id=$(cat /etc/machine-id 2>/dev/null || true)
     fi
+    # systemd leaves /etc/machine-id EMPTY or the literal "uninitialized" until
+    # the id is committed — the very ConditionFirstBoot state Genesis runs in.
+    # Fold those (and any blank content) to "unknown" so both identity.toml and
+    # the personality seed take the hostname fallback instead of collapsing to a
+    # fixed constant shared by every machine caught in that state (§3.8).
+    id=$(printf '%s' "${id}" | tr -d '[:space:]')
+    case "${id}" in
+        '' | uninitialized) printf 'unknown' ;;
+        *) printf '%s' "${id}" ;;
+    esac
 }
 
 # write_placeholder SUBDIR BODY — drop a French README placeholder in SUBDIR.
