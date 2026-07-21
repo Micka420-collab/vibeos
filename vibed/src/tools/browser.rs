@@ -260,9 +260,14 @@ pub(crate) fn run_action<C: CdpChannel>(
             // attendre Page.loadEventFired — est un raffinement du prochain incrément.)
             session.call("Page.enable", json!({}), Some(page))?;
             let r = session.call("Page.navigate", json!({ "url": url }), Some(page))?;
-            // Une navigation refusée par le navigateur remonte dans `errorText`.
+            // Une navigation refusée par le navigateur remonte dans `errorText` — c'est du
+            // texte du PAIR (hostile), repris dans une erreur vibed que l'audit affiche :
+            // assaini (Cc/Cf, borné) pour ne pas laisser un chromium spoofer la ligne d'audit.
             if let Some(err) = r.get("errorText").and_then(Value::as_str) {
-                return Err(format!("browser.navigate: navigation refusée : {err}"));
+                return Err(format!(
+                    "browser.navigate: navigation refusée : {}",
+                    crate::cdp::sanitize_peer_text(err)
+                ));
             }
             Ok(json!({ "navigated": url, "frameId": r.get("frameId") }))
         }
@@ -330,9 +335,39 @@ pub(crate) fn run_action<C: CdpChannel>(
 pub(crate) const MAX_BATCH_STEPS: usize = 16;
 
 /// Borne de l'**agrégat** remonté (ADR-022 addendum, Fable 5) : borner chaque résultat ne
-/// suffit pas ; 16 lectures de 1 Mio bâtiraient un JSON de 16 Mio que le cap du pipe
-/// tronquerait salement. On arrête le batch dès que le cumul des résultats dépasse ce seuil.
+/// suffit pas ; 16 lectures bâtiraient un JSON que le cap du pipe tronquerait salement. On
+/// arrête le batch dès que le cumul dépasse ce seuil ET qu'il reste des étapes (voir `run_batch`).
 const MAX_BATCH_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Borne **par étape** (Fable 5) : le cap d'agrégat seul est crevable par un **unique** body
+/// géant (une page hostile servant ~16 Mio d'outerHTML passe sous `MAX_FRAME` du codec). On
+/// borne donc chaque résultat AVANT de l'agréger — fail-closed : un body sur-taille devient une
+/// étape `failed`, l'agent ne reçoit pas de données hostiles partielles.
+const MAX_STEP_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
+/// L'état d'une action dans un batch (ADR-022 addendum, Fable 5). Le type à **trois** variantes
+/// force le futur incrément `submit` à traiter explicitement `Indeterminate` — le mapping
+/// `Err → Failed` du choke point de `run_batch` ne peut pas produire un double-POST en silence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepStatus {
+    Completed,
+    Failed,
+    /// **RÉSERVÉ** : un `submit` dont le POST est parti mais dont la réponse a timeout. **Jamais**
+    /// `Failed` (sinon double-POST au retry). Aucun verbe actuel ne le produit ; quand `submit`
+    /// atterrira, `run_action` devra distinguer « échec AVANT émission » (`Failed`) d'« échec
+    /// APRÈS émission réseau » (`Indeterminate`) — cela changera la signature de `run_action`.
+    Indeterminate,
+}
+
+impl StepStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            StepStatus::Completed => "completed",
+            StepStatus::Failed => "failed",
+            StepStatus::Indeterminate => "indeterminate",
+        }
+    }
+}
 
 /// Un batch d'actions navigateur validées, exécuté par un **seul** `chromium` (modèle de
 /// session **batch éphémère**, ADR-022 addendum ratifié). Chaque action est déjà passée par
@@ -343,12 +378,26 @@ pub(crate) struct BrowserBatch {
     pub steps: Vec<BrowserAction>,
 }
 
+/// Clés JSON autorisées pour un verbe donné, ou `None` si le verbe est inconnu (auquel cas on
+/// laisse [`plan_action`] produire l'erreur « verbe inconnu » claire, sans la masquer).
+fn allowed_step_keys(verb: &str) -> Option<&'static [&'static str]> {
+    Some(match verb {
+        "navigate" => &["verb", "url"],
+        "read" | "screenshot" => &["verb"],
+        "click" | "submit" => &["verb", "selector"],
+        "fill" => &["verb", "selector", "value"],
+        _ => return None,
+    })
+}
+
 /// Parse le **payload de contrôle** du batch (ce que `vibed` descend au helper sur stdin) :
 /// `{ "steps": [ { "verb": "navigate", "url": "…" }, … ] }`. **Fail-closed** : refuse un
-/// `steps` absent / non-tableau / **vide** / au-delà de [`MAX_BATCH_STEPS`], ou une étape sans
-/// `verb` / mal formée (déléguée à [`plan_action`], qui rejette verbe inconnu, URL non-http(s),
-/// caractères de contrôle…). La gouvernance (tier = max des verbes, `[rule.domains]` par
-/// `navigate`, screening des `fill`, approbation T2) est **en amont dans `vibed`**, avant l'envoi.
+/// `steps` absent / non-tableau / **vide** / au-delà de [`MAX_BATCH_STEPS`], une étape sans
+/// `verb`, une **clé inconnue** (Fable 5 : sinon une étape `{"verb":"read","assert":…}` d'un
+/// futur incrément passerait comme un `Read` nu — la vérif que l'agent croit avoir demandée ne
+/// tournerait jamais, en silence), ou une étape mal formée (déléguée à [`plan_action`]). La
+/// gouvernance (tier = max, `[rule.domains]` par `navigate`, screening `fill`, approbation T2)
+/// est **en amont dans `vibed`**, avant l'envoi.
 pub(crate) fn parse_batch(payload: &Value) -> Result<BrowserBatch, String> {
     let steps_json = payload
         .get("steps")
@@ -369,68 +418,105 @@ pub(crate) fn parse_batch(payload: &Value) -> Result<BrowserBatch, String> {
             .get("verb")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("browser.batch: étape {i} sans 'verb' — refusé"))?;
+        // Whitelist de clés (fail-closed) — SEULEMENT pour un verbe connu, pour ne pas masquer
+        // le « verbe inconnu » de plan_action ci-dessous.
+        if let Some(allowed) = allowed_step_keys(verb) {
+            if let Some(obj) = s.as_object() {
+                for k in obj.keys() {
+                    if !allowed.contains(&k.as_str()) {
+                        return Err(format!(
+                            "browser.batch: étape {i} ({verb}) : clé inconnue {k:?} — refusé"
+                        ));
+                    }
+                }
+            }
+        }
         steps.push(plan_action(verb, s).map_err(|e| format!("browser.batch: étape {i}: {e}"))?);
     }
     Ok(BrowserBatch { steps })
 }
 
-/// Taille sérialisée (octets) d'un `Value`, pour la borne d'agrégat. Un `Value` déjà construit
-/// se sérialise toujours (clés String, ni NaN ni Inf) ; en cas d'échec improbable on compte 0.
+/// Taille sérialisée (octets) d'un `Value`, pour les bornes. Un `Value` déjà construit se
+/// sérialise toujours (clés String, ni NaN ni Inf) ; en cas d'échec improbable on renvoie
+/// `usize::MAX` — **fail-closed** (un body non sérialisable trébuche sur le cap par-étape).
 fn json_size(v: &Value) -> usize {
-    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0)
+    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX)
 }
 
 /// Exécute un [`BrowserBatch`] contre une `CdpSession` (un `chromium`, une page) et rend un
-/// résultat JSON **agrégé** et **opaque** (le contenu vient de pages hostiles). Modèle **batch
-/// éphémère** (ADR-022 addendum ratifié) :
+/// résultat JSON **agrégé** et **opaque** (le contenu `result` vient de pages hostiles). Modèle
+/// **batch éphémère** (ADR-022 addendum ratifié) :
 /// - **`attach_page` UNE fois** → le `sessionId` de page threadé dans chaque [`run_action`] ;
 /// - exécution **en séquence**, continuité au sein du batch (le `read` voit ce que le `navigate`
 ///   précédent a chargé — c'est TOUT l'intérêt du batch vs process-par-verbe) ;
-/// - **trois états par action** (addendum, Fable 5) : `completed` (Ok), `failed` (Err), et
-///   `indeterminate` **réservé** au `submit` dont le POST est parti sans réponse (jamais
-///   `failed`, sinon double-POST au retry). Les verbes actuels (navigate/read/screenshot) sont
-///   des lectures/navigations **sans mutation distante** → jamais `indeterminate` ; cet état
-///   apparaîtra avec le binding de `submit` ;
+/// - **trois états par action** ([`StepStatus`]) : `completed`, `failed`, et `indeterminate`
+///   réservé au futur `submit` mutant (les verbes actuels sont sans mutation distante) ;
 /// - **fail-closed** : une action non `completed` **arrête** le batch (les suivantes ne tirent
 ///   pas — l'agent avait planifié en supposant le succès des précédentes) ;
-/// - **agrégat borné** : arrêt si le cumul des résultats dépasse [`MAX_BATCH_RESULT_BYTES`]
-///   (le cap du pipe côté `vibed` reste le garde-fou dur ultime).
+/// - **borne par étape** : un `result` sur-taille ([`MAX_STEP_RESULT_BYTES`]) devient `failed` ;
+/// - **borne d'agrégat** : `truncated` **seulement s'il reste des étapes non tirées** (Fable 5 :
+///   un batch entièrement complété ne doit JAMAIS rendre `truncated`, ça inviterait un
+///   ré-exécution). Le cap du pipe côté `vibed` reste le garde-fou dur ultime.
 ///
-/// Ne panique jamais : rend toujours un JSON décrivant ce qui a eu lieu (même un `attach`
-/// raté), pour que la ligne d'audit et l'agent voient l'état réel.
-pub(crate) fn run_batch<C: CdpChannel>(session: &mut CdpSession<C>, batch: &BrowserBatch) -> Value {
-    let page = match crate::browser_transport::attach_page(session) {
+/// **Consomme** la session (par valeur, Fable 5) : un batch = une session = un `chromium` jetable
+/// ; on ne peut pas ré-exécuter un batch sur la même session (contrat d'`attach_page`). Ne panique
+/// jamais : rend toujours un JSON décrivant l'état réel (même un `attach` raté). `steps_total`
+/// rend le résultat **auto-porteur** (l'audit distingue « 2/2 complété » de « arrêté à 2/5 »).
+pub(crate) fn run_batch<C: CdpChannel>(mut session: CdpSession<C>, batch: &BrowserBatch) -> Value {
+    let total = batch.steps.len();
+    let page = match crate::browser_transport::attach_page(&mut session) {
         Ok(p) => p,
         Err(e) => {
-            return json!({ "batch": "failed", "attached": false, "error": e, "steps": [] });
+            return json!({
+                "batch": "failed", "attached": false, "error": e,
+                "steps": [], "steps_total": total,
+            });
         }
     };
 
-    let mut results = Vec::with_capacity(batch.steps.len());
+    let mut results = Vec::with_capacity(total);
     let mut agg_bytes = 0usize;
     let mut batch_status = "completed";
 
     for (i, action) in batch.steps.iter().enumerate() {
-        let (status, body) = match run_action(session, action, &page) {
-            Ok(v) => ("completed", v),
-            Err(e) => ("failed", json!({ "error": e })),
+        let (status, body, size) = match run_action(&mut session, action, &page) {
+            Ok(v) => {
+                let n = json_size(&v);
+                if n > MAX_STEP_RESULT_BYTES {
+                    // Borne par étape (Fable 5) : on ne pousse PAS le body hostile sur-taille.
+                    let e = json!({ "error": format!(
+                        "browser.batch: résultat d'étape trop grand ({n} octets > cap \
+                         {MAX_STEP_RESULT_BYTES}) — refusé"
+                    ) });
+                    let en = json_size(&e);
+                    (StepStatus::Failed, e, en)
+                } else {
+                    (StepStatus::Completed, v, n)
+                }
+            }
+            // Verbes actuels sans mutation distante → Failed. Voir StepStatus::Indeterminate.
+            Err(e) => {
+                let b = json!({ "error": e });
+                let n = json_size(&b);
+                (StepStatus::Failed, b, n)
+            }
         };
-        agg_bytes += json_size(&body);
-        results.push(json!({ "index": i, "status": status, "result": body }));
+        agg_bytes += size;
+        results.push(json!({ "index": i, "status": status.as_str(), "result": body }));
 
-        // Fail-closed : la première action non réussie arrête le batch.
-        if status != "completed" {
-            batch_status = status;
+        // Fail-closed : la première action non `completed` arrête le batch.
+        if status != StepStatus::Completed {
+            batch_status = status.as_str();
             break;
         }
-        // Borne d'agrégat : on ne lance pas l'action suivante si on a déjà trop accumulé.
-        if agg_bytes > MAX_BATCH_RESULT_BYTES {
+        // Borne d'agrégat — `truncated` UNIQUEMENT s'il reste des étapes (Fable 5, F1).
+        if agg_bytes > MAX_BATCH_RESULT_BYTES && i + 1 < total {
             batch_status = "truncated";
             break;
         }
     }
 
-    json!({ "batch": batch_status, "attached": true, "steps": results })
+    json!({ "batch": batch_status, "attached": true, "steps": results, "steps_total": total })
 }
 
 #[cfg(test)]
@@ -515,6 +601,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("ERR_NAME_NOT_RESOLVED"), "{err}");
+    }
+
+    #[test]
+    fn navigate_sanitizes_a_hostile_error_text() {
+        // `errorText` vient du PAIR (hostile) : un chromium malveillant y glisse des ctrl/bidi ;
+        // l'erreur vibed (affichée à l'audit) doit être assainie (Fable 5).
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {}})),
+            cdp_frame(json!({"id": 2, "result": {"errorText": "bad\u{1b}[2K\u{202e}spoof"}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Navigate {
+                host: "x".into(),
+                url: "https://x".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(!err.contains('\u{1b}'), "ESC doit être retiré : {err:?}");
+        assert!(!err.contains('\u{202e}'), "RTL override doit être retiré");
+        assert!(err.contains("navigation refusée"));
     }
 
     #[test]
@@ -867,7 +976,7 @@ mod tests {
             cdp_frame(json!({"id": 4, "result": {"frameId": "F1"}})),
             cdp_frame(json!({"id": 5, "result": {"result": {"value": "<html>hi</html>"}}})),
         ]);
-        let mut s = CdpSession::new(chan);
+        let s = CdpSession::new(chan);
         let batch = BrowserBatch {
             steps: vec![
                 BrowserAction::Navigate {
@@ -877,7 +986,7 @@ mod tests {
                 BrowserAction::Read,
             ],
         };
-        let out = run_batch(&mut s, &batch);
+        let out = run_batch(s, &batch);
         assert_eq!(out["batch"], "completed");
         assert_eq!(out["attached"], true);
         let steps = out["steps"].as_array().unwrap();
@@ -895,7 +1004,7 @@ mod tests {
         let chan = cdp_with_attach(vec![cdp_frame(
             json!({"id": 3, "result": {"result": {"value": "<html>a</html>"}}}),
         )]);
-        let mut s = CdpSession::new(chan);
+        let s = CdpSession::new(chan);
         let batch = BrowserBatch {
             steps: vec![
                 BrowserAction::Read,
@@ -905,7 +1014,7 @@ mod tests {
                 BrowserAction::Read,
             ],
         };
-        let out = run_batch(&mut s, &batch);
+        let out = run_batch(s, &batch);
         assert_eq!(out["batch"], "failed");
         let steps = out["steps"].as_array().unwrap();
         assert_eq!(steps.len(), 2, "le 3e read ne doit PAS tirer (fail-closed)");
@@ -921,34 +1030,108 @@ mod tests {
     fn run_batch_reports_a_failed_attach_without_panicking() {
         // createTarget id1 répond sans targetId → attach_page échoue → batch failed, attached=false.
         let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {}}))]);
-        let mut s = CdpSession::new(chan);
+        let s = CdpSession::new(chan);
         let batch = BrowserBatch {
             steps: vec![BrowserAction::Read],
         };
-        let out = run_batch(&mut s, &batch);
+        let out = run_batch(s, &batch);
         assert_eq!(out["batch"], "failed");
         assert_eq!(out["attached"], false);
         assert_eq!(out["steps"].as_array().unwrap().len(), 0);
     }
 
     #[test]
-    fn run_batch_bounds_the_aggregate_and_stops_when_over_cap() {
-        // Un premier read renvoie un HTML > cap d'agrégat → batch "truncated", le 2e read
-        // ne tire pas.
-        let big = "x".repeat(MAX_BATCH_RESULT_BYTES + 1);
+    fn run_batch_caps_a_single_oversized_step_result_as_failed() {
+        // (F2) Un SEUL read renvoyant un HTML > cap PAR ÉTAPE devient `failed` (le body hostile
+        // n'est pas poussé), pas `completed` — la borne par-étape empêche un unique body géant
+        // de crever le budget.
+        let big = "x".repeat(MAX_STEP_RESULT_BYTES + 1);
         let chan = cdp_with_attach(vec![cdp_frame(
             json!({"id": 3, "result": {"result": {"value": big}}}),
         )]);
-        let mut s = CdpSession::new(chan);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![BrowserAction::Read],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "failed");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["status"], "failed");
+        assert!(steps[0]["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("trop grand"));
+    }
+
+    #[test]
+    fn run_batch_does_not_mark_truncated_when_the_last_step_completes() {
+        // (F1) Deux reads sous le cap PAR ÉTAPE mais dont le cumul dépasse le cap d'agrégat AU
+        // DERNIER step : le batch est `completed` (tout a tourné), JAMAIS `truncated` — sinon un
+        // consommateur rationnel re-exécuterait un batch déjà entièrement fait (double-exécution).
+        let half = "x".repeat(MAX_BATCH_RESULT_BYTES / 2 + 100_000); // 2 × > cap d'agrégat
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"result": {"value": half.clone()}}})),
+            cdp_frame(json!({"id": 4, "result": {"result": {"value": half}}})),
+        ]);
+        let s = CdpSession::new(chan);
         let batch = BrowserBatch {
             steps: vec![BrowserAction::Read, BrowserAction::Read],
         };
-        let out = run_batch(&mut s, &batch);
+        let out = run_batch(s, &batch);
+        assert_eq!(
+            out["batch"], "completed",
+            "un batch entièrement complété n'est jamais truncated"
+        );
+        assert_eq!(out["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(out["steps_total"], 2);
+    }
+
+    #[test]
+    fn run_batch_truncates_only_when_steps_remain_after_the_aggregate_cap() {
+        // Trois reads : après 2, le cumul dépasse le cap d'agrégat ET il reste un step →
+        // `truncated`, le 3e ne tire pas.
+        let half = "x".repeat(MAX_BATCH_RESULT_BYTES / 2 + 100_000);
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"result": {"value": half.clone()}}})),
+            cdp_frame(json!({"id": 4, "result": {"result": {"value": half}}})),
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Read,
+                BrowserAction::Read,
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
         assert_eq!(out["batch"], "truncated");
         assert_eq!(
             out["steps"].as_array().unwrap().len(),
-            1,
-            "le 2e read ne doit pas tirer après dépassement de la borne d'agrégat"
+            2,
+            "le 3e read ne tire pas"
         );
+        assert_eq!(out["steps_total"], 3);
+    }
+
+    #[test]
+    fn parse_batch_rejects_unknown_keys_the_assert_trap() {
+        // (F5) Une clé inconnue (ex un futur `assert` sur un `read`) est refusée fail-closed —
+        // sinon l'étape passerait comme un `Read` nu et la vérif ne tournerait jamais, en silence.
+        assert!(
+            parse_batch(&json!({"steps": [{"verb": "read", "assert": {"x": 1}}]}))
+                .unwrap_err()
+                .contains("clé inconnue")
+        );
+        assert!(parse_batch(
+            &json!({"steps": [{"verb": "navigate", "url": "https://x", "extra": 1}]})
+        )
+        .unwrap_err()
+        .contains("clé inconnue"));
+        // Contrôle négatif : les clés légitimes par verbe passent.
+        assert!(parse_batch(
+            &json!({"steps": [{"verb": "fill", "selector": "#q", "value": "hi"}]})
+        )
+        .is_ok());
     }
 }
