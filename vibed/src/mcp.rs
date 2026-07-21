@@ -475,10 +475,48 @@ async fn handle_tools_call(
             target: t,
         });
 
+    // ADR-022 : `browser.run` porte un BATCH (`steps`), pas un `url`/`path` unique. On le parse
+    // UNE fois ici — même source de vérité (`parse_batch`) que le helper — pour en dériver le tier
+    // effectif (max des verbes) et les domaines `navigate` (lint `[rule.domains]` + clé de grant).
+    // Fail-closed : un batch invalide est refusé AVANT toute décision, jamais exécuté.
+    let browser_batch = if name == "browser.run" {
+        match crate::tools::browser::parse_batch(&args) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                try_audit(&actx, None, Decision::Deny, "browser_batch_invalid").await;
+                return tool_result(id, format!("browser.run: {e}"), true);
+            }
+        }
+    } else {
+        None
+    };
+    let browser_domains = browser_batch
+        .as_ref()
+        .map(crate::tools::browser::batch_domains)
+        .unwrap_or_default();
+
     // Human-readable, non-secret target recorded in the audit trail so an
     // action's subject (which file / unit / package) is recoverable in
     // forensics — never any file content or secret argument.
-    let target = audit_target(&name, normalized_path.as_deref(), service, &args);
+    //
+    // M4 + F2 (Fable 5) : pour `browser.run`, la clé de grant lie (a) l'ENSEMBLE trié des hosts
+    // `navigate` ET (b) le BATCH exact — un digest du payload canonique (steps ordonnés). (a) seul
+    // (M4) empêche le blanc-seing tous-domaines ; (b) empêche la SUBSTITUTION de contenu à tier et
+    // hosts égaux (submit d'un AUTRE formulaire sur les mêmes hosts recyclant l'approbation).
+    // L'opérateur voit les hosts + le nombre d'étapes ; le digest scelle le contenu. Le tier fait
+    // partie de la clé côté approbation (F1). Toujours présent pour browser.run (même sans navigate
+    // — le digest lie tout de même le batch).
+    let target = if let Some(batch) = &browser_batch {
+        let digest = crate::sha256::sha256_hex(args.to_string().as_bytes());
+        Some(format!(
+            "{} | {} steps #{}",
+            browser_domains.join(","),
+            batch.steps.len(),
+            &digest[..16]
+        ))
+    } else {
+        audit_target(&name, normalized_path.as_deref(), service, &args)
+    };
 
     // A target longer than any legitimate subject is refused OUTRIGHT, before it
     // can be recorded anywhere.
@@ -560,14 +598,23 @@ async fn handle_tools_call(
         }
     }
 
-    let tier = tool_tier(&name);
     let ctx = CallContext {
         path: normalized_path.as_deref(),
         service,
         domain,
         deploy,
     };
-    let decision = policy.evaluate(&name, tier, ctx);
+    // `browser.run` : tier effectif = MAX des verbes du batch (submit → T2), et lint
+    // `[rule.domains]` défense-en-profondeur — la décision la plus STRICTE sur les hosts `navigate`
+    // (le proxy CONNECT reste le vrai gate par-requête une fois le relais construit, ADR-022).
+    // Tout le reste : le chemin générique (tier statique du catalogue, contexte unique).
+    let (tier, decision) = if let Some(batch) = &browser_batch {
+        let t = crate::tools::browser::batch_tier(batch);
+        (Some(t), govern_browser_batch(policy, t, &browser_domains))
+    } else {
+        let t = tool_tier(&name);
+        (t, policy.evaluate(&name, t, ctx))
+    };
 
     // Human-in-the-loop: a T2/T3 RequireApproval becomes Allow ONLY if the
     // operator has already granted this exact (tool, target, uid) call. The
@@ -601,6 +648,7 @@ async fn handle_tools_call(
     let (consumed, open_mode) = if matches!(decision, Decision::RequireApproval) {
         let name_g = name.clone();
         let target_g = target.clone();
+        let tier_g = tier.map(Tier::as_str);
         let uid_g = caller.uid;
         let now_g = now_epoch_secs();
         let dir_g = approval_dir.to_path_buf();
@@ -610,6 +658,7 @@ async fn handle_tools_call(
                 &dir_g,
                 &name_g,
                 target_g.as_deref(),
+                tier_g,
                 uid_g,
                 now_g,
             );
@@ -1016,6 +1065,20 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                    "properties": {"class": {"type": "string", "enum": ["deploy", "browser"]}}}),
         ),
         (
+            "browser.run",
+            // Tier de PLANCHER (affichage/tools.list) : un batch purement lecture est T1. Le tier
+            // EFFECTIF est calculé par batch (max des verbes ; `submit` → T2/approbation) dans
+            // handle_tools_call — voir `batch_tier`. Ne jamais sous-gouverner via ce plancher seul.
+            Tier::T1,
+            "Run a governed browser batch (ADR-022): a `steps` array — navigate/read/screenshot/\
+             click/fill/submit — driven by ONE ephemeral, credential-free headless Chromium. The \
+             tier is the MAX over the batch's verbs (a `submit` escalates the whole batch to T2, \
+             human approval). Egress is confined to the approved `navigate` domains. `submit` MUST \
+             be the last step (anti double-POST).",
+            json!({"type": "object", "required": ["steps"],
+                   "properties": {"steps": {"type": "array", "items": {"type": "object"}}}}),
+        ),
+        (
             "deploy.plan",
             Tier::T2,
             "Read a deployment's current state (READ-ONLY), governed. Runs the \
@@ -1271,6 +1334,51 @@ fn derive_domain(tool: &str, raw_url: Option<&str>) -> Option<String> {
     crate::domain::host_of(raw_url?)
 }
 
+/// Gouverne un batch `browser.run` : rend la décision la plus **STRICTE**
+/// (`Deny` > `RequireApproval` > `Allow`) obtenue en évaluant la politique à `tier` pour CHAQUE
+/// host `navigate` du batch. `[rule.domains]` est un **prédicat** (un host hors-liste rend la règle
+/// non-applicable → retombe sur le défaut deny), donc un seul host non couvert suffit à refuser ou
+/// escalader tout le batch. Un batch **sans** `navigate` (rien à cadrer) est évalué une fois avec
+/// `domain = None`. Ceci est le **lint défense-en-profondeur** — le proxy CONNECT reste le vrai
+/// gate par-requête (ADR-022) une fois le relais construit.
+fn govern_browser_batch(policy: &PolicyEngine, tier: Tier, domains: &[String]) -> Decision {
+    let eval = |domain: Option<&str>| {
+        policy.evaluate(
+            "browser.run",
+            Some(tier),
+            CallContext {
+                path: None,
+                service: None,
+                domain,
+                deploy: None,
+            },
+        )
+    };
+    if domains.is_empty() {
+        return eval(None);
+    }
+    domains
+        .iter()
+        .map(|d| eval(Some(d.as_str())))
+        .fold(Decision::Allow, strictest)
+}
+
+/// La plus stricte de deux décisions (`Deny` > `RequireApproval` > `Allow`) — fail-closed.
+fn strictest(a: Decision, b: Decision) -> Decision {
+    fn rank(d: &Decision) -> u8 {
+        match d {
+            Decision::Deny => 2,
+            Decision::RequireApproval => 1,
+            Decision::Allow => 0,
+        }
+    }
+    if rank(&b) > rank(&a) {
+        b
+    } else {
+        a
+    }
+}
+
 /// Does this tool carry a deploy `(provider, target)` the policy governs?
 /// Same reasoning as `unit_bearing`/`url_bearing`: a `provider`/`target` on a
 /// tool that has no business deploying is caller-supplied noise and must never
@@ -1345,6 +1453,7 @@ fn execute_tool(
         "svc.restart" => crate::tools::svc::svc_restart(args),
         "svc.status" => crate::tools::svc::svc_status(args),
         "sandbox.probe" => crate::tools::sandbox_tool::sandbox_probe(args),
+        "browser.run" => crate::tools::browser::run_governed(args),
         "deploy.plan" => crate::tools::deploy::deploy_plan(args),
         "log.read" => crate::tools::log::log_read(args),
         "sectools.list" => crate::tools::sectools::sectools_list(args),
@@ -2309,11 +2418,37 @@ mod tests {
         assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
         assert_eq!(tool_tier("agent.activity"), Some(Tier::T0));
         assert_eq!(tool_tier("user.model"), Some(Tier::T0));
+        // `browser.run` : tier de PLANCHER T1 au catalogue ; le tier EFFECTIF est dynamique
+        // (max des verbes du batch, via batch_tier) et calculé dans handle_tools_call.
+        assert_eq!(tool_tier("browser.run"), Some(Tier::T1));
         assert_eq!(
             tool_tier("disk.wipe"),
             None,
             "unknown tool has no tier => default-deny"
         );
+    }
+
+    #[test]
+    fn strictest_prefers_deny_then_approval_then_allow() {
+        use Decision::*;
+        // Deny domine tout.
+        assert_eq!(strictest(Allow, Deny), Deny);
+        assert_eq!(strictest(Deny, Allow), Deny);
+        assert_eq!(strictest(RequireApproval, Deny), Deny);
+        // RequireApproval domine Allow, pas Deny.
+        assert_eq!(strictest(Allow, RequireApproval), RequireApproval);
+        assert_eq!(strictest(RequireApproval, Allow), RequireApproval);
+        // Allow ne domine rien.
+        assert_eq!(strictest(Allow, Allow), Allow);
+        // Le pli d'un batch : un seul host refusé refuse tout ; un seul en approbation escalade.
+        let deny_run = [Allow, Deny, RequireApproval]
+            .into_iter()
+            .fold(Allow, strictest);
+        assert_eq!(deny_run, Deny);
+        let appr_run = [Allow, RequireApproval, Allow]
+            .into_iter()
+            .fold(Allow, strictest);
+        assert_eq!(appr_run, RequireApproval);
     }
 
     #[test]

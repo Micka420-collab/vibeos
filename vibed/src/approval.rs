@@ -8,14 +8,16 @@
 //!      approval store and answers "pending, id=X — run `vibectl approve X`".
 //!   2. The human operator runs `vibectl approve X` (root/wheel), which turns
 //!      the request into a one-shot, short-lived GRANT bound to the exact
-//!      (tool, target, caller uid).
+//!      (tool, target, tier, caller uid). The `tier` is part of the key so a
+//!      dynamic-tier tool (`browser.run`) cannot have an approval granted for a
+//!      low-tier call consumed by a higher-tier one (Fable 5, F1).
 //!   3. The agent re-issues the SAME call. `vibed` finds the fresh grant,
 //!      CONSUMES it (one-shot), and the call proceeds as if allowed — audited
 //!      as `approved`.
 //!
 //! Security: the store lives under `/var/lib/vibeos/approvals`, root-only and
 //! on the built-in denylist (agents can neither read nor forge grants). A grant
-//! matches only the precise (tool, target, uid) of the request, is single-use
+//! matches only the precise (tool, target, tier, uid) of the request, is single-use
 //! (deleted on consumption), and expires quickly. The pending side is **bounded**
 //! (dedup of identical requests, age-based pruning, hard cap) so a compromised
 //! agent cannot fill the memory volume by spamming un-approvable T2/T3 calls.
@@ -189,6 +191,7 @@ pub fn check_and_consume_grant(
     root: &Path,
     tool: &str,
     target: Option<&str>,
+    tier: Option<&str>,
     caller_uid: Option<u32>,
     now: u64,
 ) -> Option<GrantConsumption> {
@@ -215,11 +218,16 @@ pub fn check_and_consume_grant(
         }
         let g_tool = grant.get("tool").and_then(Value::as_str);
         let g_target = grant.get("target").and_then(Value::as_str);
+        let g_tier = grant.get("tier").and_then(Value::as_str);
         let g_uid = grant
             .get("caller_uid")
             .and_then(Value::as_u64)
             .map(|u| u as u32);
-        if g_tool == Some(tool) && g_target == target && g_uid == caller_uid {
+        // Le `tier` fait partie de la clé (Fable 5, F1) : `browser.run` étant le premier outil à
+        // tier DYNAMIQUE, une approbation obtenue pour un batch T1 (lecture) ne doit JAMAIS être
+        // consommée par un batch T2 (submit) sur les mêmes hosts — blanchiment de tier. No-op pour
+        // les outils à tier statique (le tier y est redondant avec le nom).
+        if g_tool == Some(tool) && g_target == target && g_tier == tier && g_uid == caller_uid {
             // Consume before returning so a grant can never be replayed, even
             // if two calls race (the loser simply sees the file gone).
             if std::fs::remove_file(&path).is_ok() {
@@ -340,6 +348,7 @@ mod tests {
             &root,
             "svc.restart",
             Some("sshd.service"),
+            Some("T2"),
             Some(1000),
             now
         )
@@ -354,6 +363,7 @@ mod tests {
             &root,
             "svc.restart",
             Some("nginx.service"),
+            Some("T2"),
             Some(1000),
             now
         )
@@ -362,6 +372,7 @@ mod tests {
             &root,
             "pkg.install",
             Some("sshd.service"),
+            Some("T2"),
             Some(1000),
             now
         )
@@ -370,15 +381,37 @@ mod tests {
             &root,
             "svc.restart",
             Some("sshd.service"),
+            Some("T2"),
             Some(1001),
             now
         )
         .is_none());
+        // (F1, Fable 5) Un tier DIFFÉRENT n'est pas couvert : une approbation T2 ne peut JAMAIS
+        // être consommée par un appel T1 — sinon un batch `browser.run` submit (T2) recyclerait
+        // une approbation obtenue pour un batch lecture (T1) sur les mêmes hosts.
+        assert!(
+            check_and_consume_grant(
+                &root,
+                "svc.restart",
+                Some("sshd.service"),
+                Some("T1"),
+                Some(1000),
+                now
+            )
+            .is_none(),
+            "un grant T2 ne doit pas être consommé par un appel T1 (blanchiment de tier)"
+        );
 
         // The exact call is authorized — ONCE — and carries the approver identity.
-        let consumed =
-            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
-                .expect("exact call authorized");
+        let consumed = check_and_consume_grant(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            Some("T2"),
+            Some(1000),
+            now,
+        )
+        .expect("exact call authorized");
         assert_eq!(
             consumed.approver_uid,
             Some(0),
@@ -386,8 +419,15 @@ mod tests {
         );
         assert_eq!(consumed.id.as_deref(), Some(id.as_str()));
         assert!(
-            check_and_consume_grant(&root, "svc.restart", Some("sshd.service"), Some(1000), now)
-                .is_none(),
+            check_and_consume_grant(
+                &root,
+                "svc.restart",
+                Some("sshd.service"),
+                Some("T2"),
+                Some(1000),
+                now
+            )
+            .is_none(),
             "a grant is single-use (consumed)"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -402,14 +442,25 @@ mod tests {
         approve(&root, &id, Some(0), now).expect("approve");
         // Well after expiry: refused and pruned.
         let later = now + GRANT_TTL_SECS + 1;
-        assert!(
-            check_and_consume_grant(&root, "pkg.install", Some("htop"), Some(1000), later)
-                .is_none()
-        );
+        assert!(check_and_consume_grant(
+            &root,
+            "pkg.install",
+            Some("htop"),
+            Some("T2"),
+            Some(1000),
+            later
+        )
+        .is_none());
         // Even at `now` it would be gone now (pruned by the expired check above).
-        assert!(
-            check_and_consume_grant(&root, "pkg.install", Some("htop"), Some(1000), now).is_none()
-        );
+        assert!(check_and_consume_grant(
+            &root,
+            "pkg.install",
+            Some("htop"),
+            Some("T2"),
+            Some(1000),
+            now
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -432,6 +483,7 @@ mod tests {
             &root,
             "svc.restart",
             Some("sshd.service"),
+            Some("T2"),
             Some(1000),
             now
         )
