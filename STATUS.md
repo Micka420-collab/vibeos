@@ -10,11 +10,13 @@
 > #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth).
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-19 (week-end autonome, dimanche)** — **trousse
-> SaaS + ecommerce complète dev→prod** : 6 modèles serveur par projet, installeur
-> à la demande, catalogue, runbooks dev+prod, garde CI. ADR-020 (#92) **mergée par
-> Micka** ; la capacité `deploy.*` gouvernée reste sa décision. Journal détaillé :
-> [WEEKEND-LOG.md](WEEKEND-LOG.md).
+> Dernière mise à jour : **2026-07-21 (session Fable 5)** — **perf couche basse** :
+> chemins chauds `vibed` corrigés (audit/journal hors du réacteur tokio, catalogue
+> d'outils en cache, 299 tests verts) + **première config noyau de l'image**
+> ([ADR-025](docs/DECISIONS.md) : `sysctl.d` charges IA + zram `zstd`, chaque valeur
+> sourcée) + 18ᵉ invariant `kernel-tuning` du selfcheck. La mesure sur cible reste
+> machine-gated. *(Précédent : 2026-07-19, trousse SaaS complète dev→prod —
+> [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
 
 ## Vue d'ensemble
 
@@ -137,6 +139,11 @@
   - **Runbook production** ([#110]) : `/usr/share/vibeos/saas/PRODUCTION.md` — self-hosted durci (pare-feu, TLS Let's Encrypt, secrets podman/TPM2, systemd, sauvegardes). Couvre le « mettre en production » explicitement demandé.
   - **Vérifié en réel** (WSL/docker) : SeaweedFS, la stack observability (datasource auto-provisionné) et Meilisearch (auth enforced) **smoke-testés**, pas seulement affirmés.
   - **Infra** : digest de base F44 re-bumpé ([#106], quay purge ~quotidienne — cf. la décision structurelle laissée à Micka, miroir vs auto-PR).
+
+- **2026-07-21 (session Fable 5) — perf couche basse : chemins chauds `vibed` + première config noyau de l'image** (branche `claude/session-0v4cwo`) :
+  - **`vibed` : trois correctifs du chemin chaud de `tools/call`**, invariants intacts (fsync d'audit et « audit durable avant exécution » inchangés) : l'écriture d'audit passe en `spawn_blocking` **awaité** (elle s'exécutait sur le réacteur tokio — chaque fsync figeait toutes les connexions, sondes HUD comprises) ; le journal mémoire best-effort part en fire-and-forget sur le pool bloquant ; `tool_catalog()` est construit une fois (`OnceLock`) au lieu d'être rebâti à chaque lookup de tier (jusqu'à des milliers de fois par sonde `agents.list`) ; les arguments passent en `Arc` (plus de clone profond d'un payload `fs.write` par appel). **299 tests verts** (287 lib + 9 intégration MCP + 3 politique), clippy/fmt/log-hygiene OK ; compteurs des 4 README recalés 191 → 299.
+  - **[ADR-025](docs/DECISIONS.md) : réglage noyau pour charges IA, livré dans l'image** — première `sysctl.d` du dépôt (`os/rootfs/usr/lib/sysctl.d/50-vibeos-ai.conf` : jeu zram cohérent `page-cluster=0`/`swappiness=180`/watermarks, writeback borné 128/256 Mio, `inotify` instances 1024, TCP BBR autochargé) + drop-in zram `zstd` (`os/rootfs/usr/lib/systemd/zram-generator.conf.d/50-vibeos.conf`, fusion par option — le fichier vendor Fedora n'est jamais écrasé). Chaque valeur sourcée (noyau vm.rst, pop-os/default-settings#163, dist-git f44, tcp_cong.c) ; le cargo cult vérifié inutile sur f44 (`max_map_count`, `file-max`) est **absent**. Kernel Fedora générique conservé (config dédiée : Phase 7+), cmdline intouchée (UKI : Phase 4).
+  - **Selfcheck : 18ᵉ invariant `kernel-tuning`** (sonde read-only : `vm.page-cluster=0` + module `tcp_bbr` autochargé ; image antérieure = SKIP) — [docs/BOOT-VALIDATION.md](docs/BOOT-VALIDATION.md) recalé. La **mesure sur cible reste machine-gated** : valeurs sourcées, pas encore mesurées sur la machine de référence.
 
 ## 📋 Reste à faire (court terme)
 

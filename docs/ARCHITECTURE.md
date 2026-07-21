@@ -94,6 +94,7 @@ Limite honnête de la v0.1 : l'initrd généré localement et la cmdline ne sont
 - **SELinux enforcing** : politique ciblée héritée de Fedora. Le module dédié `vibed_t` confinant le démon et ses sous-processus d'exécution d'outils est une cible **Phase 4**. Aucun mode permissif, y compris en développement.
 - **Wayland / KDE Plasma 6** : session graphique par défaut (héritage Kinoite). X11 non installé. Les dialogues d'approbation humaine (voir §4) s'afficheront (Phase 4, jalon ROADMAP du flux d'approbation) via une intégration Plasma (portail/notification) parlant à `vibed` par le socket MCP côté privilégié.
 - **Espace utilisateur applicatif** : Flatpak pour les applications graphiques, `toolbox`/conteneurs pour le développement — la racine reste intacte.
+- **Réglage noyau pour charges IA** ([ADR-025](DECISIONS.md)) : l'image livre `/usr/lib/sysctl.d/50-vibeos-ai.conf` (jeu zram cohérent — `page-cluster`/`swappiness`/watermarks —, writeback borné en octets, `inotify` élargi pour les agents observateurs, TCP BBR pour les pulls multi-Go) et un drop-in zram `compression-algorithm = zstd` (fusion par option, le dimensionnement Fedora est conservé). Le noyau reste le noyau **générique Fedora** (config dédiée : Phase 7+) et la cmdline n'est pas touchée (UKI : Phase 4). L'application effective est prouvée au boot par l'invariant `kernel-tuning` du selfcheck (18ᵉ check, [BOOT-VALIDATION.md](BOOT-VALIDATION.md)).
 
 ---
 

@@ -74,7 +74,7 @@ Ouvre le run le plus récent **déclenché par un tag `v*`** (les builds sur `ma
 | **Prérequis VM/machine** | **UEFI** (pas de BIOS legacy), **Secure Boot désactivé** (la signature MOK des kmods est Phase 4), **≥ 60 Go** de disque (l'image seule pèse ~12 Go), **≥ 8 Go** de RAM. L'image est **Wayland uniquement** (`X11=OFF`) : en VM, préfère un GPU virtio |
 | **NVIDIA en VM** | Sans passthrough GPU, `nvidia-smi` échoue — c'est **attendu**, pas un défaut |
 
-**Après le boot**, une seule commande donne l'état réel du système (17 invariants : `vibed`, socket + permissions, politique fail-closed, denylist, chaîne d'audit, Genesis, racine en lecture seule) :
+**Après le boot**, une seule commande donne l'état réel du système (18 invariants : `vibed`, socket + permissions, politique fail-closed, denylist, chaîne d'audit, Genesis, racine en lecture seule, réglage noyau IA appliqué) :
 
 ```bash
 sudo /usr/libexec/vibeos/vibeos-selfcheck.sh      # chemin complet : il n'est PAS dans le PATH
