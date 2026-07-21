@@ -6,6 +6,7 @@
 
 pub(crate) mod browser;
 pub(crate) mod deploy;
+pub(crate) mod embeddings;
 pub(crate) mod fs;
 pub(crate) mod log;
 pub(crate) mod memory;
