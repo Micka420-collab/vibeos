@@ -227,6 +227,32 @@ Faits durables extraits du journal : `facts.jsonl` avec
 ollama, jamais envoyés dans le cloud) pour la recherche sémantique de
 `memory.query` — hors périmètre v0.1.
 
+**Classement de rappel (livré pur, câblage à venir — [ADR-030](DECISIONS.md)).**
+Une mémoire qui grossit sans classement se dégrade : tout remonter noie le
+signal, filtrer par sous-chaîne rate le souvenir pertinent mal nommé.
+`vibed/src/tools/recall.rs` implémente — **pur, déterministe, testé, inerte**
+(même statut que `propose.rs`/`embeddings.rs`) — le **score de rappel** que
+`memory.query` classera, d'après le modèle *memory stream* des *Generative
+Agents* (Park et al. 2023) :
+
+```text
+score = w_récence · récence + w_importance · importance + w_pertinence · pertinence
+```
+
+- **récence** : décroissance exponentielle par demi-vie, `[0, 1]` ;
+- **importance** : saillance dérivée du **type** d'événement journal (§3.5) —
+  `decision` > `preference` > `observation` > `tool_call`… — **jamais** d'un
+  champ auto-déclaré par l'agent (§9 : `source`/`data`/`fact` sont NON FIABLES) ;
+- **pertinence** : deux moteurs de même échelle `[0, 1]`, **lexical** (Jaccard
+  des jetons, hors-ligne, immédiat) et **vectoriel** (cosinus de
+  `knowledge/embeddings/`, replié `[-1,1]→[0,1]`) — `recall.rs` est le **premier
+  consommateur réel** de la couche `embeddings`.
+
+Ce qui est **livré** est la brique de classement (pure et testée) ; son
+**câblage** dans le chemin live de `memory.query` (aujourd'hui un filtre lexical
+sous-chaîne) et la **production des vecteurs** (ollama local) sont les incréments
+suivants.
+
 ### 3.7 Permissions et confinement
 
 - Racine `0700`, fichiers `0600` (Genesis s'exécute avec `umask 077`), propriétaire `root:root`.
@@ -573,7 +599,10 @@ en un seul appel**, sans enchaîner un `fs.read` sur le chemin absolu — la lec
 est le rôle de `memory.query`, conformément à cette spec. La marche reste bornée
 en dur (200 fichiers, 64 KiB scannés par fichier, extrait ≤ 1024 caractères).
 
-**Cible ultérieure** : la recherche sémantique via `knowledge/embeddings/`.
+**Cible ultérieure** : remplacer le filtre lexical sous-chaîne par le **score de
+rappel** (récence + importance + pertinence, `recall.rs` §3.6, [ADR-030](DECISIONS.md)),
+puis la recherche sémantique via `knowledge/embeddings/`. La brique de classement
+est **livrée pure et testée** ; son câblage live est l'incrément suivant.
 
 ### `memory.append` (T1 — ✅ livré pour `journal` et `knowledge`)
 
