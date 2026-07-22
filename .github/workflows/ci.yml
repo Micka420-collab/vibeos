@@ -12,6 +12,10 @@
 #                 Qt). Seul contrôle automatisé de la couche qui traduit le
 #                 format de vibed en ce que l'utilisateur lit ; le RENDU QML
 #                 reste machine-gated (pas de Quickshell headless).
+#   * zed-extension
+#                 zed/vibeos-claude-acp (TypeScript): tsc --noEmit + the vitest
+#                 suite (governance gate + layer-3 insight mappers). The
+#                 in-editor rendering stays machine-gated (Tier B).
 #   * shellcheck  memory/genesis.sh (first-boot Genesis script) and
 #                 os/rootfs/usr/bin/vibeos-hud (HUD launcher)
 #   * policy      quick schema validation of security/policy.d/*.toml with
@@ -19,10 +23,11 @@
 #                 tier / action / approval), mirroring vibed's fail-closed
 #                 load rules.
 #   * containers-policy
-#                 the client-side cosign verification policy
-#                 (os/rootfs/etc/containers/): structure checks, pinned
-#                 sigstore trust anchors, and a MECHANICAL skopeo proof that
-#                 an unsigned image is rejected by the
+#                 the client-side cosign verification policy, shipped STAGED
+#                 (os/rootfs/usr/share/vibeos/containers/policy-strict.json +
+#                 registries.d/anchors under os/rootfs/etc/): structure checks,
+#                 pinned sigstore trust anchors, and a MECHANICAL skopeo proof
+#                 that an unsigned image is rejected by the
 #                 ghcr.io/micka420-collab/vibeos requirement. The effect on a
 #                 real `bootc upgrade` (deployed machine) stays machine-gated.
 
@@ -54,9 +59,14 @@ on:
       # Policy de vérification cosign côté client + ancres sigstore : sans ces
       # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
       # jamais le job containers-policy qui la garde. Même trou que pour
-      # os/Containerfile plus haut.
+      # os/Containerfile plus haut. La policy STRICTE vit en STAGED sous
+      # usr/share/vibeos/containers — l'oublier ici referait le trou.
       - "os/rootfs/etc/containers/**"
       - "os/rootfs/etc/pki/**"
+      - "os/rootfs/usr/share/vibeos/containers/**"
+      # Extension Zed : sans cette entrée, une PR qui ne touche QUE zed/**
+      # ne déclencherait jamais le job zed-extension qui la teste.
+      - "zed/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -85,9 +95,14 @@ on:
       # Policy de vérification cosign côté client + ancres sigstore : sans ces
       # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
       # jamais le job containers-policy qui la garde. Même trou que pour
-      # os/Containerfile plus haut.
+      # os/Containerfile plus haut. La policy STRICTE vit en STAGED sous
+      # usr/share/vibeos/containers — l'oublier ici referait le trou.
       - "os/rootfs/etc/containers/**"
       - "os/rootfs/etc/pki/**"
+      - "os/rootfs/usr/share/vibeos/containers/**"
+      # Extension Zed : sans cette entrée, une PR qui ne touche QUE zed/**
+      # ne déclencherait jamais le job zed-extension qui la teste.
+      - "zed/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -264,6 +279,32 @@ jobs:
       # with ubuntu-latest.
       - name: HUD client checks
         run: node scripts/check-hud-client.js
+
+  # The Zed extension (governance gate + layer-3 insight mappers) had a full
+  # vitest suite that NO CI job ever executed — the README's "N Zed tests"
+  # claim rested on manual runs alone, the same silent-bypass class the other
+  # paths: comments in this file document. tsc --noEmit types the whole
+  # extension; vitest runs the suite. npm ci obeys the committed lockfile
+  # (supply-chain posture, same reasoning as --locked for cargo).
+  zed-extension:
+    name: Zed extension (TS) — types + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: zed/vibeos-claude-acp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies (lockfile-exact)
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Tests (vitest)
+        run: npm test
 
   shellcheck:
     name: scripts shell — shellcheck
