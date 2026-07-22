@@ -571,6 +571,9 @@ pub struct AgentRunOpts {
     pub command: Vec<String>,
     pub budget_secs: Option<u64>,
     pub max_calls: Option<u64>,
+    /// Total-token allowance (see [`supervisor::Budget::max_tokens`]). `None` =
+    /// unbounded on tokens.
+    pub max_tokens: Option<u64>,
     pub session_id: Option<String>,
     pub provider: String,
 }
@@ -699,6 +702,71 @@ pub fn agent_stop(run_dir: &Path, session_id: &str) -> (Value, bool) {
     }
 }
 
+/// Live token tallies shared between the stdout reader thread and the budget
+/// poll loop — grouped so the counters thread as one `Arc`. Accumulated from
+/// per-turn `assistant` usage; the authoritative run cost is stored (last
+/// `result` wins) separately, gated by `has_cost` (0.0 is a real cost, not
+/// "unset").
+#[derive(Default)]
+struct TokenAtomics {
+    input: AtomicU64,
+    output: AtomicU64,
+    cache_creation: AtomicU64,
+    cache_read: AtomicU64,
+    turns: AtomicU64,
+    cost_micro_usd: AtomicU64,
+    has_cost: AtomicBool,
+}
+
+impl TokenAtomics {
+    /// Fold one `stream-json` event: sum per-turn usage, capture the terminal
+    /// cost. Mirrors [`supervisor::TokenLedger::add_event`] over shared atomics.
+    fn observe(&self, ev: &Value) {
+        if let Some(u) = supervisor::extract_usage(ev) {
+            self.input.fetch_add(u.input, Ordering::Relaxed);
+            self.output.fetch_add(u.output, Ordering::Relaxed);
+            self.cache_creation
+                .fetch_add(u.cache_creation, Ordering::Relaxed);
+            self.cache_read.fetch_add(u.cache_read, Ordering::Relaxed);
+            self.turns.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(cost) = supervisor::extract_final_cost(ev) {
+            // Store, not add: `result` is cumulative, so the last one wins.
+            self.cost_micro_usd
+                .store((cost * 1_000_000.0) as u64, Ordering::Relaxed);
+            self.has_cost.store(true, Ordering::Relaxed);
+        }
+    }
+    /// Snapshot the running total the token budget caps.
+    fn total_tokens(&self) -> u64 {
+        self.input
+            .load(Ordering::Relaxed)
+            .saturating_add(self.output.load(Ordering::Relaxed))
+            .saturating_add(self.cache_creation.load(Ordering::Relaxed))
+            .saturating_add(self.cache_read.load(Ordering::Relaxed))
+    }
+    /// Rebuild a [`supervisor::TokenLedger`] to reuse its derived metrics
+    /// (cache ratio, input-equivalent, savings) — one source of truth for the
+    /// formulas.
+    fn ledger(&self) -> supervisor::TokenLedger {
+        supervisor::TokenLedger {
+            totals: supervisor::TokenUsage {
+                input: self.input.load(Ordering::Relaxed),
+                output: self.output.load(Ordering::Relaxed),
+                cache_creation: self.cache_creation.load(Ordering::Relaxed),
+                cache_read: self.cache_read.load(Ordering::Relaxed),
+            },
+            turns: self.turns.load(Ordering::Relaxed),
+        }
+    }
+    /// The authoritative run cost in USD, or `None` if the CLI never reported one.
+    fn cost_usd(&self) -> Option<f64> {
+        self.has_cost
+            .load(Ordering::Relaxed)
+            .then(|| self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0)
+    }
+}
+
 /// `vibectl agent run -- <cmd...>` — run a CLI under budget, tapping its
 /// `stream-json` reasoning into `mem/reasoning/<session>.jsonl`. `run_dir` holds
 /// the pid + stop markers. Returns a summary `(json, ok)`.
@@ -717,7 +785,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
     if reasoning::safe_session_id(&sid).is_none() {
         return (json!({"error": "invalid session id"}), false);
     }
-    let budget = supervisor::Budget::new(opts.budget_secs, opts.max_calls);
+    let budget = supervisor::Budget::new(opts.budget_secs, opts.max_calls, opts.max_tokens);
 
     // START journal event (reserved `autonomous_session` type — unforgeable by agents).
     write_session_journal(
@@ -727,7 +795,8 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
             "start",
             &opts.provider,
             &mcp::utc_iso8601(start),
-            json!({ "command": opts.command, "budget_secs": opts.budget_secs, "max_calls": opts.max_calls }),
+            json!({ "command": opts.command, "budget_secs": opts.budget_secs,
+                    "max_calls": opts.max_calls, "max_tokens": opts.max_tokens }),
         ),
         start,
     );
@@ -776,12 +845,14 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
     // open must not hang `agent run`.
     let tool_calls = Arc::new(AtomicU64::new(0));
     let blocks = Arc::new(AtomicU64::new(0));
+    let tokens = Arc::new(TokenAtomics::default());
     let reader_done = Arc::new(AtomicBool::new(false));
     if let Some(stdout) = child.stdout.take() {
         let mem = mem.to_path_buf();
         let sid = sid.clone();
         let tool_calls = Arc::clone(&tool_calls);
         let blocks = Arc::clone(&blocks);
+        let tokens = Arc::clone(&tokens);
         let reader_done = Arc::clone(&reader_done);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -805,6 +876,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
                     continue;
                 };
                 tool_calls.fetch_add(supervisor::count_tool_use(&ev) as u64, Ordering::Relaxed);
+                tokens.observe(&ev);
                 if let Some(block) = supervisor::extract_thinking(&ev) {
                     if reasoning::append_thinking(&mem, &sid, &block, now_epoch_secs()).is_ok() {
                         blocks.fetch_add(1, Ordering::Relaxed);
@@ -840,14 +912,17 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
         }
         let over_wall = budget.wall_expired(run_started.elapsed());
         let over_calls = budget.tool_calls_exhausted(tool_calls.load(Ordering::Relaxed));
+        let over_tokens = budget.tokens_exhausted(tokens.total_tokens());
         let stopped = stopfile.exists();
-        if over_wall || over_calls || stopped {
+        if over_wall || over_calls || over_tokens || stopped {
             reason = if stopped {
                 "operator_stop"
             } else if over_wall {
                 "wall_budget"
-            } else {
+            } else if over_calls {
                 "tool_budget"
+            } else {
+                "token_budget"
             };
             // Kill the direct child (SIGKILL via std — guaranteed, so the wait()
             // below never blocks) AND its whole group (grandchildren holding the
@@ -881,6 +956,23 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
     let blocks = blocks.load(Ordering::Relaxed);
     let calls = tool_calls.load(Ordering::Relaxed);
 
+    // Token accounting summary: raw counts (authoritative, from the CLI's
+    // per-turn `usage`) plus the derived cache-efficiency metrics that make the
+    // spend actionable, and the authoritative USD cost when the CLI reported one.
+    let ledger = tokens.ledger();
+    let token_summary = json!({
+        "input": ledger.totals.input,
+        "output": ledger.totals.output,
+        "cache_creation": ledger.totals.cache_creation,
+        "cache_read": ledger.totals.cache_read,
+        "total": ledger.total_tokens(),
+        "turns": ledger.turns,
+        "cache_hit_ratio": ledger.cache_hit_ratio(),
+        "input_equiv_tokens": ledger.input_equiv_tokens(),
+        "cache_savings_tokens": ledger.cache_savings_tokens(),
+        "cost_usd": tokens.cost_usd(),
+    });
+
     let end = now_epoch_secs();
     write_session_journal(
         mem,
@@ -890,7 +982,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
             &opts.provider,
             &mcp::utc_iso8601(end),
             json!({ "reason": reason, "reasoning_blocks": blocks, "tool_calls": calls,
-                    "duration_secs": end.saturating_sub(start) }),
+                    "duration_secs": end.saturating_sub(start), "tokens": token_summary }),
         ),
         end,
     );
@@ -899,7 +991,8 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
 
     (
         json!({ "session": sid, "reason": reason, "reasoning_blocks": blocks,
-                "tool_calls": calls, "duration_secs": end.saturating_sub(start) }),
+                "tool_calls": calls, "duration_secs": end.saturating_sub(start),
+                "tokens": token_summary }),
         true,
     )
 }
@@ -1357,6 +1450,7 @@ mod tests {
                 command: vec!["sh".into(), "-c".into(), script],
                 budget_secs: Some(30),
                 max_calls: None,
+                max_tokens: None,
                 session_id: Some("test-sess".into()),
                 provider: "fake".into(),
             },
@@ -1411,12 +1505,67 @@ mod tests {
                 command: vec!["sh".into(), "-c".into(), "sleep 30".into()],
                 budget_secs: Some(1),
                 max_calls: None,
+                max_tokens: None,
                 session_id: Some("budget-sess".into()),
                 provider: "fake".into(),
             },
         );
         assert!(ok);
         assert_eq!(summary["reason"], "wall_budget");
+        let _ = std::fs::remove_dir_all(&mem);
+        let _ = std::fs::remove_dir_all(&run);
+    }
+
+    #[test]
+    fn token_atomics_accumulate_usage_and_capture_cost() {
+        let t = TokenAtomics::default();
+        // Non-usage events are ignored; assistant usage accumulates; result cost
+        // is stored (last wins), mirroring supervisor::TokenLedger.
+        t.observe(&json!({"type":"system"}));
+        t.observe(&json!({"type":"assistant","message":{"usage":{
+            "input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":4000}}}));
+        t.observe(&json!({"type":"assistant","message":{"usage":{
+            "input_tokens":50,"output_tokens":150}}}));
+        t.observe(&json!({"type":"result","total_cost_usd":0.25}));
+        t.observe(&json!({"type":"result","total_cost_usd":0.37})); // cumulative: last wins
+        assert_eq!(t.total_tokens(), 1000 + 200 + 4000 + 50 + 150);
+        let led = t.ledger();
+        assert_eq!(led.turns, 2);
+        assert_eq!(led.totals.cache_read, 4000);
+        assert_eq!(t.cost_usd(), Some(0.37));
+        // No cost reported -> None, never a bogus 0.0.
+        assert!(TokenAtomics::default().cost_usd().is_none());
+    }
+
+    #[test]
+    fn agent_run_enforces_token_budget() {
+        let mem = mem_scratch("agenttok-mem");
+        let run = scratch("agenttok-run");
+        // The child emits ONE assistant usage event whose tokens (500) exceed the
+        // 100-token budget, then sleeps: the reader taps the event, the poll loop
+        // sees the ledger over budget and kills the run as `token_budget`.
+        let line =
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":500,"output_tokens":0}}}"#;
+        let (summary, ok) = agent_run(
+            &mem,
+            &run,
+            AgentRunOpts {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!("printf '%s\\n' '{line}'; sleep 30"),
+                ],
+                budget_secs: None,
+                max_calls: None,
+                max_tokens: Some(100),
+                session_id: Some("tok-sess".into()),
+                provider: "fake".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(summary["reason"], "token_budget");
+        assert_eq!(summary["tokens"]["input"], 500);
+        assert_eq!(summary["tokens"]["total"], 500);
         let _ = std::fs::remove_dir_all(&mem);
         let _ = std::fs::remove_dir_all(&run);
     }
@@ -1439,6 +1588,7 @@ mod tests {
                 command: vec!["sh".into(), "-c".into(), "sleep 20 & exit 0".into()],
                 budget_secs: Some(60),
                 max_calls: None,
+                max_tokens: None,
                 session_id: Some("gc-sess".into()),
                 provider: "fake".into(),
             },
@@ -1478,6 +1628,7 @@ mod tests {
                     command: vec![],
                     budget_secs: None,
                     max_calls: None,
+                    max_tokens: None,
                     session_id: None,
                     provider: "x".into(),
                 },
@@ -1492,6 +1643,7 @@ mod tests {
                     command: vec!["true".into()],
                     budget_secs: None,
                     max_calls: None,
+                    max_tokens: None,
                     session_id: Some("../evil".into()),
                     provider: "x".into(),
                 },
