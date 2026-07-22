@@ -18,6 +18,10 @@
 #                 in-editor rendering stays machine-gated (Tier B).
 #   * shellcheck  memory/genesis.sh (first-boot Genesis script) and
 #                 os/rootfs/usr/bin/vibeos-hud (HUD launcher)
+#   * threatmodel-tools (step in the rust job) — every tool exposed by the MCP
+#                 catalog (build_tool_catalog) has a row in docs/THREAT-MODEL.md
+#                 §6. Turns the documented-but-unenforced "each tool adds its
+#                 row before merge" rule into a real guard.
 #   * policy      quick schema validation of security/policy.d/*.toml with
 #                 Python tomllib (canonical [[rule]] schema: id / tools /
 #                 tier / action / approval), mirroring vibed's fail-closed
@@ -56,6 +60,9 @@ on:
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
       # os/Containerfile plus haut.
       - "os/rootfs/usr/share/vibeos/saas/**"
+      # THREAT-MODEL.md est gardé par check-threatmodel-tools.py : l'éditer seul
+      # (retrait d'une ligne d'outil) doit déclencher le garde.
+      - "docs/THREAT-MODEL.md"
       # Policy de vérification cosign côté client + ancres sigstore : sans ces
       # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
       # jamais le job containers-policy qui la garde. Même trou que pour
@@ -92,6 +99,9 @@ on:
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
       # os/Containerfile plus haut.
       - "os/rootfs/usr/share/vibeos/saas/**"
+      # THREAT-MODEL.md est gardé par check-threatmodel-tools.py : l'éditer seul
+      # (retrait d'une ligne d'outil) doit déclencher le garde.
+      - "docs/THREAT-MODEL.md"
       # Policy de vérification cosign côté client + ancres sigstore : sans ces
       # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
       # jamais le job containers-policy qui la garde. Même trou que pour
@@ -171,6 +181,15 @@ jobs:
       - name: Hygiène des logs (aucun secret loggé)
         working-directory: .
         run: python3 scripts/check-log-hygiene.py
+
+      # THREAT-MODEL.md §6 énonce « chaque outil MCP exposé ajoute sa ligne au
+      # tableau §6 avant merge » — règle réelle mais qui était NON EXÉCUTÉE, et
+      # qui avait dérivé (la moitié du catalogue sans ligne). Ce garde la rend
+      # exécutable : un outil du catalogue `build_tool_catalog` sans ligne §6
+      # fait rougir la CI.
+      - name: Outils MCP tous dans le modèle de menace
+        working-directory: .
+        run: python3 scripts/check-threatmodel-tools.py
 
       # Le 2026-07-15, VibeOS construisait depuis 49 jours sur Fedora Kinoite 42,
       # EOL le 2026-05-27 — zéro correctif de sécurité, et AUCUN signal : quand

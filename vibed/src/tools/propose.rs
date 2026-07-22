@@ -408,6 +408,36 @@ mod tests {
     }
 
     #[test]
+    fn config_path_sibling_prefix_escape_is_refused() {
+        // REGRESSION LOCK (ADR-024): the allowlist match is `starts_with(prefix)`
+        // where every prefix ENDS WITH `/`. That trailing slash is the ONLY thing
+        // separating "/opt/" from a sibling directory that merely shares the
+        // textual prefix. Drop it (a "cleanup" refactor) and `/opt-evil/x`
+        // slips through. These cases pin the boundary so that never regresses.
+        for escape in [
+            "/opt-evil/x",                // sibling of /opt (no separating slash)
+            "/optimizer/x",               // another /opt textual sibling
+            "/etc/vibeos-managed-evil/x", // sibling of /etc/vibeos-managed
+            "/etc/vibeos-managedX/x",     // one-char-off sibling
+        ] {
+            assert!(
+                parse_proposal(&cfg(escape))
+                    .unwrap_err()
+                    .contains("hors des racines"),
+                "sibling-prefix escape must be refused: {escape:?}"
+            );
+        }
+        // The managed roots THEMSELVES (no file under them) are not proposable:
+        // the prefix requires a component AFTER the separating slash.
+        for root in ["/opt", "/etc/vibeos-managed"] {
+            assert!(
+                parse_proposal(&cfg(root)).is_err(),
+                "the managed root dir itself is not a proposable config path: {root:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_policy_kind_is_refused_pending_the_effective_policy_analyzer() {
         let v = json!({"kind": "policy", "justification": "x", "rollback": "y"});
         assert!(parse_proposal(&v).unwrap_err().contains("analyseur"));
