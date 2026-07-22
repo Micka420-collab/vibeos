@@ -306,4 +306,32 @@ mod tests {
         assert!(c.truncated, "au-delà de la borne, vue tronquée");
         assert_eq!(c.facts.len(), MAX_CONSOLIDATED_FACTS);
     }
+
+    #[test]
+    fn consolidation_is_idempotent() {
+        // INVARIANT : consolider une vue déjà consolidée ne change rien. Re-passer
+        // la sortie dans `consolidate` (via re-sérialisation) doit rendre les MÊMES
+        // faits, dans le même ordre — le fold est un point fixe (verrouille la
+        // stabilité du dédup + du tri, revue adverse).
+        let records = vec![
+            fact("s1", "fa", Some(0.5), "2026-07-01T00:00:00Z", "a"),
+            fact("s1", "fa", Some(0.9), "2026-07-20T00:00:00Z", "b"), // gagne
+            fact("s1", "fb", Some(0.3), "2026-07-05T00:00:00Z", "a"),
+            fact("s2", "fa", None, "2026-07-10T00:00:00Z", "c"),
+        ];
+        let first = consolidate(&records);
+        // Re-sérialise les faits consolidés en lignes JSON et re-consolide.
+        let reserialized: Vec<Value> = first
+            .facts
+            .iter()
+            .map(|f| fact(&f.subject, &f.fact, f.confidence, &f.ts, &f.source))
+            .collect();
+        let second = consolidate(&reserialized);
+        assert_eq!(second.facts, first.facts, "consolidation idempotente");
+        assert_eq!(
+            second.skipped, 0,
+            "aucune ligne re-sérialisée n'est ignorée"
+        );
+        assert!(!second.truncated);
+    }
 }

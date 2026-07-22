@@ -678,4 +678,49 @@ mod tests {
         // Must satisfy the reasoning store's filename validator.
         assert!(crate::reasoning::safe_session_id(&id).is_some());
     }
+
+    #[test]
+    fn ledger_accounting_invariants_over_a_sequence() {
+        // INVARIANTS de comptabilité, sur une séquence arbitraire d'usages :
+        //  (1) total_tokens == somme exacte des quatre compteurs ;
+        //  (2) l'accumulation est MONOTONE (ajouter un tour ne baisse jamais le
+        //      total) — le budget de tokens ne peut donc pas être « défait » ;
+        //  (3) cache_hit_ratio ∈ [0, 1] dès qu'il est défini.
+        let mut led = TokenLedger::default();
+        let mut prev_total = 0u64;
+        let seq = [
+            (10u64, 5u64, 0u64, 0u64),
+            (0, 3, 100, 0),
+            (2, 1, 0, 5000),
+            (0, 0, 0, 0), // un tour à zéro (cache-only dégénéré) reste valide
+            (7, 9, 20, 300),
+        ];
+        for (i, o, cc, cr) in seq {
+            let ev = json!({"type":"assistant","message":{"usage":{
+                "input_tokens": i, "output_tokens": o,
+                "cache_creation_input_tokens": cc, "cache_read_input_tokens": cr}}});
+            led.add_event(&ev);
+            let total = led.total_tokens();
+            assert_eq!(
+                total,
+                led.totals.input
+                    + led.totals.output
+                    + led.totals.cache_creation
+                    + led.totals.cache_read,
+                "total = somme des parts"
+            );
+            assert!(total >= prev_total, "accumulation monotone");
+            if let Some(ratio) = led.cache_hit_ratio() {
+                assert!(
+                    (0.0..=1.0).contains(&ratio),
+                    "ratio de cache hors [0,1] : {ratio}"
+                );
+            }
+            // input_equiv et savings ne sont jamais négatifs ni non finis.
+            assert!(led.input_equiv_tokens().is_finite() && led.input_equiv_tokens() >= 0.0);
+            assert!(led.cache_savings_tokens() >= 0.0);
+            prev_total = total;
+        }
+        assert_eq!(led.turns, seq.len() as u64);
+    }
 }

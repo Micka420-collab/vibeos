@@ -348,4 +348,40 @@ mod tests {
         );
         assert!(top_k_lexical("rust", &tie, now, hl, &RecallWeights::default(), 0).is_empty());
     }
+
+    #[test]
+    fn recency_is_monotonic_and_bounded() {
+        // INVARIANT : à demi-vie fixe, la récence ne CROÎT jamais avec l'âge et
+        // reste dans [0, 1] — la propriété de base du classement (un souvenir plus
+        // vieux ne peut pas paraître plus frais). Balayage déterministe de 0 à
+        // 400 demi-vies (sans RNG).
+        let now = 10_000_000u64;
+        let hl = 86_400u64;
+        let mut prev = f32::INFINITY;
+        for k in 0..=400 {
+            let ts = now.saturating_sub(k * hl);
+            let r = recency(now, ts, hl);
+            assert!((0.0..=1.0).contains(&r), "récence hors [0,1] à k={k} : {r}");
+            assert!(
+                r <= prev + 1e-6,
+                "la récence ne doit pas croître avec l'âge (k={k})"
+            );
+            prev = r;
+        }
+        // Et le classement est invariant par permutation de l'entrée (au-delà des
+        // égalités déjà couvertes) : mêmes items, ordre d'entrée inversé, même top-k.
+        let items = vec![
+            item("a", now - 3 * hl, 0.9, "rust tokio"),
+            item("b", now, 0.5, "rust async"),
+            item("c", now, 0.5, "cuisine"),
+        ];
+        let mut reversed = items.clone();
+        reversed.reverse();
+        let w = RecallWeights::default();
+        let h1 = top_k_lexical("rust", &items, now, hl, &w, 3);
+        let h2 = top_k_lexical("rust", &reversed, now, hl, &w, 3);
+        let ids1: Vec<&str> = h1.iter().map(|(it, _)| it.id.as_str()).collect();
+        let ids2: Vec<&str> = h2.iter().map(|(it, _)| it.id.as_str()).collect();
+        assert_eq!(ids1, ids2, "classement invariant par permutation d'entrée");
+    }
 }
