@@ -42,6 +42,14 @@ pub enum ToolClass {
     Deploy { needs_wx: bool },
     /// `browser.*` — `chromium-headless` driven over a CDP pipe.
     Browser,
+    /// Le **proxy CONNECT** du navigateur (ADR-022, addendum) — helper Rust qui écoute sur
+    /// `127.66.0.1` et tunnelise vers les domaines autorisés. Confinement max côté processus
+    /// (namespaces deny-all, W^X, caps vidées) MAIS deux relaxations structurelles : il doit
+    /// **écouter** (la base pose `SocketBindDeny=any`) et avoir un **egress Internet** (il dial les
+    /// IP arbitraires des domaines allowlistés — la gouvernance « quel domaine » vit dans SON code,
+    /// pas dans le cgroup). Tourne dans le netns de l'hôte, côte à côte avec le navigateur dont le
+    /// cgroup, lui, restreint l'egress à l'IP du proxy (forme de l'addendum ADR-022).
+    Proxy,
 }
 
 /// A TPM2-sealed credential to hand the helper (ADR-021 lock 3). `vibed` never
@@ -228,6 +236,29 @@ impl TransientUnit {
                 // `--no-sandbox` / `--remote-debugging-port` are forbidden at the
                 // argv layer (a later browser increment); the systemd sandbox
                 // wraps Chromium's own, it does not replace it.
+            }
+            ToolClass::Proxy => {
+                // Confinement MAX côté processus (helper Rust simple, aucun namespace requis).
+                set("RestrictNamespaces", "yes"); // deny ALL namespace creation
+                set("CapabilityBoundingSet", ""); // drop every capability
+                set("ProcSubset", "pid"); // hide non-PID /proc (safe for a network helper)
+                set("TasksMax", "256"); // un thread par connexion (cap 64) + resolvers + splices
+                set("MemoryDenyWriteExecute", "yes"); // Rust : pas de JIT, W^X applicable
+                                                      // TCP vers les cibles + bind ; NETLINK/UNIX pour getaddrinfo / le resolver local.
+                set(
+                    "RestrictAddressFamilies",
+                    "AF_INET AF_INET6 AF_UNIX AF_NETLINK",
+                );
+                set("SystemCallFilter", "@system-service");
+                set("SystemCallFilter", "~@privileged @resources");
+                // Le proxy DOIT ÉCOUTER : la base pose `SocketBindDeny=any` (« le helper n'écoute
+                // jamais ») ; on carve l'exception pour son unique port. `SocketBindAllow` ne prend
+                // pas d'adresse — le CODE du proxy borne le bind à `127.66.0.1` (loopback validé).
+                set("SocketBindAllow", "ipv4:tcp:8888");
+                // Egress INTERNET : le proxy dial les IP arbitraires des domaines allowlistés
+                // (impossible à énumérer en CIDR). L'orchestration passe `egress_allow` =
+                // `0.0.0.0/0`, `::/0` (inclut la DNS `127.0.0.53`). La gouvernance « quel domaine »
+                // + le refus des IP internes (anti-rebinding) vivent dans le CODE du proxy, pas ici.
             }
         }
 
@@ -1189,11 +1220,45 @@ mod tests {
         .expect("valid browser spec compiles")
     }
 
+    fn proxy() -> TransientUnit {
+        TransientUnit::compile(
+            ToolClass::Proxy,
+            &UnitSpec {
+                invocation_id: "call-proxy1".to_string(),
+                credential: None,
+                // Egress Internet : le proxy dial des IP arbitraires (domaines allowlistés).
+                egress_allow: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+                memory_max: "128M".to_string(),
+                runtime_max_sec: 300,
+                workspace: None,
+            },
+        )
+        .expect("valid proxy spec compiles")
+    }
+
+    #[test]
+    fn proxy_class_may_listen_and_egress_but_stays_confined_otherwise() {
+        let u = proxy();
+        // Doit ÉCOUTER : carve l'exception au SocketBindDeny=any de la base.
+        assert_eq!(u.get("SocketBindDeny"), Some("any"));
+        assert_eq!(u.get("SocketBindAllow"), Some("ipv4:tcp:8888"));
+        // Egress Internet via egress_allow (au-dessus du plancher IPAddressDeny=any).
+        assert_eq!(u.get("IPAddressDeny"), Some("any"));
+        assert!(u.get_all("IPAddressAllow").contains(&"0.0.0.0/0"));
+        assert!(u.get_all("IPAddressAllow").contains(&"::/0"));
+        // Confiné par ailleurs : namespaces deny-all, caps vidées, W^X (Rust), pas de credential.
+        assert_eq!(u.get("RestrictNamespaces"), Some("yes"));
+        assert_eq!(u.get("CapabilityBoundingSet"), Some(""));
+        assert_eq!(u.get("MemoryDenyWriteExecute"), Some("yes"));
+        assert_eq!(u.get("DynamicUser"), Some("yes"));
+        assert_eq!(u.get("LoadCredentialEncrypted"), None);
+    }
+
     /// The single most important invariant: NO class ever runs as the agent's
     /// uid, and no property interpolates `%i`.
     #[test]
     fn no_class_ever_runs_as_the_agent_uid() {
-        for u in [deploy_go(), deploy_node(), browser()] {
+        for u in [deploy_go(), deploy_node(), browser(), proxy()] {
             assert_eq!(u.get("DynamicUser"), Some("yes"));
             assert_eq!(u.get("User"), None, "a transient tool must never set User=");
             for (k, v) in &u.properties {
