@@ -1126,9 +1126,12 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
              name and content, returning each match WITH a bounded content snippet (read the \
              memory in one call, no follow-up fs.read). Optional 'scope' \
              (identity/hardware/personality/user/projects/journal/knowledge) and 'limit'. With \
-             'fold': true on scope 'user' or 'projects', returns the CONSOLIDATED current view \
-             (last-write-wins fold of the append-only log) instead of raw matches. Scope \
-             'personality' is the AI citizen's own character chosen at birth (docs/MEMORY.md §9)",
+             'fold': true on scope 'user', 'projects' or 'knowledge', returns the CONSOLIDATED \
+             current view (last-write-wins dedup of the append-only log) instead of raw matches. \
+             With 'rank': true on scope 'journal' or 'knowledge', returns EVENTS ranked by a \
+             recall score (recency + importance + relevance), so 'limit' keeps the most relevant \
+             rather than the first found. Scope 'personality' is the AI citizen's own character \
+             chosen at birth (docs/MEMORY.md §9)",
             json!({"type": "object",
             "properties": {
                 "query": {"type": "string"},
@@ -1136,7 +1139,8 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
                           "enum": ["identity", "hardware", "personality", "user",
                                    "projects", "journal", "knowledge"]},
                 "limit": {"type": "integer", "minimum": 1},
-                "fold": {"type": "boolean"}
+                "fold": {"type": "boolean"},
+                "rank": {"type": "boolean"}
             }}),
         ),
         (
