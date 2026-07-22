@@ -38,8 +38,14 @@ use crate::audit::Caller;
 const TOP_N: usize = 8;
 /// Cap on the recent journal notes surfaced under `observed`.
 const OBSERVED_CAP: usize = 12;
-/// Longest window `user.model` accepts (its `window_seconds` clamp ceiling):
-/// 30 days of governed history is plenty for a "how you work" model.
+/// Longest window `user.model` accepts (its `window_seconds` clamp ceiling).
+/// HONESTY NOTE: the audit-derived fields (patterns, friction, rhythm,
+/// anticipations, executed_total) come from `read_recent_audit`, whose shared
+/// tail cache is bounded to `crate::mcp::MAX_ROSTER_WINDOW_SECS` (1 h) — so
+/// their EFFECTIVE window is min(window, 1 h), and the response says so
+/// (`window_effective_seconds`). A longer requested window still widens the
+/// journal/memory-backed fields' framing, and leaves room to widen the audit
+/// reader later without changing the tool's contract.
 const MAX_WINDOW_SECS: u64 = 30 * 24 * 3600;
 /// Default window when the caller does not specify one.
 const DEFAULT_WINDOW_SECS: u64 = 7 * 24 * 3600;
@@ -83,6 +89,8 @@ pub(crate) fn user_model(args: &Value, caller: Caller, audit_dir: &Path) -> Resu
 
     let mut model = derive_user_model(&records, &profile, &journal, now, window);
     model["uid"] = json!(uid);
+    // Honest effective bound of the audit-derived fields (see MAX_WINDOW_SECS).
+    model["window_effective_seconds"] = json!(window.min(crate::mcp::MAX_ROSTER_WINDOW_SECS));
     Ok(model.to_string())
 }
 
@@ -96,32 +104,37 @@ fn now_epoch_secs() -> u64 {
 }
 
 /// Read recent typed journal notes the agent recorded about the human. Bounded:
-/// scans the tail of the MOST RECENT `journal/*.jsonl` file only, keeps the
-/// agent-appendable event types (`observation`/`decision`/`preference`/…), and
-/// returns them newest-last (as `derive_user_model` expects). Best-effort: an
-/// absent/unreadable store yields an empty Vec, never an error.
+/// scans the tails of the TWO most recent `journal/*.jsonl` files (the journal
+/// is one file per UTC day, so right after midnight the newest file is nearly
+/// empty — a single-file read would blank `observed` at rollover; same
+/// two-file discipline as `read_recent_audit`), keeps the agent-appendable
+/// event types (`observation`/`decision`/`preference`/…), and returns them
+/// newest-last (as `derive_user_model` expects), capped at JOURNAL_SCAN_LINES
+/// overall. Best-effort: an absent/unreadable store yields an empty Vec,
+/// never an error.
 fn read_recent_journal(memory_dir: &Path) -> Vec<Value> {
     let dir = memory_dir.join("journal");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
-    // The journal is one file per UTC day named `YYYY-MM-DD.jsonl`, so the
-    // lexicographically-greatest name is the most recent.
+    // One file per UTC day named `YYYY-MM-DD.jsonl`: lexicographic order is
+    // chronological order.
     let mut files: Vec<std::path::PathBuf> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
         .collect();
     files.sort();
-    let Some(newest) = files.into_iter().next_back() else {
-        return Vec::new();
-    };
-    let Ok(content) = std::fs::read_to_string(&newest) else {
-        return Vec::new();
-    };
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(JOURNAL_SCAN_LINES);
-    lines[start..]
+    let start_idx = files.len().saturating_sub(2);
+    let mut lines_owned: Vec<String> = Vec::new();
+    for file in &files[start_idx..] {
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue; // best-effort: skip an unreadable day, keep the other
+        };
+        lines_owned.extend(content.lines().map(str::to_owned));
+    }
+    let start = lines_owned.len().saturating_sub(JOURNAL_SCAN_LINES);
+    lines_owned[start..]
         .iter()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|v| {

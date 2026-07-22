@@ -39,7 +39,11 @@ out="${dropin_dir}/50-egress.conf"
 hosts=()
 for f in "$conf" "$extra"; do
     [ -r "$f" ] || continue
-    while IFS= read -r line; do
+    # `|| [ -n "$line" ]`: read exits non-zero at EOF when the last line has
+    # no trailing newline — without the guard, an operator-written per-instance
+    # file created with `printf 'api.host'` silently LOSES its last (or only)
+    # host, quieter than an unresolvable one (which at least leaves a comment).
+    while IFS= read -r line || [ -n "$line" ]; do
         line="${line%%#*}"                       # strip comments
         line="${line//[[:space:]]/}"             # strip whitespace
         [ -n "$line" ] || continue
@@ -60,6 +64,11 @@ is_internal_ip() {
         169.254.*) return 0 ;;                                 # link-local incl. cloud metadata
         10.*|192.168.*) return 0 ;;                            # RFC1918
         172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;    # RFC1918 172.16/12
+        # RFC6598 CGNAT 100.64.0.0/10 — no public provider lives there, but
+        # overlay/mesh networks (Tailscale tailnets, some CNIs) DO: a poisoned
+        # or CNAMEd hostname landing here would open the wall to an internal
+        # overlay peer, the exact class this function exists to close.
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*) return 0 ;;
         ::1|::|::ffff:*) return 0 ;;                            # v6 loopback / unspecified / v4-mapped
         [fF][eE]8*:*|[fF][eE]9*:*|[fF][eE][aAbB]*:*) return 0 ;; # v6 link-local fe80::/10
         [fF][cCdD]*:*) return 0 ;;                              # v6 ULA fc00::/7
