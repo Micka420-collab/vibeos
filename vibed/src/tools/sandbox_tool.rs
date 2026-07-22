@@ -230,6 +230,10 @@ fn assess(class: ToolClass, r: &Value, own_ns_mnt: Option<&str>) -> (bool, Vec<S
             "ok",
             "browser must ALLOW user-namespace creation (Chromium's sandbox)",
         ),
+        ToolClass::Proxy => (
+            "eperm",
+            "proxy must DENY unprivileged user-namespace creation (like deploy)",
+        ),
     };
     if r["unshare_user"].as_str() != Some(want) {
         issues.push(format!(
