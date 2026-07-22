@@ -227,6 +227,19 @@ Faits durables extraits du journal : `facts.jsonl` avec
 ollama, jamais envoyés dans le cloud) pour la recherche sémantique de
 `memory.query` — hors périmètre v0.1.
 
+**Consolidation (livré — [ADR-030](DECISIONS.md)).** `facts.jsonl` est
+**append-only** : un même fait ré-affirmé s'y accumule en autant de lignes. La
+**vue consolidée** (`vibed/src/tools/consolidate.rs`, pur/testé) **déduplique par
+`(subject, fact)`**, dernière écriture gagnant (le `ts` le plus récent), et rend
+une vue stable et ordonnée — l'analogue « savoir » du fold `user`/`projects`.
+Exposée à l'opérateur par `vibectl memory knowledge` et aux agents par
+`memory.query fold:true` (scope `knowledge`). **Invariant §9, non négociable** :
+la consolidation **compacte, elle ne juge pas** — elle n'élève **jamais** la
+confiance d'un fait (ni par nombre d'assertions, ni par `source` — tous deux non
+fiables) ; la confiance rendue est celle stockée par l'entrée gagnante. La
+synthèse sémantique (dérivation de nouveaux faits à partir du journal) resterait
+une tâche `vibed` future, et devrait honorer le même invariant.
+
 **Classement de rappel (livré pur, câblage à venir — [ADR-030](DECISIONS.md)).**
 Une mémoire qui grossit sans classement se dégrade : tout remonter noie le
 signal, filtrer par sous-chaîne rate le souvenir pertinent mal nommé.
@@ -532,14 +545,15 @@ Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
 `memory.query` (arguments `query`, `scope`, `limit`, `fold`) et `memory.append`
 (scopes `journal`, `knowledge`, `user`, `projects` — tous append-only) sont
 **implémentés, testés et exposés** par le démon `vibed`. La **vue courante**
-(fold last-write-wins des scopes `user`/`projects`) est matérialisée pour
-l'opérateur par `vibectl memory profile`/`projects` **et pour les agents** par
-`memory.query` avec `fold: true` (T0, un seul appel) — les deux **livrés**.
-Reste une **cible ultérieure** : la recherche sémantique par embeddings.
+(fold last-write-wins des scopes `user`/`projects`, et **consolidation
+dédupliquée** du scope `knowledge` — ADR-030) est matérialisée pour
+l'opérateur par `vibectl memory profile`/`projects`/`knowledge` **et pour les
+agents** par `memory.query` avec `fold: true` (T0, un seul appel) — tous
+**livrés**. Reste une **cible ultérieure** : la recherche sémantique par embeddings.
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
-| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** ; `fold:true` sur `user`/`projects` = vue consolidée | ✅ **livré** (scope/limit + extraits + fold) |
+| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** ; `fold:true` sur `user`/`projects`/`knowledge` = vue consolidée ; `rank:true` sur `journal`/`knowledge` = classement de rappel | ✅ **livré** (scope/limit + extraits + fold + rank) |
 | `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`, `knowledge`, `user`, `projects` (tous append-only) |
 
 Points durs :
@@ -562,11 +576,13 @@ Points durs :
   contenu **auto-déclaré par l'agent**, lui-même un *insider non fiable*
   (THREAT-MODEL §1) : un agent peut inscrire `source: "genesis.sh"` ou un
   `fact` mensonger. `source` est une **étiquette de commodité**, jamais une
-  preuve de provenance ni d'autorité. Toute lecture — et en particulier une
-  future **consolidation/synthèse `knowledge`** (dédup, agrégation, calcul de
-  confiance) — doit traiter ces champs comme des assertions non vérifiées :
-  ne jamais élever la confiance d'un fait sur la seule foi de son `source`, ne
-  jamais accorder un privilège d'après lui. La seule identité fiable est l'uid
+  preuve de provenance ni d'autorité. Toute lecture — et en particulier la
+  **consolidation `knowledge`** (§3.6, livrée : dédup last-write-wins) — doit
+  traiter ces champs comme des assertions non vérifiées :
+  ne jamais élever la confiance d'un fait sur la seule foi de son `source` (ni
+  du nombre d'assertions), ne
+  jamais accorder un privilège d'après lui. C'est **exactement** l'invariant que
+  `consolidate.rs` respecte : il compacte, il ne juge pas. La seule identité fiable est l'uid
   `SO_PEERCRED` du journal d'audit. Corollaire : la mémoire n'est pas un
   coffre-fort — **aucun secret** ne doit y être écrit.
 - Chaque appel — accepté ou refusé — est audité et produira, à terme, un événement

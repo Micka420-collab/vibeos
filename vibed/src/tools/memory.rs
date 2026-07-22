@@ -126,10 +126,19 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
                 out["folded"] = json!(true);
                 return Ok(out.to_string());
             }
+            // Consolidated knowledge: facts.jsonl deduped by (subject, fact),
+            // last-write-wins (ADR-030). Confidence is NEVER raised by the fold
+            // (THREAT-MODEL §9: source/fact/confidence are agent-declared).
+            Some("knowledge") => {
+                let mut out = crate::vibectl::memory_knowledge_at(root);
+                out["scope"] = json!("knowledge");
+                out["folded"] = json!(true);
+                return Ok(out.to_string());
+            }
             _ => {
-                return Err(
-                    "memory.query: 'fold' applies only to scope 'user' or 'projects'".to_string(),
-                )
+                return Err("memory.query: 'fold' applies only to scope 'user', \
+                            'projects' or 'knowledge'"
+                    .to_string())
             }
         }
     }
@@ -805,6 +814,8 @@ mod tests {
     #[test]
     fn rank_orders_by_relevance_within_same_recency_and_type() {
         let root = memory_scratch("rankrel");
+        // Drop the scratch's genesis line so exactly the two crafted events rank.
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
         // Two observations, SAME day and SAME type -> only relevance separates them.
         write_journal_day(
             &root,
@@ -820,6 +831,89 @@ mod tests {
         assert!(
             matches[0]["snippet"].as_str().unwrap().contains("pnpm"),
             "the query-relevant event ranks first: {payload}"
+        );
+        // rank is a RANKING, not a filter: the non-matching event is still
+        // returned (just lower) — a silent regression to substring-filtering
+        // would drop it and this would catch it.
+        assert_eq!(
+            matches.len(),
+            2,
+            "all events are ranked and returned, not filtered to query matches: {payload}"
+        );
+        assert!(
+            matches[1]["snippet"].as_str().unwrap().contains("cuisine"),
+            "the non-matching event survives, ranked last: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_respects_limit_and_flags_truncation() {
+        let root = memory_scratch("ranklimit");
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        // Three events, all scanned; ask for the top 2.
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"un"}}"#,
+                r#"{"ts":"2026-07-20T11:00:00Z","type":"decision","source":"a","data":{"note":"deux"}}"#,
+                r#"{"ts":"2026-07-20T12:00:00Z","type":"preference","source":"a","data":{"note":"trois"}}"#,
+            ],
+        );
+        let payload = ranked(&root, "journal", "", 2);
+        assert_eq!(
+            payload["scanned_events"].as_u64().unwrap(),
+            3,
+            "all 3 scanned"
+        );
+        assert_eq!(
+            payload["matches"].as_array().unwrap().len(),
+            2,
+            "limit keeps the top 2: {payload}"
+        );
+        assert!(
+            payload["truncated"].as_bool().unwrap(),
+            "more events than returned -> truncated: {payload}"
+        );
+        // limit >= events -> not truncated.
+        let full = ranked(&root, "journal", "", 10);
+        assert!(
+            !full["truncated"].as_bool().unwrap(),
+            "nothing dropped: {full}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_keeps_event_with_missing_or_invalid_ts() {
+        let root = memory_scratch("rankts");
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        // One event with NO ts, one recent. The ts-less event maps to epoch 0
+        // (very old) but must STILL appear in the ranking, just ranked lower —
+        // never silently dropped.
+        write_journal_day(
+            &root,
+            "2026-07-21",
+            &[
+                r#"{"type":"observation","source":"a","data":{"note":"sans horodatage"}}"#,
+                r#"{"ts":"2026-07-21T10:00:00Z","type":"observation","source":"a","data":{"note":"recent"}}"#,
+            ],
+        );
+        let payload = ranked(&root, "journal", "", 10);
+        assert_eq!(
+            payload["scanned_events"].as_u64().unwrap(),
+            2,
+            "the ts-less event is kept, not dropped: {payload}"
+        );
+        let matches = payload["matches"].as_array().unwrap();
+        // The recent event ranks above the epoch-0 one.
+        assert!(matches[0]["snippet"].as_str().unwrap().contains("recent"));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m["snippet"].as_str().unwrap().contains("sans horodatage")),
+            "the ts-less event is present in the ranking: {payload}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -918,6 +1012,32 @@ mod tests {
             payload["scanned_events"].as_u64().unwrap(),
             1,
             "only the well-formed object is an event: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fold_knowledge_returns_consolidated_view() {
+        let root = memory_scratch("foldknow");
+        std::fs::write(
+            root.join("knowledge").join("facts.jsonl"),
+            format!(
+                "{}\n{}\n",
+                r#"{"id":"1","ts":"2026-07-01T00:00:00Z","subject":"s","fact":"f","confidence":0.4,"source":"a"}"#,
+                r#"{"id":"2","ts":"2026-07-09T00:00:00Z","subject":"s","fact":"f","confidence":0.7,"source":"b"}"#,
+            ),
+        )
+        .expect("write facts");
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"scope": "knowledge", "fold": true}),
+        ));
+        assert_eq!(payload["folded"], json!(true));
+        assert_eq!(payload["scope"], "knowledge");
+        assert_eq!(payload["count"], 1, "the two re-assertions fold into one");
+        assert_eq!(
+            payload["knowledge"][0]["confidence"], 0.7,
+            "last write wins"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

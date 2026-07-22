@@ -220,6 +220,7 @@ fn usage() -> ExitCode {
          \x20 vibectl memory mode           current memory mode (amnesic|persistent)\n\
          \x20 vibectl memory profile        current user profile (fold of updates)\n\
          \x20 vibectl memory projects       current project index (fold of updates)\n\
+         \x20 vibectl memory knowledge      consolidated facts (dedup of facts.jsonl)\n\
          \x20 vibectl memory reset [--yes]  FACTORY RESET (root): purge the memory store and\n\
          \x20                               re-arm Genesis at next boot; cryptographic erasure\n\
          \x20                               arrives with LUKS (Phase 3) — DANGER\n\
@@ -277,6 +278,11 @@ fn main() -> ExitCode {
         }
         ["memory", "projects"] => {
             let out = vibectl::memory_projects_at(Path::new(MEMORY_DIR));
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            ExitCode::SUCCESS
+        }
+        ["memory", "knowledge"] => {
+            let out = vibectl::memory_knowledge_at(Path::new(MEMORY_DIR));
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             ExitCode::SUCCESS
         }

@@ -5,6 +5,7 @@
 //! one family, with its own tests.
 
 pub(crate) mod browser;
+pub(crate) mod consolidate;
 pub(crate) mod deploy;
 pub(crate) mod embeddings;
 pub(crate) mod fs;

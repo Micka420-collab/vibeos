@@ -382,6 +382,20 @@ pub fn memory_projects_at(root: &Path) -> Value {
     })
 }
 
+/// `vibectl memory knowledge` — the CURRENT knowledge, materialized as the
+/// CONSOLIDATED fold of the append-only `knowledge/facts.jsonl`: deduplicated by
+/// `(subject, fact)`, last-write-wins by `ts`, sorted (docs/MEMORY.md §3.6,
+/// ADR-030). The consolidation NEVER raises a fact's confidence — `source`/
+/// `fact`/`confidence` are agent-declared and untrusted (THREAT-MODEL §9); the
+/// fold only compacts repeats, it does not judge. Same read-side memoization as
+/// `profile`/`projects`.
+pub fn memory_knowledge_at(root: &Path) -> Value {
+    fold_updates_cached(
+        &root.join("knowledge").join("facts.jsonl"),
+        crate::tools::consolidate::consolidate_fold,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // `vibectl memory reset` — factory reset of the memory store.
 //
@@ -1137,6 +1151,34 @@ mod tests {
         assert_eq!(projs[0]["path"], "/home/dev/a", "sorted by path");
         assert_eq!(projs[1]["path"], "/home/dev/b");
         assert_eq!(projs[1]["name"], "b-new", "last write wins per path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_knowledge_consolidates_facts_dedup_last_write_wins() {
+        let root = scratch("knowledge");
+        std::fs::create_dir_all(root.join("knowledge")).unwrap();
+        let lines = [
+            // Same (subject, fact) re-asserted later -> the later confidence wins.
+            r#"{"id":"1","ts":"2026-07-01T00:00:00Z","subject":"proj","fact":"pnpm","confidence":0.5,"source":"a"}"#,
+            r#"{"id":"2","ts":"2026-07-20T00:00:00Z","subject":"proj","fact":"pnpm","confidence":0.9,"source":"b"}"#,
+            // Distinct fact for the same subject -> its own entry.
+            r#"{"id":"3","ts":"2026-07-10T00:00:00Z","subject":"proj","fact":"fedora","confidence":0.8,"source":"a"}"#,
+            r#"garbage"#,
+        ];
+        std::fs::write(
+            root.join("knowledge").join("facts.jsonl"),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
+        let v = memory_knowledge_at(&root);
+        let facts = v["knowledge"].as_array().unwrap();
+        assert_eq!(v["count"], 2, "deduped by (subject, fact)");
+        // Sorted by subject then fact: "fedora" before "pnpm".
+        assert_eq!(facts[0]["fact"], "fedora");
+        assert_eq!(facts[1]["fact"], "pnpm");
+        assert_eq!(facts[1]["confidence"], 0.9, "last write wins");
+        assert_eq!(facts[1]["source"], "b");
         let _ = std::fs::remove_dir_all(&root);
     }
 
