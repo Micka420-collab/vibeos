@@ -240,13 +240,12 @@ fiables) ; la confiance rendue est celle stockée par l'entrée gagnante. La
 synthèse sémantique (dérivation de nouveaux faits à partir du journal) resterait
 une tâche `vibed` future, et devrait honorer le même invariant.
 
-**Classement de rappel (livré pur, câblage à venir — [ADR-030](DECISIONS.md)).**
+**Classement de rappel (livré et câblé — lexical ; vecteurs à venir — [ADR-030](DECISIONS.md)).**
 Une mémoire qui grossit sans classement se dégrade : tout remonter noie le
 signal, filtrer par sous-chaîne rate le souvenir pertinent mal nommé.
-`vibed/src/tools/recall.rs` implémente — **pur, déterministe, testé, inerte**
-(même statut que `propose.rs`/`embeddings.rs`) — le **score de rappel** que
-`memory.query` classera, d'après le modèle *memory stream* des *Generative
-Agents* (Park et al. 2023) :
+`vibed/src/tools/recall.rs` implémente — **pur, déterministe, testé** — le
+**score de rappel** que `memory.query` applique en mode `rank`, d'après le
+modèle *memory stream* des *Generative Agents* (Park et al. 2023) :
 
 ```text
 score = w_récence · récence + w_importance · importance + w_pertinence · pertinence
