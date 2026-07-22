@@ -62,11 +62,17 @@ impl EmbeddingRecord {
         }
         let mut vector = Vec::with_capacity(raw.len());
         for x in raw {
-            let f = x.as_f64()?;
-            if !f.is_finite() {
+            // Finitude vérifiée APRÈS le cast : un f64 fini de magnitude
+            // > f32::MAX devient ±inf par le cast `as` (non saturant), ce qui
+            // casserait le cosinus en aval (NaN). Une ligne forgée `[1e39]` est
+            // ainsi refusée, pas chargée en inf (le round-trip normal la masque
+            // — serde sérialise inf en `null`, déjà rejeté — mais pas une ligne
+            // adverse écrite à la main).
+            let g = x.as_f64()? as f32;
+            if !g.is_finite() {
                 return None;
             }
-            vector.push(f as f32);
+            vector.push(g);
         }
         Some(Self {
             id,
@@ -253,6 +259,13 @@ mod tests {
         // NaN/inf refusés à l'entrée (casseraient le cosinus en aval).
         let nan = r#"{"id":"x","ts":1,"source":"s","text_digest":"d","vector":[null]}"#;
         assert!(EmbeddingRecord::from_json_line(nan).is_none());
+        // Un f64 FINI mais de magnitude > f32::MAX devient ±inf au cast : une
+        // ligne forgée à la main est refusée (finitude vérifiée APRÈS le cast).
+        let big = r#"{"id":"x","ts":1,"source":"s","text_digest":"d","vector":[1e39]}"#;
+        assert!(
+            EmbeddingRecord::from_json_line(big).is_none(),
+            "1e39 -> inf refusé"
+        );
     }
 
     #[test]

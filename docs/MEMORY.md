@@ -225,7 +225,17 @@ Faits durables extraits du journal : `facts.jsonl` avec
 `{ "id", "ts", "subject", "fact", "confidence", "source" }`. Le répertoire
 `embeddings/` est réservé à un index vectoriel local (embeddings calculés par
 ollama, jamais envoyés dans le cloud) pour la recherche sémantique de
-`memory.query` — hors périmètre v0.1.
+`memory.query`.
+
+**Sous-système d'embedding (couches pures livrées ; production différée).** Trois
+couches pures et testées composent la recherche vectorielle, prêtes à activer dès
+que l'appel ollama sera câblé (Phase 3, machine bootée — jamais dans le cloud) :
+`tools/embed.rs` **produit** les vecteurs (contrat requête/réponse fail-closed
+vers ollama `/api/embed`), `tools/embeddings.rs` **stocke** l'index et calcule le
+cosinus, `tools/recall.rs` **classe** avec le cosinus quand les vecteurs existent
+(repli lexical sinon). La **seule** pièce différée est l'appel HTTP local
+lui-même (et le choix du contenu à embarquer) — d'ici là ces couches ne sont pas
+appelées à l'exécution.
 
 **Consolidation (livré — [ADR-030](DECISIONS.md)).** `facts.jsonl` est
 **append-only** : un même fait ré-affirmé s'y accumule en autant de lignes. La
