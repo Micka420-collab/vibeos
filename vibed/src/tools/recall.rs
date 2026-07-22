@@ -1,12 +1,12 @@
 //! Rappel mémoire — couche **pure** du classement de pertinence de `memory.query`
 //! (docs/MEMORY.md §3.5/§3.6, ADR-030).
 //!
-//! **Pure et inerte** (même statut que [`propose`](super::propose) et
-//! [`embeddings`](super::embeddings)) : le *score de rappel* d'un souvenir, sans
-//! aucune E/S, aucun modèle, aucun réseau. La lecture réelle du store, le câblage
-//! dans `memory.query` (aujourd'hui un simple filtre lexical sous-chaîne) et la
-//! production des vecteurs sont des incréments suivants. D'ici là cette couche
-//! n'est pas appelée à l'exécution.
+//! **Pure** (aucune E/S, aucun modèle, aucun réseau) — mais **désormais câblée** :
+//! `memory.query` en mode `rank` (opt-in, scopes `journal`/`knowledge`) classe
+//! les événements par ce score. Le **moteur lexical** est donc appelé à
+//! l'exécution ; seul le **moteur vectoriel** ([`relevance_cosine`], cosinus de
+//! [`embeddings`](super::embeddings)) reste **inerte** tant que la production des
+//! vecteurs (ollama local, ADR-028) n'existe pas — c'est l'incrément suivant.
 //!
 //! **Pourquoi.** Une mémoire qui grossit sans classement se dégrade : tout
 //! remonter noie le signal, filtrer par sous-chaîne rate le pertinent mal
@@ -33,10 +33,9 @@
 //! décroissant puis `id` croissant — une égalité ne dépend jamais de l'ordre
 //! d'arrivée), aucune valeur non finie propagée.
 
-// Câblage dans `memory.query` + production des vecteurs = incréments suivants ;
-// jusque-là cette couche pure n'est pas encore appelée.
-#![allow(dead_code)]
-
+// Le moteur lexical est câblé (memory.query `rank`) ; le moteur VECTORIEL
+// (`relevance_cosine` + `embeddings`) reste inerte tant que la production des
+// vecteurs n'existe pas — d'où l'allow ciblé sur cette seule fonction.
 use super::embeddings::cosine_similarity;
 
 /// Poids des trois axes du score de rappel. Les valeurs par défaut suivent la
@@ -84,6 +83,37 @@ pub(crate) fn recency(now_unix: u64, ts_unix: u64, half_life_secs: u64) -> f32 {
     2f64.powf(-age / hl) as f32
 }
 
+/// Epoch **secondes** à minuit UTC de la date portée par le début `AAAA-MM-JJ`
+/// d'un horodatage ISO-8601. **Granularité au jour** — délibérée : robuste, sans
+/// arithmétique de fuseau (le journal est déjà bucketé au jour, §3.5), suffisant
+/// pour l'axe récence. `None` si les 10 premiers caractères ne sont pas une date
+/// valide. Inverse (au jour près) de `mcp::utc_civil` — algorithme
+/// `days_from_civil` de Howard Hinnant, correct pour les années négatives via
+/// division euclidienne.
+pub(crate) fn epoch_day_from_iso(ts: &str) -> Option<u64> {
+    let b = ts.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i64 = ts.get(0..4)?.parse().ok()?;
+    let m: i64 = ts.get(5..7)?.parse().ok()?;
+    let d: i64 = ts.get(8..10)?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // days_from_civil : y décalé si jan/fév, ère de 400 ans, jour-de-l'ère.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146_097 + doe - 719_468;
+    // Une date antérieure à l'époque (improbable dans le journal) ⇒ 0, jamais
+    // un u64 qui déborde par le bas.
+    Some((days.max(0) as u64) * 86_400)
+}
+
 /// Saillance `[0, 1]` d'un événement journal, dérivée de son **type** (§3.5) —
 /// jamais d'un champ auto-déclaré. Un type inconnu tombe sur un plancher neutre
 /// (0.3) : on n'écarte pas un souvenir parce qu'on ne connaît pas son étiquette.
@@ -129,8 +159,9 @@ pub(crate) fn relevance_lexical(query: &str, text: &str) -> f32 {
 /// Pertinence VECTORIELLE `[0, 1]` : cosinus de l'index [`embeddings`], replié de
 /// `[-1, 1]` vers `[0, 1]` par `(c + 1) / 2`. `None` (dimensions différentes,
 /// norme nulle) est traité par l'appelant comme « pas de signal vectoriel »
-/// (repli lexical), jamais comme un score de 0 imposé. Premier consommateur réel
-/// de la couche `embeddings`.
+/// (repli lexical), jamais comme un score de 0 imposé. **Inerte** tant que la
+/// production des vecteurs n'existe pas (d'où l'`allow`) — l'incrément suivant.
+#[allow(dead_code)]
 pub(crate) fn relevance_cosine(query_vec: &[f32], item_vec: &[f32]) -> Option<f32> {
     cosine_similarity(query_vec, item_vec).map(|c| (c + 1.0) / 2.0)
 }
@@ -211,6 +242,37 @@ mod tests {
         assert!((recency(now, now + hl, hl) - 1.0).abs() < 1e-6);
         // Demi-vie nulle : récence désactivée, pas un NaN.
         assert_eq!(recency(now, now - 999, 0), 1.0);
+    }
+
+    #[test]
+    fn epoch_day_parses_iso_date_at_day_granularity() {
+        // Points d'ancrage connus (minuit UTC).
+        assert_eq!(epoch_day_from_iso("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_day_from_iso("1970-01-02T12:34:56Z"), Some(86_400));
+        assert_eq!(
+            epoch_day_from_iso("2000-01-01T00:00:00Z"),
+            Some(946_684_800)
+        );
+        // Le temps intra-journée est ignoré (granularité au jour).
+        assert_eq!(
+            epoch_day_from_iso("2026-07-22T09:14:22+02:00"),
+            epoch_day_from_iso("2026-07-22T23:59:59Z")
+        );
+        // Un jour de plus = +86 400 s, pile.
+        let d1 = epoch_day_from_iso("2026-07-22T00:00:00Z").unwrap();
+        let d2 = epoch_day_from_iso("2026-07-23T00:00:00Z").unwrap();
+        assert_eq!(d2 - d1, 86_400);
+        // Formes invalides ⇒ None (jamais un panic ni une date bidon).
+        for bad in [
+            "",
+            "2026",
+            "2026/07/22",
+            "not-a-date",
+            "2026-13-01",
+            "2026-07-00",
+        ] {
+            assert!(epoch_day_from_iso(bad).is_none(), "{bad}");
+        }
     }
 
     #[test]

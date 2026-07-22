@@ -169,10 +169,10 @@ Par ordre d'impact typique :
 - **Pas de prix en dur.** VibeOS n'embarque aucune table USD/token : elle
   périmerait. Le coût vient du CLI ; le relatif vient des multiplicateurs
   structurels du cache.
-- **Le classement mémoire (§5.2) est livré pur mais pas encore câblé** dans
-  `memory.query` (voir [MEMORY.md §9](MEMORY.md) et ADR-030) — la brique existe
-  et est testée, son branchement live et la production des vecteurs sont les
-  incréments suivants.
+- **Le classement mémoire (§5.2) est livré ET câblé** dans `memory.query` (mode
+  `rank: true`, opt-in, scopes `journal`/`knowledge` — voir [MEMORY.md §9](MEMORY.md)
+  et ADR-030) ; seul le moteur **vectoriel** (production des vecteurs, ollama
+  local) reste un incrément suivant.
 
 ---
 

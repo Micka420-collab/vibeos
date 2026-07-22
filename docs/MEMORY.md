@@ -248,10 +248,11 @@ score = w_récence · récence + w_importance · importance + w_pertinence · pe
   `knowledge/embeddings/`, replié `[-1,1]→[0,1]`) — `recall.rs` est le **premier
   consommateur réel** de la couche `embeddings`.
 
-Ce qui est **livré** est la brique de classement (pure et testée) ; son
-**câblage** dans le chemin live de `memory.query` (aujourd'hui un filtre lexical
-sous-chaîne) et la **production des vecteurs** (ollama local) sont les incréments
-suivants.
+Ce classement est **livré ET câblé** : `memory.query` en mode `rank: true`
+(opt-in, scopes `journal`/`knowledge`, §9) l'applique aux événements. Le moteur
+**lexical** de pertinence est donc actif ; restent à venir la **production des
+vecteurs** (ollama local) et le branchement du moteur **vectoriel** (le cosinus
+de `embeddings/`, déjà présent dans `recall.rs` mais inerte).
 
 ### 3.7 Permissions et confinement
 
@@ -587,22 +588,37 @@ Points durs :
 }
 ```
 
-Trois arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
+Quatre arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
 sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` |
 `personality` | `user` | `projects` | `journal` | `knowledge` (restreint la
-marche à une entrée du layout §3 ; un scope inconnu est une erreur explicite) et
+marche à une entrée du layout §3 ; un scope inconnu est une erreur explicite),
 `limit` (entier ≥ 1,
-plafond de résultats — la réponse porte un drapeau `truncated`). Chaque match
+plafond de résultats — la réponse porte un drapeau `truncated`) et `rank`
+(booléen, ci-dessous). Chaque match du mode par défaut
 est rendu `{ "file": <chemin relatif>, "snippet": <extrait de contenu borné,
 ≤ 1024 caractères>, "snippet_truncated": <bool> }` : l'agent **lit la mémoire
 en un seul appel**, sans enchaîner un `fs.read` sur le chemin absolu — la lecture
 est le rôle de `memory.query`, conformément à cette spec. La marche reste bornée
 en dur (200 fichiers, 64 KiB scannés par fichier, extrait ≤ 1024 caractères).
 
-**Cible ultérieure** : remplacer le filtre lexical sous-chaîne par le **score de
-rappel** (récence + importance + pertinence, `recall.rs` §3.6, [ADR-030](DECISIONS.md)),
-puis la recherche sémantique via `knowledge/embeddings/`. La brique de classement
-est **livrée pure et testée** ; son câblage live est l'incrément suivant.
+**`rank: true` (✅ livré, opt-in — scopes `journal`/`knowledge`).** Au lieu de
+rendre des **fichiers** dans l'ordre du parcours (dépendant du système de
+fichiers), le mode `rank` classe les **événements** par le **score de rappel**
+(récence + importance + pertinence, [`recall.rs`](../vibed/src/tools/recall.rs) §3.6,
+[ADR-030](DECISIONS.md)) — `limit` garde alors les **plus pertinents**, pas les
+premiers rencontrés. Chaque match rend `{ "file", "line", "ts", "type", "score",
+"snippet", "snippet_truncated" }` ; la réponse porte `"ranked": true` et
+`"scanned_events"`. **Additif** : `rank` vaut `false` par défaut et le chemin
+par défaut est inchangé (même précédent que `fold`). L'importance vient du
+**type** d'événement (journal) ou de la **confidence** stockée (knowledge),
+**jamais** d'un champ auto-déclaré (§ points durs : `source`/`data`/`fact` non
+fiables). Bornes respectées : `MAX_MEMORY_FILES` (parcours), 64 KiB/fichier
+(lecture), et un plafond dur d'événements classés par appel.
+
+**Cible ultérieure** : la pertinence **vectorielle** (cosinus de
+`knowledge/embeddings/`, moteur déjà présent dans `recall.rs` mais **inerte**
+tant que la production des vecteurs — ollama local — n'existe pas). Le moteur
+**lexical** du classement, lui, est **livré et câblé** (`rank`).
 
 ### `memory.append` (T1 — ✅ livré pour `journal` et `knowledge`)
 

@@ -134,56 +134,37 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
         }
     }
 
-    // Bounded iterative walk: no recursion, hard cap on visited files, and
-    // NEVER follows symlinks (entry.file_type() / symlink_metadata do not
-    // traverse) — a link planted inside the store cannot route the walk (or
-    // the content scan) outside /var/lib/vibeos/memory, e.g. into the audit
-    // trail.
-    let mut files = Vec::new();
-    let mut stack: Vec<std::path::PathBuf> = Vec::new();
-    // A walk root is only pushed if it is a REAL directory (symlink_metadata
-    // does not follow): if `journal` (or the store root itself) is a symlink,
-    // the walk must not descend through it out of the store.
-    let push_if_real_dir = |stack: &mut Vec<std::path::PathBuf>, p: std::path::PathBuf| {
-        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
-            stack.push(p);
-        }
+    // `rank`: additive, opt-in (same precedent as `fold`). For `journal` /
+    // `knowledge`, return EVENTS ranked by the recall score (recency +
+    // importance + relevance — recall.rs / ADR-030) instead of files in
+    // filesystem-walk order, so `limit` keeps the MOST relevant rather than the
+    // first encountered (the default order is filesystem-dependent). Default
+    // false: the classic per-file path below is byte-for-byte unchanged.
+    let rank = match args.get("rank") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("memory.query: 'rank' must be a boolean".to_string()),
     };
-    match scope {
-        None => push_if_real_dir(&mut stack, root.to_path_buf()),
-        Some((_, relative, is_dir)) => {
-            let start = root.join(relative);
-            if is_dir {
-                push_if_real_dir(&mut stack, start);
-            } else if start
-                .symlink_metadata()
-                .is_ok_and(|m| m.file_type().is_file())
-            {
-                files.push(start);
+
+    // Bounded, symlink-safe file collection — shared verbatim by the default
+    // per-file match below and the ranked-event path.
+    let files = collect_scope_files(root, scope);
+
+    if rank {
+        return match scope.map(|(name, _, _)| name) {
+            Some("journal") | Some("knowledge") => {
+                // `now` is the only impurity; the ranking itself is pure and
+                // injectable (see memory_query_ranked's tests).
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                memory_query_ranked(root, scope.map(|(n, _, _)| n), &files, &query, limit, now)
             }
-        }
-    }
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+            _ => Err(
+                "memory.query: 'rank' applies only to scope 'journal' or 'knowledge'".to_string(),
+            ),
         };
-        for entry in entries.flatten() {
-            if files.len() >= MAX_MEMORY_FILES {
-                break;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file() {
-                files.push(entry.path());
-            }
-            // Symlinks (and any other special type) are deliberately skipped.
-        }
-        if files.len() >= MAX_MEMORY_FILES {
-            break;
-        }
     }
 
     let mut matches = Vec::new();
@@ -230,6 +211,218 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
         "query": query,
         "scope": scope.map(|(name, _, _)| name),
         "scanned_files": files.len(),
+        "matches": matches,
+        "truncated": truncated
+    })
+    .to_string())
+}
+
+/// Bounded, symlink-safe collection of the files under a scope (or the whole
+/// store). Iterative (no recursion), hard-capped at `MAX_MEMORY_FILES`, and
+/// NEVER follows symlinks (`symlink_metadata` / `entry.file_type()` do not
+/// traverse) — a link planted inside the store cannot route the walk outside
+/// `/var/lib/vibeos/memory`, e.g. into the audit trail. Extracted verbatim from
+/// `memory.query` so the default and ranked paths share ONE audited walk.
+fn collect_scope_files(
+    root: &std::path::Path,
+    scope: Option<(&str, &str, bool)>,
+) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    // A walk root is only pushed if it is a REAL directory (symlink_metadata
+    // does not follow): if a scope dir (or the store root) is a symlink, the
+    // walk must not descend through it out of the store.
+    let push_if_real_dir = |stack: &mut Vec<std::path::PathBuf>, p: std::path::PathBuf| {
+        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
+            stack.push(p);
+        }
+    };
+    match scope {
+        None => push_if_real_dir(&mut stack, root.to_path_buf()),
+        Some((_, relative, is_dir)) => {
+            let start = root.join(relative);
+            if is_dir {
+                push_if_real_dir(&mut stack, start);
+            } else if start
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_file())
+            {
+                files.push(start);
+            }
+        }
+    }
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if files.len() >= MAX_MEMORY_FILES {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
+            }
+            // Symlinks (and any other special type) are deliberately skipped.
+        }
+        if files.len() >= MAX_MEMORY_FILES {
+            break;
+        }
+    }
+    files
+}
+
+/// Demi-vie de récence du classement (une semaine) : un événement d'il y a 7
+/// jours pèse moitié moins qu'aujourd'hui sur l'axe récence.
+const RANK_HALF_LIFE_SECS: u64 = 7 * 86_400;
+/// Borne dure du nombre d'événements classés en un appel (anti-DoS mémoire, en
+/// plus de la borne d'octets par fichier de `read_memory_scan`).
+const MAX_RANK_EVENTS: usize = 5_000;
+
+/// Métadonnées d'un événement classé, pour reconstruire la réponse après le tri
+/// (le classeur pur `recall` ne connaît que `id`/`ts`/`importance`/`text`).
+struct RankMeta {
+    file: String,
+    line: usize,
+    ts: String,
+    kind: String,
+    snippet: String,
+    snippet_truncated: bool,
+}
+
+/// Mode `rank` de `memory.query` (opt-in, journal/knowledge) : classe les
+/// ÉVÉNEMENTS par le score de rappel (`recall::top_k_lexical`) au lieu de rendre
+/// des fichiers dans l'ordre du walk. `now_epoch` est injecté (déterminisme des
+/// tests). Fail-closed : une ligne malformée ou non-objet est ignorée, jamais un
+/// panic ; bornes `MAX_MEMORY_FILES` (walk), `MAX_MEMORY_SCAN_BYTES` (octets/
+/// fichier) et `MAX_RANK_EVENTS` (nombre d'événements) respectées.
+fn memory_query_ranked(
+    root: &std::path::Path,
+    scope_name: Option<&str>,
+    files: &[std::path::PathBuf],
+    query: &str,
+    limit: usize,
+    now_epoch: u64,
+) -> Result<String, String> {
+    use crate::tools::recall;
+
+    let mut items: Vec<recall::MemoryItem> = Vec::new();
+    let mut metas: std::collections::BTreeMap<String, RankMeta> = std::collections::BTreeMap::new();
+    let mut capped = false;
+
+    'outer: for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let Some((text, _longer)) = read_memory_scan(path) else {
+            continue;
+        };
+        for (line_no, raw) in text.lines().enumerate() {
+            if items.len() >= MAX_RANK_EVENTS {
+                capped = true;
+                break 'outer;
+            }
+            let line = raw.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // Fail-closed: only well-formed JSON OBJECTS are events; anything
+            // else (a corrupt line, a bare scalar) is skipped, never fatal.
+            let Ok(ev) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if !ev.is_object() {
+                continue;
+            }
+            let ts = ev.get("ts").and_then(Value::as_str).unwrap_or("");
+            // Day-granular recency from the event's own ts; a missing/invalid ts
+            // ⇒ epoch 0 (treated as very old), never a crash.
+            let ts_unix = recall::epoch_day_from_iso(ts).unwrap_or(0);
+            // Importance from the SYSTEM-derived type (journal) or the stored
+            // confidence (knowledge) — NEVER from an agent-declared field beyond
+            // those (THREAT-MODEL §1: source/data are untrusted).
+            let (importance, kind) = match scope_name {
+                Some("knowledge") => {
+                    let c = ev
+                        .get("confidence")
+                        .and_then(Value::as_f64)
+                        .map(|c| c as f32)
+                        .unwrap_or(0.5)
+                        .clamp(0.0, 1.0);
+                    (c, "fact".to_string())
+                }
+                _ => {
+                    let t = ev.get("type").and_then(Value::as_str).unwrap_or("");
+                    (recall::importance_of_type(t), t.to_string())
+                }
+            };
+            let snippet: String = line.chars().take(MEMORY_SNIPPET_CHARS).collect();
+            let snippet_truncated = snippet.chars().count() < line.chars().count();
+            let id = format!("{relative}#{line_no}");
+            metas.insert(
+                id.clone(),
+                RankMeta {
+                    file: relative.clone(),
+                    line: line_no,
+                    ts: ts.to_string(),
+                    kind,
+                    snippet,
+                    snippet_truncated,
+                },
+            );
+            items.push(recall::MemoryItem {
+                id,
+                ts_unix,
+                importance,
+                // Raw line is the relevance text: the tokenizer strips JSON
+                // punctuation, and field names are constant across events so
+                // they never skew the ranking.
+                text: line.to_string(),
+            });
+        }
+    }
+
+    let weights = recall::RecallWeights::default();
+    let hits = recall::top_k_lexical(
+        query,
+        &items,
+        now_epoch,
+        RANK_HALF_LIFE_SECS,
+        &weights,
+        limit,
+    );
+    let matches: Vec<Value> = hits
+        .iter()
+        .filter_map(|(item, score)| {
+            metas.get(&item.id).map(|m| {
+                json!({
+                    "file": m.file,
+                    "line": m.line,
+                    "ts": m.ts,
+                    "type": m.kind,
+                    // 3 decimals: enough to see the ranking, not float noise.
+                    "score": (f64::from(*score) * 1000.0).round() / 1000.0,
+                    "snippet": m.snippet,
+                    "snippet_truncated": m.snippet_truncated,
+                })
+            })
+        })
+        .collect();
+    let truncated = capped || items.len() > matches.len();
+
+    Ok(json!({
+        "initialized": true,
+        "query": query,
+        "scope": scope_name,
+        "ranked": true,
+        "scanned_files": files.len(),
+        "scanned_events": items.len(),
         "matches": matches,
         "truncated": truncated
     })
@@ -575,6 +768,187 @@ mod tests {
 
     fn parse_result(result: Result<String, String>) -> Value {
         serde_json::from_str(&result.expect("tool call succeeds")).expect("valid JSON payload")
+    }
+
+    // -- memory.query rank mode (ADR-030, recall.rs) --------------------------
+
+    /// A fixed "now" for deterministic recency: midday 2026-07-22 UTC.
+    fn fixed_now() -> u64 {
+        crate::tools::recall::epoch_day_from_iso("2026-07-22T12:00:00Z").unwrap()
+    }
+
+    /// Run the ranked path deterministically (injected `now`), via the SAME
+    /// bounded walk the live tool uses.
+    fn ranked(root: &std::path::Path, scope_name: &str, query: &str, limit: usize) -> Value {
+        let scope = MEMORY_SCOPES
+            .iter()
+            .find(|(n, _, _)| *n == scope_name)
+            .copied();
+        let files = collect_scope_files(root, scope);
+        parse_result(memory_query_ranked(
+            root,
+            Some(scope_name),
+            &files,
+            query,
+            limit,
+            fixed_now(),
+        ))
+    }
+
+    fn write_journal_day(root: &std::path::Path, date: &str, lines: &[&str]) {
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(root.join("journal").join(format!("{date}.jsonl")), body)
+            .expect("write journal day");
+    }
+
+    #[test]
+    fn rank_orders_by_relevance_within_same_recency_and_type() {
+        let root = memory_scratch("rankrel");
+        // Two observations, SAME day and SAME type -> only relevance separates them.
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"le projet utilise pnpm"}}"#,
+                r#"{"ts":"2026-07-20T11:00:00Z","type":"observation","source":"a","data":{"note":"une recette de cuisine"}}"#,
+            ],
+        );
+        let payload = ranked(&root, "journal", "pnpm", 10);
+        let matches = payload["matches"].as_array().unwrap();
+        assert!(payload["ranked"].as_bool().unwrap());
+        assert!(
+            matches[0]["snippet"].as_str().unwrap().contains("pnpm"),
+            "the query-relevant event ranks first: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_orders_by_recency_for_empty_query() {
+        let root = memory_scratch("rankrec");
+        write_journal_day(
+            &root,
+            "2026-07-21",
+            &[
+                r#"{"ts":"2026-07-21T10:00:00Z","type":"observation","source":"a","data":{"note":"tout frais"}}"#,
+            ],
+        );
+        write_journal_day(
+            &root,
+            "2026-07-02",
+            &[
+                r#"{"ts":"2026-07-02T10:00:00Z","type":"observation","source":"a","data":{"note":"deja vieux"}}"#,
+            ],
+        );
+        // Empty query -> relevance 0 for all -> recency (same type) decides.
+        let payload = ranked(&root, "journal", "", 10);
+        let matches = payload["matches"].as_array().unwrap();
+        assert_eq!(
+            matches[0]["ts"].as_str().unwrap(),
+            "2026-07-21T10:00:00Z",
+            "the most recent event ranks first: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_importance_prefers_decision_over_observation_same_day() {
+        let root = memory_scratch("rankimp");
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"x"}}"#,
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"decision","source":"a","data":{"note":"y"}}"#,
+            ],
+        );
+        // Empty query, same day -> importance (decision > observation) decides.
+        let payload = ranked(&root, "journal", "", 10);
+        assert_eq!(
+            payload["matches"][0]["type"].as_str().unwrap(),
+            "decision",
+            "the more salient type ranks first: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_knowledge_uses_confidence_for_importance() {
+        let root = memory_scratch("rankknow");
+        std::fs::write(
+            root.join("knowledge").join("facts.jsonl"),
+            format!(
+                "{}\n{}\n",
+                r#"{"id":"f1","ts":"2026-07-20T10:00:00Z","subject":"lowsubj","fact":"peu sûr","confidence":0.1,"source":"a"}"#,
+                r#"{"id":"f2","ts":"2026-07-20T10:00:00Z","subject":"highsubj","fact":"très sûr","confidence":0.95,"source":"a"}"#,
+            ),
+        )
+        .expect("write facts");
+        // Empty query, same ts -> confidence decides (0.95 over 0.1).
+        let payload = ranked(&root, "knowledge", "", 10);
+        assert_eq!(payload["matches"][0]["type"].as_str().unwrap(), "fact");
+        assert!(
+            payload["matches"][0]["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("highsubj"),
+            "the higher-confidence fact ranks first: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_skips_malformed_and_nonobject_lines() {
+        let root = memory_scratch("rankskip");
+        // Remove the scratch's genesis line so the count is exact.
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"real"}}"#,
+                "not json at all",
+                "123",
+                "",
+            ],
+        );
+        let payload = ranked(&root, "journal", "", 10);
+        assert_eq!(
+            payload["scanned_events"].as_u64().unwrap(),
+            1,
+            "only the well-formed object is an event: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_arg_plumbing_and_scope_guard() {
+        let root = memory_scratch("rankarg");
+        // rank:true on journal returns the ranked shape.
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"scope": "journal", "rank": true}),
+        ));
+        assert!(payload["ranked"].as_bool().unwrap_or(false));
+        // rank only applies to journal/knowledge.
+        assert!(
+            memory_query_at(&root, &json!({"scope": "identity", "rank": true})).is_err(),
+            "rank rejects non journal/knowledge scopes"
+        );
+        assert!(
+            memory_query_at(&root, &json!({"rank": true})).is_err(),
+            "rank with no scope is rejected"
+        );
+        // rank must be a boolean.
+        assert!(
+            memory_query_at(&root, &json!({"scope": "journal", "rank": "yes"})).is_err(),
+            "non-boolean rank is rejected"
+        );
+        // Default path is untouched: no `ranked` flag without rank:true.
+        let classic = parse_result(memory_query_at(&root, &json!({"scope": "journal"})));
+        assert!(classic.get("ranked").is_none(), "default path is unchanged");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
