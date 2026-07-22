@@ -70,8 +70,8 @@ pub fn parse_duration(s: &str) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
-/// A running session's budget: an optional wall-clock allowance and an optional
-/// tool-call cap.
+/// A running session's budget: an optional wall-clock allowance, an optional
+/// tool-call cap and an optional token cap.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     /// Wall-clock allowance. Enforced against a MONOTONIC elapsed time (see
@@ -80,15 +80,28 @@ pub struct Budget {
     /// runaway agent's run past its budget.
     pub wall: Option<Duration>,
     pub max_tool_calls: Option<u64>,
+    /// Total-token allowance for the run (input + output + cache-write +
+    /// cache-read, i.e. [`TokenLedger::total_tokens`]). `None` = unbounded on
+    /// tokens. BEST-EFFORT, same caveat as `max_tool_calls`: it is driven only
+    /// by the `usage` blocks the CLI reports on its `stream-json` stream (a
+    /// non-contractual schema, see [`extract_usage`]). A CLI that under-reports
+    /// usage is under-counted, so this deadline may not fire — the WALL-CLOCK
+    /// budget remains the hard runtime cap regardless of what the stream says.
+    pub max_tokens: Option<u64>,
 }
 
 impl Budget {
-    /// Build from optional wall-clock seconds and an optional tool-call cap.
+    /// Build from optional wall-clock seconds, tool-call cap and token cap.
     /// `None` wall = effectively unbounded on time.
-    pub fn new(wall_secs: Option<u64>, max_tool_calls: Option<u64>) -> Self {
+    pub fn new(
+        wall_secs: Option<u64>,
+        max_tool_calls: Option<u64>,
+        max_tokens: Option<u64>,
+    ) -> Self {
         Self {
             wall: wall_secs.map(Duration::from_secs),
             max_tool_calls,
+            max_tokens,
         }
     }
     /// Wall-clock budget exhausted after `elapsed`? `elapsed` MUST come from a
@@ -100,6 +113,66 @@ impl Budget {
     /// Tool-call budget exhausted at `count`?
     pub fn tool_calls_exhausted(&self, count: u64) -> bool {
         self.max_tool_calls.is_some_and(|m| count >= m)
+    }
+    /// Token budget exhausted at `total`? `total` is the running
+    /// [`TokenLedger::total_tokens`].
+    pub fn tokens_exhausted(&self, total: u64) -> bool {
+        self.max_tokens.is_some_and(|m| total >= m)
+    }
+}
+
+/// How aggressively a supervised run should spend tokens. A *strategy*, not a
+/// model choice — the model (Opus/Sonnet/Haiku) is selected in the CLI command;
+/// this maps a human intent ("be frugal") to a concrete [`Budget`] and to the
+/// caching/context guidance an operator (and the citizen itself, ADR-028) should
+/// follow. See docs/TOKENS.md.
+///
+/// The presets are DEFAULTS an operator overrides with explicit `--budget` /
+/// `--calls` / `--tokens`; they exist so `--mode frugale` alone yields a sane,
+/// bounded run instead of the unbounded default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumptionMode {
+    /// Minimise spend: short leash, tight token cap. For routine/again-and-again
+    /// work where a wrong turn is cheap to redo. Lean context, cache everything.
+    Frugale,
+    /// The default balance of reach and cost.
+    Equilibree,
+    /// Spend for depth: long leash, generous caps. For hard one-shot reasoning
+    /// where re-running costs more than the tokens.
+    Performance,
+}
+
+impl ConsumptionMode {
+    /// Parse a mode name (case-insensitive; French or English spellings, and
+    /// their ASCII fold). `None` on anything unrecognised — the caller decides
+    /// whether that is an error or a fall-through to the unbounded default.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "frugale" | "frugal" | "eco" | "éco" => Some(Self::Frugale),
+            "equilibree" | "équilibrée" | "equilibre" | "équilibré" | "balanced" | "balance" => {
+                Some(Self::Equilibree)
+            }
+            "performance" | "perf" | "max" => Some(Self::Performance),
+            _ => None,
+        }
+    }
+    /// The canonical (French) name, for journaling and display.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Frugale => "frugale",
+            Self::Equilibree => "équilibrée",
+            Self::Performance => "performance",
+        }
+    }
+    /// The preset budget for this mode. These are deliberately round, defensive
+    /// numbers — a floor of safety for an unattended run — not tuned SLAs.
+    pub fn budget(self) -> Budget {
+        match self {
+            //                       wall           calls        tokens
+            Self::Frugale => Budget::new(Some(1800), Some(60), Some(300_000)),
+            Self::Equilibree => Budget::new(Some(14400), Some(400), Some(3_000_000)),
+            Self::Performance => Budget::new(Some(28800), Some(1200), Some(12_000_000)),
+        }
     }
 }
 
@@ -188,6 +261,143 @@ pub fn count_tool_use(event: &Value) -> usize {
     }
 }
 
+/// One `stream-json` `usage` block: the four token counts a Claude API call
+/// reports. Split out because the four are billed very differently — the whole
+/// point of measuring them separately is to make the cache lever *visible*:
+/// `cache_read` costs ~10% of a fresh input token and `cache_creation` ~125%
+/// (Anthropic's documented, model-independent ratios). See [`TokenLedger`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// Fresh (uncached) input tokens read this turn.
+    pub input: u64,
+    /// Output (generated) tokens this turn.
+    pub output: u64,
+    /// Input tokens WRITTEN into the prompt cache this turn (a 5-min-TTL write
+    /// bills at ~1.25× a fresh input token; it pays for itself on the first
+    /// re-read).
+    pub cache_creation: u64,
+    /// Input tokens served FROM the prompt cache this turn (bills at ~0.10× a
+    /// fresh input token — the saving caching buys).
+    pub cache_read: u64,
+}
+
+impl TokenUsage {
+    fn saturating_add(self, o: Self) -> Self {
+        Self {
+            input: self.input.saturating_add(o.input),
+            output: self.output.saturating_add(o.output),
+            cache_creation: self.cache_creation.saturating_add(o.cache_creation),
+            cache_read: self.cache_read.saturating_add(o.cache_read),
+        }
+    }
+}
+
+/// Pull the `usage` counts out of ONE `stream-json` event, or `None` if the
+/// event carries none. Reads the per-turn `usage` on an `assistant` message —
+/// each assistant turn is one API call, so SUMMING these across a run
+/// ([`TokenLedger::add_event`]) yields the run's true token consumption.
+///
+/// A `result` event ALSO carries a `usage` (last turn, cumulative, or absent —
+/// version-dependent); to avoid double-counting we deliberately do NOT read it
+/// here (its authoritative figure is the cost, see [`extract_final_cost`]).
+///
+/// SCHEMA CAVEAT (identical to [`extract_thinking`]): the `stream-json` schema
+/// is provider- and version-specific and NOT contractual (ADR-012). Missing
+/// count fields default to 0; an event with no `usage` object yields `None`. We
+/// never guess. This measures cost/consumption, it is NOT a security boundary.
+pub fn extract_usage(event: &Value) -> Option<TokenUsage> {
+    if event.get("type").and_then(Value::as_str)? != "assistant" {
+        return None;
+    }
+    let usage = event.get("message")?.get("usage")?;
+    let field = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let u = TokenUsage {
+        input: field("input_tokens"),
+        output: field("output_tokens"),
+        cache_creation: field("cache_creation_input_tokens"),
+        cache_read: field("cache_read_input_tokens"),
+    };
+    // An all-zero usage object is real (a cache-only turn can be 0/0/0/N) — only
+    // a totally absent object is `None`, handled by the `?` on `usage` above.
+    Some(u)
+}
+
+/// The authoritative run cost in USD from a terminal `result` event
+/// (`total_cost_usd`), or `None`. The CLI computes this with its own
+/// always-current price table, so we prefer it over any estimate. `result` is
+/// cumulative for the run, so the LAST one wins (the caller stores, not sums).
+/// Same schema caveat as [`extract_usage`].
+pub fn extract_final_cost(event: &Value) -> Option<f64> {
+    if event.get("type").and_then(Value::as_str)? != "result" {
+        return None;
+    }
+    event
+        .get("total_cost_usd")
+        .and_then(Value::as_f64)
+        .filter(|c| c.is_finite() && *c >= 0.0)
+}
+
+/// Running total of a supervised run's token consumption, plus the metrics that
+/// make token spend *manageable* rather than merely counted. Pure and additive
+/// — feed it every `stream-json` event ([`add_event`]); it ignores everything
+/// that is not a per-turn `assistant` usage block.
+///
+/// [`add_event`]: TokenLedger::add_event
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokenLedger {
+    pub totals: TokenUsage,
+    /// Number of usage-bearing turns folded in (denominator for per-turn means).
+    pub turns: u64,
+}
+
+impl TokenLedger {
+    /// Fold one event's usage into the running total; a no-op for events that
+    /// carry none. Returns whether anything was added (useful for tests/metrics).
+    pub fn add_event(&mut self, event: &Value) -> bool {
+        match extract_usage(event) {
+            Some(u) => {
+                self.totals = self.totals.saturating_add(u);
+                self.turns = self.turns.saturating_add(1);
+                true
+            }
+            None => false,
+        }
+    }
+    /// Every token that crossed the wire: input + output + cache write + cache
+    /// read. This is what [`Budget::tokens_exhausted`] caps.
+    pub fn total_tokens(&self) -> u64 {
+        self.totals
+            .input
+            .saturating_add(self.totals.output)
+            .saturating_add(self.totals.cache_creation)
+            .saturating_add(self.totals.cache_read)
+    }
+    /// Fraction of prompt-side tokens served from cache, in `[0, 1]`, or `None`
+    /// when there was no read-eligible input yet. THE lever for token
+    /// management: a high ratio means the expensive context is being re-read
+    /// from cache (~0.10×) instead of re-billed as fresh input (1.0×).
+    pub fn cache_hit_ratio(&self) -> Option<f32> {
+        let denom = self.totals.input.saturating_add(self.totals.cache_read);
+        (denom > 0).then(|| self.totals.cache_read as f32 / denom as f32)
+    }
+    /// Input-side spend expressed in *fresh-input-token equivalents*, using
+    /// Anthropic's documented, model-independent multipliers (fresh 1.0×, cache
+    /// read 0.10×, cache write 1.25×). A provider-stable relative cost that does
+    /// NOT hardcode volatile dollar prices — pair it with [`extract_final_cost`]
+    /// for the authoritative USD.
+    pub fn input_equiv_tokens(&self) -> f64 {
+        self.totals.input as f64
+            + self.totals.cache_read as f64 * 0.10
+            + self.totals.cache_creation as f64 * 1.25
+    }
+    /// Fresh-input-token equivalents SAVED by cache hits this run (what the
+    /// cached reads would have cost at the full input price minus what they did
+    /// cost). Zero when nothing was cached.
+    pub fn cache_savings_tokens(&self) -> f64 {
+        self.totals.cache_read as f64 * 0.90
+    }
+}
+
 /// Build the reserved `autonomous_session` journal record (a system type an
 /// agent can never forge via memory.append). `phase` is `start` | `end`.
 pub fn session_journal_event(
@@ -242,17 +452,134 @@ mod tests {
     }
 
     #[test]
-    fn budget_wall_and_tool_limits() {
-        let b = Budget::new(Some(3600), Some(10));
+    fn budget_wall_tool_and_token_limits() {
+        let b = Budget::new(Some(3600), Some(10), Some(1000));
         // Wall budget is checked against MONOTONIC elapsed time (a Duration).
         assert!(!b.wall_expired(Duration::from_secs(3599)));
         assert!(b.wall_expired(Duration::from_secs(3600)));
         assert!(!b.tool_calls_exhausted(9));
         assert!(b.tool_calls_exhausted(10));
-        // Unbounded wall: never expires however much time elapses.
-        let u = Budget::new(None, None);
+        assert!(!b.tokens_exhausted(999));
+        assert!(b.tokens_exhausted(1000));
+        // Unbounded: never expires however much elapses / is consumed.
+        let u = Budget::new(None, None, None);
         assert!(!u.wall_expired(Duration::from_secs(u64::MAX / 1_000)));
         assert!(!u.tool_calls_exhausted(1_000_000));
+        assert!(!u.tokens_exhausted(u64::MAX));
+    }
+
+    #[test]
+    fn consumption_mode_parse_and_budgets() {
+        // Aliases (FR/EN + ASCII fold) all resolve; junk is None.
+        assert_eq!(
+            ConsumptionMode::parse("Frugale"),
+            Some(ConsumptionMode::Frugale)
+        );
+        assert_eq!(
+            ConsumptionMode::parse("eco"),
+            Some(ConsumptionMode::Frugale)
+        );
+        assert_eq!(
+            ConsumptionMode::parse("équilibrée"),
+            Some(ConsumptionMode::Equilibree)
+        );
+        assert_eq!(
+            ConsumptionMode::parse("balanced"),
+            Some(ConsumptionMode::Equilibree)
+        );
+        assert_eq!(
+            ConsumptionMode::parse("PERF"),
+            Some(ConsumptionMode::Performance)
+        );
+        assert_eq!(ConsumptionMode::parse("turbo"), None);
+        assert_eq!(ConsumptionMode::Equilibree.name(), "équilibrée");
+        // Presets are ordered: frugale is the tightest leash on every axis.
+        let (f, e, p) = (
+            ConsumptionMode::Frugale.budget(),
+            ConsumptionMode::Equilibree.budget(),
+            ConsumptionMode::Performance.budget(),
+        );
+        assert!(f.wall.unwrap() < e.wall.unwrap() && e.wall.unwrap() < p.wall.unwrap());
+        assert!(f.max_tool_calls < e.max_tool_calls && e.max_tool_calls < p.max_tool_calls);
+        assert!(f.max_tokens < e.max_tokens && e.max_tokens < p.max_tokens);
+    }
+
+    #[test]
+    fn extract_usage_from_assistant_turn() {
+        let ev = json!({"type":"assistant","message":{"usage":{
+            "input_tokens": 12,
+            "output_tokens": 34,
+            "cache_creation_input_tokens": 100,
+            "cache_read_input_tokens": 5000
+        }}});
+        let u = extract_usage(&ev).unwrap();
+        assert_eq!(u.input, 12);
+        assert_eq!(u.output, 34);
+        assert_eq!(u.cache_creation, 100);
+        assert_eq!(u.cache_read, 5000);
+        // Missing fields default to 0 (a cache-only turn is legitimately 0/0/0/N).
+        let sparse = json!({"type":"assistant","message":{"usage":{"cache_read_input_tokens":9}}});
+        let u2 = extract_usage(&sparse).unwrap();
+        assert_eq!(
+            u2,
+            TokenUsage {
+                cache_read: 9,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn extract_usage_ignores_non_usage_events() {
+        // No usage object, wrong type, and a `result` event (its usage is not
+        // summed — that path is cost-only) all yield None.
+        assert!(extract_usage(&json!({"type":"assistant","message":{"content":[]}})).is_none());
+        assert!(extract_usage(&json!({"type":"content_block_delta","delta":{}})).is_none());
+        assert!(extract_usage(
+            &json!({"type":"result","usage":{"input_tokens":9},"total_cost_usd":1.0})
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn extract_final_cost_from_result() {
+        let ev = json!({"type":"result","subtype":"success","total_cost_usd":0.4237});
+        assert_eq!(extract_final_cost(&ev), Some(0.4237));
+        // Absent / negative / non-finite / wrong-type -> None (never a bogus cost).
+        assert!(extract_final_cost(&json!({"type":"result"})).is_none());
+        assert!(extract_final_cost(&json!({"type":"result","total_cost_usd":-1.0})).is_none());
+        assert!(extract_final_cost(&json!({"type":"assistant","total_cost_usd":1.0})).is_none());
+    }
+
+    #[test]
+    fn ledger_accumulates_and_derives_metrics() {
+        let mut led = TokenLedger::default();
+        // Two turns: a cache-priming turn then a cache-hit turn.
+        let t1 = json!({"type":"assistant","message":{"usage":{
+            "input_tokens": 1000, "output_tokens": 200, "cache_creation_input_tokens": 8000
+        }}});
+        let t2 = json!({"type":"assistant","message":{"usage":{
+            "input_tokens": 50, "output_tokens": 150, "cache_read_input_tokens": 8000
+        }}});
+        assert!(led.add_event(&t1));
+        assert!(led.add_event(&t2));
+        // A non-usage event is folded as a no-op.
+        assert!(!led.add_event(&json!({"type":"result","total_cost_usd":1.0})));
+        assert_eq!(led.turns, 2);
+        assert_eq!(led.totals.input, 1050);
+        assert_eq!(led.totals.output, 350);
+        assert_eq!(led.totals.cache_creation, 8000);
+        assert_eq!(led.totals.cache_read, 8000);
+        assert_eq!(led.total_tokens(), 1050 + 350 + 8000 + 8000);
+        // Cache hit ratio = cache_read / (input + cache_read) = 8000 / 9050.
+        let ratio = led.cache_hit_ratio().unwrap();
+        assert!((ratio - 8000.0 / 9050.0).abs() < 1e-6, "ratio {ratio}");
+        // Input-equiv = 1050*1 + 8000*0.10 (read) + 8000*1.25 (write) = 11850.
+        assert!((led.input_equiv_tokens() - 11850.0).abs() < 1e-6);
+        // Savings = 8000 * 0.90 = 7200 fresh-input-token equivalents.
+        assert!((led.cache_savings_tokens() - 7200.0).abs() < 1e-6);
+        // No input yet -> ratio is None, never a divide-by-zero.
+        assert!(TokenLedger::default().cache_hit_ratio().is_none());
     }
 
     #[test]

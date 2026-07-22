@@ -62,11 +62,40 @@ fn agent_dispatch(sub: &[&str]) -> ExitCode {
             }
             let mut budget_secs = None;
             let mut max_calls = None;
+            let mut max_tokens = None;
             let mut session_id = None;
             let mut provider = "cli".to_string();
+            // `--mode` sets a whole preset (wall + calls + tokens); explicit
+            // `--budget`/`--calls`/`--tokens` given alongside OVERRIDE the
+            // corresponding preset axis, so `--mode frugale --budget 8h` is a
+            // frugal token/call leash with a long clock. Parsed first so the
+            // explicit flags below can override, whatever the argument order.
+            if let Some(pos) = flags.iter().position(|&a| a == "--mode") {
+                match flags
+                    .get(pos + 1)
+                    .map(|v| vibed::supervisor::ConsumptionMode::parse(v).map(|m| (m, m.budget())))
+                {
+                    Some(Some((_, b))) => {
+                        budget_secs = b.wall.map(|w| w.as_secs());
+                        max_calls = b.max_tool_calls;
+                        max_tokens = b.max_tokens;
+                    }
+                    Some(None) => {
+                        eprintln!(
+                            "agent run: invalid --mode (expected: frugale | équilibrée | performance)"
+                        );
+                        return ExitCode::from(2);
+                    }
+                    None => {
+                        eprintln!("agent run: --mode needs a value");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             let mut i = 0;
             while i < flags.len() {
                 match flags[i] {
+                    "--mode" => i += 2, // already applied above
                     "--budget" => {
                         // Reject a present-but-unparseable value rather than
                         // silently running unbounded.
@@ -97,6 +126,16 @@ fn agent_dispatch(sub: &[&str]) -> ExitCode {
                         }
                         i += 2;
                     }
+                    "--tokens" => {
+                        match flags.get(i + 1).map(|s| s.parse::<u64>()) {
+                            Some(Ok(n)) if n > 0 => max_tokens = Some(n),
+                            _ => {
+                                eprintln!("agent run: --tokens needs a positive integer");
+                                return ExitCode::from(2);
+                            }
+                        }
+                        i += 2;
+                    }
                     "--session" => {
                         session_id = flags.get(i + 1).map(|s| s.to_string());
                         i += 2;
@@ -111,16 +150,17 @@ fn agent_dispatch(sub: &[&str]) -> ExitCode {
                     }
                 }
             }
-            if budget_secs.is_none() && max_calls.is_none() {
+            if budget_secs.is_none() && max_calls.is_none() && max_tokens.is_none() {
                 eprintln!(
-                    "agent run: WARNING — no --budget/--calls: this run is UNBOUNDED \
-                     (only `agent stop` or the CLI exiting will end it)."
+                    "agent run: WARNING — no --budget/--calls/--tokens (and no --mode): this \
+                     run is UNBOUNDED (only `agent stop` or the CLI exiting will end it)."
                 );
             }
             let opts = vibectl::AgentRunOpts {
                 command: cmd.iter().map(|s| s.to_string()).collect(),
                 budget_secs,
                 max_calls,
+                max_tokens,
                 session_id,
                 provider,
             };

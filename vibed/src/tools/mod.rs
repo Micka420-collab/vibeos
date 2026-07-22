@@ -12,6 +12,7 @@ pub(crate) mod log;
 pub(crate) mod memory;
 pub(crate) mod policy_tool;
 pub(crate) mod propose;
+pub(crate) mod recall;
 pub(crate) mod sandbox_tool;
 pub(crate) mod sectools;
 pub(crate) mod svc;
