@@ -119,10 +119,15 @@ pub(crate) fn parse_response(text: &str, expected: usize) -> Result<Vec<Vec<f32>
             let f = x
                 .as_f64()
                 .ok_or_else(|| format!("embed: vector {i} has a non-numeric component"))?;
-            if !f.is_finite() {
+            // Finitude vérifiée APRÈS le cast : un f64 fini mais de magnitude
+            // > f32::MAX (ex. 1e39) devient ±inf par le cast `as` (non saturant).
+            // Vérifier sur le f64 le laisserait passer, puis l'inf empoisonnerait
+            // l'index (cosinus -> NaN en aval). On refuse le vecteur.
+            let g = f as f32;
+            if !g.is_finite() {
                 return Err(format!("embed: vector {i} has a non-finite component"));
             }
-            vec.push(f as f32);
+            vec.push(g);
         }
         out.push(vec);
     }
@@ -244,6 +249,16 @@ mod tests {
             vec!["0.0"; MAX_DIMS + 1].join(",")
         );
         assert!(parse_response(&wide, 1).is_err(), "over MAX_DIMS");
+        // Un f64 FINI mais de magnitude > f32::MAX devient ±inf au cast : refusé
+        // (finitude vérifiée APRÈS le cast, pas avant — sinon l'inf passe).
+        assert!(
+            parse_response(r#"{"embeddings":[[1e39]]}"#, 1).is_err(),
+            "1e39 -> +inf refusé"
+        );
+        assert!(
+            parse_response(r#"{"embeddings":[[-1e39]]}"#, 1).is_err(),
+            "-1e39 -> -inf refusé"
+        );
     }
 
     #[test]
