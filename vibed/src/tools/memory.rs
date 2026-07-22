@@ -126,10 +126,19 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
                 out["folded"] = json!(true);
                 return Ok(out.to_string());
             }
+            // Consolidated knowledge: facts.jsonl deduped by (subject, fact),
+            // last-write-wins (ADR-030). Confidence is NEVER raised by the fold
+            // (THREAT-MODEL §9: source/fact/confidence are agent-declared).
+            Some("knowledge") => {
+                let mut out = crate::vibectl::memory_knowledge_at(root);
+                out["scope"] = json!("knowledge");
+                out["folded"] = json!(true);
+                return Ok(out.to_string());
+            }
             _ => {
-                return Err(
-                    "memory.query: 'fold' applies only to scope 'user' or 'projects'".to_string(),
-                )
+                return Err("memory.query: 'fold' applies only to scope 'user', \
+                            'projects' or 'knowledge'"
+                    .to_string())
             }
         }
     }
@@ -1003,6 +1012,32 @@ mod tests {
             payload["scanned_events"].as_u64().unwrap(),
             1,
             "only the well-formed object is an event: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fold_knowledge_returns_consolidated_view() {
+        let root = memory_scratch("foldknow");
+        std::fs::write(
+            root.join("knowledge").join("facts.jsonl"),
+            format!(
+                "{}\n{}\n",
+                r#"{"id":"1","ts":"2026-07-01T00:00:00Z","subject":"s","fact":"f","confidence":0.4,"source":"a"}"#,
+                r#"{"id":"2","ts":"2026-07-09T00:00:00Z","subject":"s","fact":"f","confidence":0.7,"source":"b"}"#,
+            ),
+        )
+        .expect("write facts");
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"scope": "knowledge", "fold": true}),
+        ));
+        assert_eq!(payload["folded"], json!(true));
+        assert_eq!(payload["scope"], "knowledge");
+        assert_eq!(payload["count"], 1, "the two re-assertions fold into one");
+        assert_eq!(
+            payload["knowledge"][0]["confidence"], 0.7,
+            "last write wins"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
