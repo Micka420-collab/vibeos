@@ -7,6 +7,7 @@
 pub(crate) mod browser;
 pub(crate) mod consolidate;
 pub(crate) mod deploy;
+pub(crate) mod embed;
 pub(crate) mod embeddings;
 pub(crate) mod fs;
 pub(crate) mod log;
