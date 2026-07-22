@@ -1638,7 +1638,7 @@ fn proc_comm(pid: u64) -> Option<String> {
 
 /// Longest roster window `agents.list` accepts (its `window_seconds` clamp
 /// ceiling) — the tail cache below never needs records older than this.
-const MAX_ROSTER_WINDOW_SECS: u64 = 3600;
+pub(crate) const MAX_ROSTER_WINDOW_SECS: u64 = 3600;
 
 /// Per-file incremental state for `read_recent_audit`. The audit files are
 /// append-only (single writer behind the chain mutex), so bytes once parsed
