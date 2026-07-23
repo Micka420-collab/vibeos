@@ -1224,6 +1224,21 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             }}),
         ),
         (
+            "agent.identity",
+            Tier::T0,
+            "WHO YOU ARE on this machine: your BIRTH character, chosen at first boot \
+             and derived deterministically from the machine id (ADR-029). Returns \
+             { born, name, archetype, tone, birth, seed, traits{curiosity, caution, \
+             initiative, warmth, concision, playfulness} } — or { born:false, note } \
+             before Genesis has run. The fourth face of self-knowledge, beside \
+             agent.thinking (your thoughts), agent.activity (your deeds) and \
+             user.model (your model of the human). Read-only; reads only your PUBLIC \
+             character (personality.toml) — never hostname or machine_id. This is \
+             constant across boots (amnesic included); what you LEARN lives in \
+             memory.query. No arguments.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        (
             "policy.check",
             Tier::T0,
             "Classify a HYPOTHETICAL tool call WITHOUT executing it: returns the \
@@ -1468,6 +1483,7 @@ fn execute_tool(
         "agent.sessions" => agent_sessions(),
         "agents.list" => agents_list(args, caller, audit_dir),
         "agent.activity" => agent_activity(args, caller, audit_dir),
+        "agent.identity" => crate::tools::identity::agent_identity(),
         "user.model" => crate::tools::user_model::user_model(args, caller, audit_dir),
         "policy.check" => policy_check(args, policy),
         "policy.capabilities" => crate::tools::policy_tool::capabilities(policy),
@@ -2421,6 +2437,7 @@ mod tests {
         assert_eq!(tool_tier("memory.query"), Some(Tier::T0));
         assert_eq!(tool_tier("memory.append"), Some(Tier::T1));
         assert_eq!(tool_tier("agent.activity"), Some(Tier::T0));
+        assert_eq!(tool_tier("agent.identity"), Some(Tier::T0));
         assert_eq!(tool_tier("user.model"), Some(Tier::T0));
         // `browser.run` : tier de PLANCHER T1 au catalogue ; le tier EFFECTIF est dynamique
         // (max des verbes du batch, via batch_tier) et calculé dans handle_tools_call.

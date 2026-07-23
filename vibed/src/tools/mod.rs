@@ -10,6 +10,7 @@ pub(crate) mod deploy;
 pub(crate) mod embed;
 pub(crate) mod embeddings;
 pub(crate) mod fs;
+pub(crate) mod identity;
 pub(crate) mod log;
 pub(crate) mod memory;
 pub(crate) mod policy_tool;
