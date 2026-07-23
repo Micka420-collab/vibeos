@@ -16,9 +16,16 @@
 //!      REQUEST it but can never grant it to itself — the mode file is root-only
 //!      and on `vibed`'s built-in WRITE denylist (`fs.write` can never forge it).
 //!      This is the one invariant the whole OS rests on: no self-escalation.
-//!   2. **The audit trail stays on.** Every call is still audited (open-mode
-//!      calls carry the distinct `*_open_mode` outcome), and every mode
-//!      transition is audited. Autonomy is not untraceability.
+//!   2. **The audit trail stays on.** Every governed CALL made while open is
+//!      still audited in the tamper-evident chain (it carries the distinct
+//!      `*_open_mode` outcome) — so autonomy is not untraceability. HONEST
+//!      LIMIT: the mode TRANSITION itself (who unlocked, when, for how long,
+//!      why) is recorded in the root-only `mode.json` for `status` and the
+//!      danger panel, but is NOT yet written to the tamper-evident audit chain,
+//!      and `set_governed` overwrites `mode.json`, so there is no durable
+//!      HISTORY of past unlocks. Recording each transition in the chain must go
+//!      through the single-writer daemon — a `vibectl`-side append would fork
+//!      the hash chain (duplicate seq) — so it is deferred, not yet done.
 //!   3. **The kill-switch stays with the human.** `vibectl mode governed`
 //!      reverts instantly, and open mode AUTO-EXPIRES after its bounded window
 //!      (checked on every evaluation — no background task, no way to "stick").
