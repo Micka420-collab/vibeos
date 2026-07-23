@@ -10,11 +10,25 @@
 > #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth).
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-19 (week-end autonome, dimanche)** — **trousse
-> SaaS + ecommerce complète dev→prod** : 6 modèles serveur par projet, installeur
-> à la demande, catalogue, runbooks dev+prod, garde CI. ADR-020 (#92) **mergée par
-> Micka** ; la capacité `deploy.*` gouvernée reste sa décision. Journal détaillé :
-> [WEEKEND-LOG.md](WEEKEND-LOG.md).
+> Dernière mise à jour : **2026-07-22 (session Opus)** — **gestion des tokens & mémoire structurée** ([ADR-030](docs/DECISIONS.md)) : comptage/modes/budget de tokens, classement de rappel (`memory.query rank`), consolidation du savoir ; précédé de **Genesis vivant** ([ADR-029](docs/DECISIONS.md)) et de chantiers gating=none. **412 tests verts**, arc entièrement revu en adverse. Détail dans l'entrée **2026-07-22** ci-dessous.
+> *Précédent : **2026-07-21 (session Fable 5)** — **perf couche basse** :*
+> chemins chauds `vibed` corrigés (audit/journal hors du réacteur tokio, catalogue
+> d'outils en cache) + **première config noyau de l'image**
+> ([ADR-025](docs/DECISIONS.md) : `sysctl.d` charges IA + zram `zstd`, chaque valeur
+> sourcée) + 18ᵉ invariant `kernel-tuning` du selfcheck — **PR #166 mergée**. Puis,
+> en suite de session : **caches incrémentaux** sur les chemins sondés par le HUD
+> (queue d'audit, fold mémoire, têtes de sessions) + digest d'audit unique par appel.
+> Puis **IA citoyenne** : `agent.activity` (T0, [ADR-026](docs/DECISIONS.md)) — le
+> citoyen relit ses propres actes (refus compris), surface 18 → 19. Puis **mode
+> autonome / ouvert** ([ADR-027](docs/DECISIONS.md), fondation) : déverrouillage
+> humain hors-bande (`vibectl mode open`), T2/T3 auto-accordés en fenêtre bornée,
+> panneau danger + kill-switch + audit `*_open_mode`, no-self-escalation. Puis
+> **symbiose** : `user.model` (T0, [ADR-028](docs/DECISIONS.md)) — modèle dérivé &
+> transparent de *comment vous travaillez* + anticipation déterministe, confiné
+> par uid, sans surveillance nouvelle — surface 19 → 20, **346 tests verts**,
+> 19ᵉ invariant selfcheck `operating-mode`. La mesure sur cible reste
+> machine-gated. *(Précédent : 2026-07-19, trousse SaaS complète dev→prod —
+> [WEEKEND-LOG.md](WEEKEND-LOG.md).)*
 
 ## Vue d'ensemble
 
@@ -137,6 +151,43 @@
   - **Runbook production** ([#110]) : `/usr/share/vibeos/saas/PRODUCTION.md` — self-hosted durci (pare-feu, TLS Let's Encrypt, secrets podman/TPM2, systemd, sauvegardes). Couvre le « mettre en production » explicitement demandé.
   - **Vérifié en réel** (WSL/docker) : SeaweedFS, la stack observability (datasource auto-provisionné) et Meilisearch (auth enforced) **smoke-testés**, pas seulement affirmés.
   - **Infra** : digest de base F44 re-bumpé ([#106], quay purge ~quotidienne — cf. la décision structurelle laissée à Micka, miroir vs auto-PR).
+
+- **2026-07-21 (session Fable 5) — perf couche basse : chemins chauds `vibed` + première config noyau de l'image** (branche `claude/session-0v4cwo`) :
+  - **`vibed` : trois correctifs du chemin chaud de `tools/call`**, invariants intacts (fsync d'audit et « audit durable avant exécution » inchangés) : l'écriture d'audit passe en `spawn_blocking` **awaité** (elle s'exécutait sur le réacteur tokio — chaque fsync figeait toutes les connexions, sondes HUD comprises) ; le journal mémoire best-effort part en fire-and-forget sur le pool bloquant ; `tool_catalog()` est construit une fois (`OnceLock`) au lieu d'être rebâti à chaque lookup de tier (jusqu'à des milliers de fois par sonde `agents.list`) ; les arguments passent en `Arc` (plus de clone profond d'un payload `fs.write` par appel). **299 tests verts** (287 lib + 9 intégration MCP + 3 politique), clippy/fmt/log-hygiene OK ; compteurs des 4 README recalés 191 → 299.
+  - **[ADR-025](docs/DECISIONS.md) : réglage noyau pour charges IA, livré dans l'image** — première `sysctl.d` du dépôt (`os/rootfs/usr/lib/sysctl.d/50-vibeos-ai.conf` : jeu zram cohérent `page-cluster=0`/`swappiness=180`/watermarks, writeback borné 128/256 Mio, `inotify` instances 1024, TCP BBR autochargé) + drop-in zram `zstd` (`os/rootfs/usr/lib/systemd/zram-generator.conf.d/50-vibeos.conf`, fusion par option — le fichier vendor Fedora n'est jamais écrasé). Chaque valeur sourcée (noyau vm.rst, pop-os/default-settings#163, dist-git f44, tcp_cong.c) ; le cargo cult vérifié inutile sur f44 (`max_map_count`, `file-max`) est **absent**. Kernel Fedora générique conservé (config dédiée : Phase 7+), cmdline intouchée (UKI : Phase 4).
+  - **Selfcheck : 18ᵉ invariant `kernel-tuning`** (sonde read-only : `vm.page-cluster=0` + module `tcp_bbr` autochargé ; image antérieure = SKIP) — [docs/BOOT-VALIDATION.md](docs/BOOT-VALIDATION.md) recalé. La **mesure sur cible reste machine-gated** : valeurs sourcées, pas encore mesurées sur la machine de référence.
+
+- **2026-07-21 (suite de session) — caches incrémentaux sur les chemins sondés par le HUD** (les « chantiers de suivi » listés dans la PR #166, mergée par la même session) :
+  - **Queue d'audit d'`agents.list` incrémentale** : les fichiers étant append-only (écrivain unique sous le mutex de chaîne), chaque sonde ne lit et ne parse plus que le **delta** ajouté depuis la précédente, au lieu de relire 2 × 512 Kio par sonde. Invalidation fail-safe : taille qui régresse (rollback de ligne déchirée au démarrage) = re-scan complet ; rotation quotidienne purgée ; ligne sans `\n` final laissée pour la sonde suivante ; borne dure sur le cache.
+  - **`memory.query fold:true` mémoïsé** par `(chemin, taille, mtime)` — c'était le seul coût par appel du démon qui croissait **sans borne** avec l'âge de la machine (re-fold de tout l'historique des updates à chaque sonde) ; désormais O(1) tant que le fichier n'a pas changé, re-fold complet sinon.
+  - **Têtes de sessions (`agent.sessions`) mémoïsées** : la première ligne d'un fichier append-only est immuable — son `ts_unix` n'est plus relu à chaque sonde (jusqu'à 200 open+read+parse évités par sonde) ; une tête absente (fichier déchiré) n'est jamais mise en cache et reste re-tentée.
+  - **Digest d'audit calculé une fois par appel** (`record_with_digest` + `OnceLock` partagé) : les deux records d'un même appel (`started` + final) portaient déjà le même digest mais re-sérialisaient chacun tout l'arbre d'arguments (jusqu'à ~1 Mio pour `fs.write`).
+  - **331 tests verts** (dont 7 nouveaux : incrémentalité, troncature, ligne déchirée, invalidation du fold, stabilité des têtes, parité des digests) ; clippy -D warnings (2 configs), log-hygiene, fmt OK ; compteurs des 4 README recalés 299 → 331.
+
+- **2026-07-21 (suite de session) — mode autonome / ouvert ([ADR-027](docs/DECISIONS.md), fondation livrée)** — sur demande de Micka : un mode où l'IA agit **seule** (T2/T3 sans approbation par action), avec **panneau danger**, bâti *à la manière du projet* plutôt que naïvement.
+  - **Module `mode`** : deux états (`governed` défaut / `open`), enregistrement root-only `/var/lib/vibeos/mode.json` (sur la denylist d'**écriture** intégrée — `fs.write` ne peut jamais le forger), lecture **fail-safe** (tout cas incertain ⇒ governed), **auto-expiration** vérifiée à chaque évaluation, plafond dur 24 h.
+  - **Câblage politique** : en mode ouvert, un `RequireApproval` (T2/T3) est **auto-accordé** — audité avec l'issue distincte `started_open_mode`/`ok_open_mode` — **hors du réacteur** (même `spawn_blocking` que la vérif de grant). N'affecte **jamais** un `deny` explicite, le default-deny, ni la denylist intégrée (audit, mode, politique, secrets).
+  - **Déverrouillage HUMAIN hors-bande** : `vibectl mode open [--minutes N] [--reason R]` (root, même `require_root` qu'`approve`) ; **kill-switch** `vibectl mode governed` ; `vibectl mode status`. L'IA peut *demander*, jamais s'auto-escalader (invariant n°1).
+  - **Panneau danger (données livrées)** : `os.status` porte `mode { mode, danger, remaining_secs, set_by_uid, reason }` (le HUD le sonde déjà) ; **19ᵉ invariant selfcheck `operating-mode`** (open = PASS signalé fort). Bandeau Plasma/Quickshell = présentation, à venir.
+  - **Sur-couches conçues, non livrées** (ADR-027) : auto-planification crons/battements de cœur **révocables**, usage d'apps (sur `browser.*`/Wayland), auto-modification via `os.propose` (racine immuable → nouvelle image, ADR-024).
+  - **340 tests verts** (dont module `mode` : fail-safe, fenêtre, clamp, kill-switch, statut, perms 0600 ; + 2 e2e : auto-grant audité `*_open_mode` & deny inchangé, `os.status`.mode danger) ; clippy -D warnings (2 configs), fmt, log-hygiene, shellcheck OK. Docs : ADR-027, BOOT-VALIDATION (19 checks), 4 README (compteur → 340, 19 invariants).
+
+- **2026-07-21 (suite de session) — symbiose : `user.model` (T0, [ADR-028](docs/DECISIONS.md))** — sur demande de Micka : *l'agent comprend comment l'humain travaille, ce qu'il fait, et anticipe ses actions — une vraie symbiose machine/IA/humain*. Construit **vie-privée-d'abord** : un modèle **dérivé & transparent**, pas une surveillance.
+  - **Module pur `tools/user_model.rs`** (`derive_user_model`, déterministe, testé) : `preferences` (fold mémoire `user/`), `patterns` (outils/cibles récurrents), `friction` (actions refusées/approuvées — candidates à pré-arranger), `rhythm` (histogramme par heure UTC), `observed` (notes de journal typées récentes), et **`anticipations`** — prochaines actions gouvernées probables classées par heuristique **fréquence×récence, chacune avec sa raison** (jamais un score opaque).
+  - **Sûr & honnête par conception** : **confiné par uid** (SO_PEERCRED, comme `agent.activity`) ; **aucune fuite nouvelle** (mêmes données que `memory.query` + `agent.activity` pour le même uid, agrégées) ; **aucune surveillance nouvelle** (jamais les frappes/l'historique shell) ; **local & possédé** (`/var/lib/vibeos/memory/`) ; anticipation ≠ prédicteur entraîné (le champ `note` le dit).
+  - Règle politique `user-model` (T0 allow, confiné uid) ; surface d'outils 19 → **20**.
+  - **346 tests verts** (module : fréquence/récence, friction vs exécution, rythme par heure, préférences+observed plafonné, vide bien formé ; + 1 e2e : dérivation depuis de vraies actions auditées & confinement uid) ; clippy -D warnings (2 configs), fmt, log-hygiene, verify-roadmap-truth OK. Docs : ADR-028, 4 README (surface 20, compteur → 346).
+  - **Sur-couches conçues (ADR-028)** : signal **opt-in** plus riche, **embeddings locaux** (ollama, `knowledge/embeddings/` réservé), branchement sur le mode ouvert (ADR-027) et `os.propose` (ADR-024) pour une IA qui propose *à bon escient*.
+
+- **2026-07-21 (suite de session) — IA citoyenne : `agent.activity` (T0, [ADR-026](docs/DECISIONS.md))** — le citoyen relit ses **propres actes**. Deuxième brique après `policy.capabilities` (ADR-023) : là où celle-ci donne la carte *statique* des droits et `agent.thinking` la biographie des *pensées*, `agent.activity` rend la biographie des *actes* — les appels gouvernés récents de l'appelant, du plus récent au plus ancien, **refus compris** (`deny`/`require_approval`), pour apprendre par l'expérience les frontières que le manifeste ne décrit qu'en théorie. **Confiné par uid** (SO_PEERCRED), fenêtre + nombre de lignes bornés, réutilise le cache incrémental de la queue d'audit ; **aucune fuite nouvelle** (même donnée qu'`agents.list` pour son propre uid — que `agents.list` excluait justement). Règle ajoutée à `agent-observability` (T0 allow) ; surface d'outils 18 → **19**. **332 tests verts** (dont 2 nouveaux : confinement/chronologie/refus, tier T0) ; test d'intégration de politique étendu ; docs recalées (ADR-026, 4 README).
+
+- **2026-07-22 (session Opus) — Genesis vivant, chantiers gating=none, puis gestion des tokens & mémoire structurée** (branche `claude/session-0v4cwo`, PR #173→#191). Un long arc, chaque incrément vérifié par la « gauntlet » (fmt/clippy `-D warnings`/tests/gardes) et souvent par une **revue adverse multi-angle** (chasseurs + sceptiques) :
+  - **Genesis vivant ([ADR-029](docs/DECISIONS.md))** : à la naissance, **le citoyen IA choisit son propre caractère** (`personality.toml` : nom, archétype, 6 traits, ton), **unique par installation** et déterministe (FNV-1a en bash pur sur `machine_id`, hors-ligne), avec un **éveil** imprimé sur la console. Scope mémoire `personality` (6 → **7**). La boucle d'adaptation vivante et la cérémonie graphique restent machine-gated.
+  - **Chantiers gating=none** : 4 chantiers OS (bandeau danger HUD, cosign client *staged*, interview de naissance opt-in, retour d'usine `vibectl memory reset`), **couche pure `embeddings` locale** + réparation du job SBOM/CVE, **couche 3 de l'extension Zed** (raisonnement/tier/journal côté éditeur) + job CI `zed`, **5 correctifs sécurité/honnêteté** vérifiés (egress CGNAT, user.model, THREAT-MODEL), **garde-fou CI « chaque outil MCP a sa ligne THREAT-MODEL »** + lock anti-régression `os.propose`.
+  - **Déblocage image/ISO** : le digest de base F44 purgé par quay re-bumpé — build image + ISO à nouveau verts.
+  - **Gestion des tokens ([ADR-030](docs/DECISIONS.md), [docs/TOKENS.md](docs/TOKENS.md)) — #188** : le superviseur **compte** les tokens réellement consommés (blocs `usage` du flux `stream-json`), expose les métriques d'efficacité du **cache** (le levier), les **borne** par un budget (`--tokens`) et par des **modes de consommation** (`frugale`/`équilibrée`/`performance`), et **journalise** la consommation + le coût USD autoritaire du CLI dans l'événement `autonomous_session`/end. Pas de prix en dur (multiplicateurs structurels seulement). Le temps mural reste le plafond **dur**.
+  - **Mémoire structurée ([ADR-030](docs/DECISIONS.md)) — #189/#190** : `memory.query` gagne un **classement de rappel** (mode `rank:true`, opt-in, scopes `journal`/`knowledge`) — récence + importance + pertinence à la *memory stream* des *Generative Agents* (`tools/recall.rs`, pur/testé, moteur lexical câblé ; vectoriel à venir) — et une **consolidation du savoir** (`tools/consolidate.rs` : dédup de `facts.jsonl` par `(subject, fact)` last-write-wins), exposée par `vibectl memory knowledge` et `memory.query fold:true` scope `knowledge`. **Invariant THREAT-MODEL §9** : la consolidation **n'élève jamais** la confiance d'un fait (ni par répétition, ni par `source`) — elle compacte, elle ne juge pas.
+  - **Vérification** : **412 tests `vibed` verts** (383 → 412 sur l'arc token+mémoire). Un **audit de correction transverse** (5 chasseurs × 2 sceptiques) sur tout le token+mémoire : **zéro bug de code** ; deux auto-contradictions doc corrigées (#191). Tout reste **T0/T1** ; **aucun nouvel outil MCP** (catalogue et surface de menace inchangés). La mesure sur cible reste machine-gated.
 
 ## 📋 Reste à faire (court terme)
 

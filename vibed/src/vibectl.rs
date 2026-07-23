@@ -3,12 +3,13 @@
 //! `src/bin/vibectl.rs`.
 //!
 //! v0.1 perimeter: read-only memory status and audit-chain verification, the
-//! operator side of the approval flow (`approve`/`deny`, root-gated), and the
+//! operator side of the approval flow (`approve`/`deny`, root-gated), the
 //! **agent supervisor** (`agent run`/`stop`/`thinking`) that runs a CLI in
-//! structured mode and taps its reasoning stream (ADR-012/013). Truly
-//! destructive actions (factory reset = T3) are deliberately NOT here yet — they
-//! require the full human-approval flow (Phase 4) and must never be a bare CLI
-//! switch.
+//! structured mode and taps its reasoning stream (ADR-012/013), and the
+//! **memory factory reset** (`memory reset`, root + `--yes`). The reset is not
+//! a bare CLI switch: like `mode open`, it is an out-of-band HUMAN action —
+//! root-gated, confirmation-guarded, never exposed as an MCP tool — so the
+//! destructive decision stays with the operator, on the operator's channel.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
@@ -20,7 +21,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::{approval, audit, mcp, reasoning, supervisor};
+use crate::{approval, audit, mcp, mode, reasoning, supervisor};
 
 /// Current effective uid, parsed from `/proc/self/status` (no libc), for the
 /// `granted_by` field of an approval and the `require_root` check. `None` if it
@@ -103,18 +104,19 @@ pub fn render_for_operator(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
-/// Only the operator (root) may grant or deny approvals. The approval store is
-/// already root-only at the filesystem level; this makes the trust boundary
-/// explicit and turns a would-be opaque "permission denied" into a clear
-/// message. Fail-closed: if the euid cannot be determined, refuse.
+/// Root gate for operator actions (`approve`/`deny`, `mode open`/`governed`,
+/// `memory reset`). The underlying stores are already root-only at the
+/// filesystem level; this makes the trust boundary explicit and turns a
+/// would-be opaque "permission denied" into a clear message. Fail-closed: if
+/// the euid cannot be determined, refuse.
 fn require_root(euid: Option<u32>) -> Result<(), Value> {
     match euid {
         Some(0) => Ok(()),
         Some(uid) => Err(json!({
-            "error": format!("must be root to approve/deny approvals (euid={uid}); use sudo")
+            "error": format!("must be root for this operator action (euid={uid}); use sudo")
         })),
         None => Err(json!({
-            "error": "cannot determine caller euid (/proc unavailable); refusing to approve/deny"
+            "error": "cannot determine caller euid (/proc unavailable); refusing operator action"
         })),
     }
 }
@@ -145,6 +147,63 @@ pub fn deny(id: &str) -> (Value, bool) {
     match approval::deny(Path::new(approval::APPROVAL_DIR), id) {
         Ok(()) => (json!({"denied": id}), true),
         Err(e) => (json!({"error": e.to_string(), "id": id}), false),
+    }
+}
+
+/// `vibectl mode status` — the current operating mode (ADR-027). Read-only, for
+/// anyone: the mode is not a secret (it is literally what the danger panel
+/// shows). Never mutates.
+pub fn mode_status() -> Value {
+    mode::status(Path::new(mode::MODE_PATH), now_epoch_secs())
+}
+
+/// `vibectl mode open [--minutes N] [--reason R]` — the OUT-OF-BAND HUMAN unlock
+/// of autonomous/open mode (ADR-027). Root only — the same `require_root` gate
+/// as `approve`, because this IS a blanket approval of the T2/T3 floor for a
+/// bounded window. An agent can never reach this: it is a `vibectl` command run
+/// by the operator, and the mode file is root-only + on vibed's write denylist.
+/// Returns `(report, ok)`; the report carries a loud warning by design.
+pub fn mode_open(minutes: Option<u64>, reason: Option<&str>) -> (Value, bool) {
+    let euid = current_euid();
+    if let Err(e) = require_root(euid) {
+        return (e, false);
+    }
+    let secs = minutes
+        .map(|m| m.saturating_mul(60))
+        .unwrap_or(mode::OPEN_DEFAULT_SECS);
+    match mode::set_open(
+        Path::new(mode::MODE_PATH),
+        secs,
+        euid,
+        now_epoch_secs(),
+        reason,
+    ) {
+        Ok(record) => (
+            json!({
+                "mode": "open",
+                "record": record,
+                "warning": "AUTONOMOUS / OPEN MODE ACTIVE — the AI can act on the system \
+                            WITHOUT per-action approval (T2/T3 auto-granted) until this window \
+                            expires or you run `vibectl mode governed`. Every call is still \
+                            audited; the mode file, the audit trail and the kill-switch stay \
+                            out of the agent's reach.",
+            }),
+            true,
+        ),
+        Err(e) => (json!({"error": e.to_string()}), false),
+    }
+}
+
+/// `vibectl mode governed` — the KILL-SWITCH (ADR-027): revert to the governed
+/// default immediately, ending autonomous mode. Root only. Idempotent.
+pub fn mode_governed() -> (Value, bool) {
+    let euid = current_euid();
+    if let Err(e) = require_root(euid) {
+        return (e, false);
+    }
+    match mode::set_governed(Path::new(mode::MODE_PATH), euid, now_epoch_secs()) {
+        Ok(record) => (json!({"mode": "governed", "record": record}), true),
+        Err(e) => (json!({"error": e.to_string()}), false),
     }
 }
 
@@ -256,34 +315,234 @@ fn read_jsonl(path: &Path) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Memoized fold over an append-only updates file. The updates stores grow
+/// forever without compaction, and this fold used to re-read and re-parse the
+/// WHOLE history on every call — the daemon's only per-call cost that grows
+/// without bound with the machine's age, on a path (`memory.query fold:true`)
+/// the HUD polls. An unchanged `(len, mtime)` pair on an append-only file
+/// means an unchanged fold, so the cached result (keyed by path) is returned
+/// as-is; any change re-folds from scratch (simple and always correct, cost
+/// only WHEN the file changed). For the one-shot `vibectl` CLI the cache is
+/// simply never warm — same behavior as before.
+fn fold_updates_cached(path: &Path, fold: fn(Vec<Value>) -> Value) -> Value {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Key = (u64, std::time::SystemTime);
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Key, Value)>>> = OnceLock::new();
+
+    let meta = std::fs::metadata(path).ok();
+    let key: Option<Key> = meta.and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(k) = key {
+        let map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((ck, v)) = map.get(path) {
+            if *ck == k {
+                return v.clone();
+            }
+        }
+    }
+    let v = fold(read_jsonl(path));
+    if let Some(k) = key {
+        let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        map.insert(path.to_path_buf(), (k, v.clone()));
+    }
+    v
+}
+
 /// `vibectl memory profile` — the CURRENT user profile, materialized as the
 /// fold of the append-only `user/updates.jsonl` (last-write-wins per `key`).
 /// This is the read side of the P1 append-only design (docs/MEMORY.md §3.3).
 pub fn memory_profile_at(root: &Path) -> Value {
-    let mut profile = serde_json::Map::new();
-    for rec in read_jsonl(&root.join("user").join("updates.jsonl")) {
-        if let Some(key) = rec.get("key").and_then(Value::as_str) {
-            // Later lines overwrite earlier ones — append-only, fold on read.
-            profile.insert(
-                key.to_string(),
-                rec.get("value").cloned().unwrap_or(Value::Null),
-            );
+    fold_updates_cached(&root.join("user").join("updates.jsonl"), |records| {
+        let mut profile = serde_json::Map::new();
+        for rec in records {
+            if let Some(key) = rec.get("key").and_then(Value::as_str) {
+                // Later lines overwrite earlier ones — append-only, fold on read.
+                let value = rec.get("value").cloned().unwrap_or(Value::Null);
+                profile.insert(key.to_string(), value);
+            }
         }
-    }
-    json!({ "profile": Value::Object(profile) })
+        json!({ "profile": Value::Object(profile) })
+    })
 }
 
 /// `vibectl memory projects` — the CURRENT project index, materialized as the
 /// fold of `projects/updates.jsonl` (last-write-wins per `path`), sorted by
 /// path (docs/MEMORY.md §3.4).
 pub fn memory_projects_at(root: &Path) -> Value {
-    let mut by_path: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
-    for rec in read_jsonl(&root.join("projects").join("updates.jsonl")) {
-        if let Some(path) = rec.get("path").and_then(Value::as_str) {
-            by_path.insert(path.to_string(), rec);
+    fold_updates_cached(&root.join("projects").join("updates.jsonl"), |records| {
+        let mut by_path: std::collections::BTreeMap<String, Value> =
+            std::collections::BTreeMap::new();
+        for rec in records {
+            if let Some(path) = rec.get("path").and_then(Value::as_str) {
+                by_path.insert(path.to_string(), rec);
+            }
+        }
+        json!({ "projects": by_path.into_values().collect::<Vec<_>>() })
+    })
+}
+
+/// `vibectl memory knowledge` — the CURRENT knowledge, materialized as the
+/// CONSOLIDATED fold of the append-only `knowledge/facts.jsonl`: deduplicated by
+/// `(subject, fact)`, last-write-wins by `ts`, sorted (docs/MEMORY.md §3.6,
+/// ADR-030). The consolidation NEVER raises a fact's confidence — `source`/
+/// `fact`/`confidence` are agent-declared and untrusted (THREAT-MODEL §9); the
+/// fold only compacts repeats, it does not judge. Same read-side memoization as
+/// `profile`/`projects`.
+pub fn memory_knowledge_at(root: &Path) -> Value {
+    fold_updates_cached(
+        &root.join("knowledge").join("facts.jsonl"),
+        crate::tools::consolidate::consolidate_fold,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// `vibectl memory reset` — factory reset of the memory store.
+//
+// Like `mode open`, this is an OUT-OF-BAND HUMAN action: a root-only vibectl
+// command on the operator's own channel, never an MCP tool an agent could
+// reach. It deliberately does NOT write the vibed audit trail — that trail
+// records the agent's mediated actions, and this is the operator acting
+// directly, exactly like `mode open`/`mode governed`.
+// ---------------------------------------------------------------------------
+
+/// Genesis re-run marker at the store root: while it exists, the Genesis unit
+/// stays disarmed (`ConditionPathExists=!`); removing it re-arms Genesis for
+/// the next boot.
+const MEMORY_INIT_MARKER: &str = ".initialized";
+
+/// Birth files written once by Genesis (identity, hardware survey, drawn
+/// personality — ADR-029). Removed on reset so the Genesis replay re-creates
+/// them from scratch.
+const MEMORY_BIRTH_FILES: [&str; 3] = ["identity.toml", "hardware.json", "personality.toml"];
+
+/// Store subdirectories whose CONTENT is purged on reset. The directories
+/// themselves — and the store root, which may be a mount point — are kept, so
+/// the on-disk layout stays exactly what the Genesis replay expects.
+const MEMORY_SUBDIRS: [&str; 5] = ["user", "projects", "journal", "knowledge", "reasoning"];
+
+/// Remove one known file, best-effort: already absent is fine (the reset is
+/// idempotent); any other failure is collected and the purge continues.
+fn reset_remove_file(path: &Path, removed: &mut u64, errors: &mut Vec<String>) {
+    match std::fs::remove_file(path) {
+        Ok(()) => *removed += 1,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => errors.push(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Purge every entry INSIDE `dir` without removing `dir` itself. Best-effort:
+/// an absent subdirectory is fine (Genesis recreates the layout), and per-entry
+/// failures (e.g. EACCES) are collected while the purge continues. Each direct
+/// entry counts once, whether it is a file or a whole subtree.
+fn reset_purge_dir(dir: &Path, removed: &mut u64, errors: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            errors.push(format!("{}: {e}", dir.display()));
+            return;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        // `file_type()` does not follow symlinks, so a symlinked entry is
+        // removed as a link — the purge never reaches outside the store.
+        let outcome = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match outcome {
+            Ok(()) => *removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
-    json!({ "projects": by_path.into_values().collect::<Vec<_>>() })
+}
+
+/// `vibectl memory reset --yes` core: purge the memory store rooted at `root`
+/// and re-arm Genesis. Without `confirmed`, refuses with an explicit listing
+/// of what WOULD be destroyed (the CLI maps this to the `--yes` flag).
+///
+/// What it destroys is a CLOSED LIST — the init marker, the Genesis birth
+/// files, and the content of the known subdirectories. Anything ELSE at the
+/// store root (an operator's stray backup, `lost+found` on a dedicated
+/// filesystem, a file a newer schema added before this list learned about it)
+/// is deliberately left alone: a factory reset must never eat data this code
+/// did not write — least surprise beats completeness when mistakes are
+/// unrecoverable. The root and the subdirectories themselves are also kept
+/// (the root may be a mount point), so the layout is ready for the Genesis
+/// replay at next boot.
+///
+/// Best-effort: already-absent paths are fine (idempotent) and per-path
+/// failures land in `errors` while the purge continues. HONESTY: this is a
+/// file-level purge — the bytes remain recoverable on the underlying device
+/// until cryptographic erasure ships with LUKS (Phase 3).
+pub fn memory_reset_at(root: &Path, confirmed: bool) -> Result<Value, Value> {
+    if !confirmed {
+        return Err(json!({
+            "error": "memory reset is destructive and needs explicit confirmation: \
+                      re-run with --yes",
+            "would_remove": {
+                "root": root.to_string_lossy(),
+                "files": std::iter::once(MEMORY_INIT_MARKER)
+                    .chain(MEMORY_BIRTH_FILES)
+                    .collect::<Vec<_>>(),
+                "content_of": MEMORY_SUBDIRS,
+            },
+            "kept": "the store root and the subdirectories themselves \
+                     (mount point / layout preserved), plus anything not listed above",
+            "then": "Genesis re-runs at next boot and re-creates a fresh identity",
+        }));
+    }
+
+    let mut removed_files: u64 = 0;
+    let mut removed_entries: u64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    // The marker first: even if a later step fails, Genesis is already re-armed.
+    reset_remove_file(
+        &root.join(MEMORY_INIT_MARKER),
+        &mut removed_files,
+        &mut errors,
+    );
+    for name in MEMORY_BIRTH_FILES {
+        reset_remove_file(&root.join(name), &mut removed_files, &mut errors);
+    }
+    for sub in MEMORY_SUBDIRS {
+        reset_purge_dir(&root.join(sub), &mut removed_entries, &mut errors);
+    }
+
+    // "Re-armed" is measured, not assumed: Genesis runs at next boot iff the
+    // marker is actually gone (also true for a store that never existed).
+    let rearmed = !root.join(MEMORY_INIT_MARKER).exists();
+    Ok(json!({
+        "removed_files": removed_files,
+        "removed_entries": removed_entries,
+        "errors": errors,
+        "rearmed": rearmed,
+        "note": "file-level purge only: bytes remain on the device until cryptographic \
+                 erasure ships with LUKS (Phase 3)",
+    }))
+}
+
+/// `vibectl memory reset [--yes]` — production wrapper: root only (the same
+/// gate as `mode open`), default store root. `ok` is true only for a clean
+/// purge — any collected error flips the exit code so a partial reset is
+/// impossible to miss.
+pub fn memory_reset(confirmed: bool) -> (Value, bool) {
+    if let Err(e) = require_root(current_euid()) {
+        return (e, false);
+    }
+    match memory_reset_at(Path::new(mcp::MEMORY_DIR), confirmed) {
+        Ok(report) => {
+            let clean = report["errors"].as_array().map_or(true, |a| a.is_empty());
+            (report, clean)
+        }
+        Err(refusal) => (refusal, false),
+    }
 }
 
 /// `vibectl audit verify [dir]` — verify the tamper-evident audit chain across
@@ -326,6 +585,9 @@ pub struct AgentRunOpts {
     pub command: Vec<String>,
     pub budget_secs: Option<u64>,
     pub max_calls: Option<u64>,
+    /// Total-token allowance (see [`supervisor::Budget::max_tokens`]). `None` =
+    /// unbounded on tokens.
+    pub max_tokens: Option<u64>,
     pub session_id: Option<String>,
     pub provider: String,
 }
@@ -454,6 +716,71 @@ pub fn agent_stop(run_dir: &Path, session_id: &str) -> (Value, bool) {
     }
 }
 
+/// Live token tallies shared between the stdout reader thread and the budget
+/// poll loop — grouped so the counters thread as one `Arc`. Accumulated from
+/// per-turn `assistant` usage; the authoritative run cost is stored (last
+/// `result` wins) separately, gated by `has_cost` (0.0 is a real cost, not
+/// "unset").
+#[derive(Default)]
+struct TokenAtomics {
+    input: AtomicU64,
+    output: AtomicU64,
+    cache_creation: AtomicU64,
+    cache_read: AtomicU64,
+    turns: AtomicU64,
+    cost_micro_usd: AtomicU64,
+    has_cost: AtomicBool,
+}
+
+impl TokenAtomics {
+    /// Fold one `stream-json` event: sum per-turn usage, capture the terminal
+    /// cost. Mirrors [`supervisor::TokenLedger::add_event`] over shared atomics.
+    fn observe(&self, ev: &Value) {
+        if let Some(u) = supervisor::extract_usage(ev) {
+            self.input.fetch_add(u.input, Ordering::Relaxed);
+            self.output.fetch_add(u.output, Ordering::Relaxed);
+            self.cache_creation
+                .fetch_add(u.cache_creation, Ordering::Relaxed);
+            self.cache_read.fetch_add(u.cache_read, Ordering::Relaxed);
+            self.turns.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(cost) = supervisor::extract_final_cost(ev) {
+            // Store, not add: `result` is cumulative, so the last one wins.
+            self.cost_micro_usd
+                .store((cost * 1_000_000.0) as u64, Ordering::Relaxed);
+            self.has_cost.store(true, Ordering::Relaxed);
+        }
+    }
+    /// Snapshot the running total the token budget caps.
+    fn total_tokens(&self) -> u64 {
+        self.input
+            .load(Ordering::Relaxed)
+            .saturating_add(self.output.load(Ordering::Relaxed))
+            .saturating_add(self.cache_creation.load(Ordering::Relaxed))
+            .saturating_add(self.cache_read.load(Ordering::Relaxed))
+    }
+    /// Rebuild a [`supervisor::TokenLedger`] to reuse its derived metrics
+    /// (cache ratio, input-equivalent, savings) — one source of truth for the
+    /// formulas.
+    fn ledger(&self) -> supervisor::TokenLedger {
+        supervisor::TokenLedger {
+            totals: supervisor::TokenUsage {
+                input: self.input.load(Ordering::Relaxed),
+                output: self.output.load(Ordering::Relaxed),
+                cache_creation: self.cache_creation.load(Ordering::Relaxed),
+                cache_read: self.cache_read.load(Ordering::Relaxed),
+            },
+            turns: self.turns.load(Ordering::Relaxed),
+        }
+    }
+    /// The authoritative run cost in USD, or `None` if the CLI never reported one.
+    fn cost_usd(&self) -> Option<f64> {
+        self.has_cost
+            .load(Ordering::Relaxed)
+            .then(|| self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0)
+    }
+}
+
 /// `vibectl agent run -- <cmd...>` — run a CLI under budget, tapping its
 /// `stream-json` reasoning into `mem/reasoning/<session>.jsonl`. `run_dir` holds
 /// the pid + stop markers. Returns a summary `(json, ok)`.
@@ -472,7 +799,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
     if reasoning::safe_session_id(&sid).is_none() {
         return (json!({"error": "invalid session id"}), false);
     }
-    let budget = supervisor::Budget::new(opts.budget_secs, opts.max_calls);
+    let budget = supervisor::Budget::new(opts.budget_secs, opts.max_calls, opts.max_tokens);
 
     // START journal event (reserved `autonomous_session` type — unforgeable by agents).
     write_session_journal(
@@ -482,7 +809,8 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
             "start",
             &opts.provider,
             &mcp::utc_iso8601(start),
-            json!({ "command": opts.command, "budget_secs": opts.budget_secs, "max_calls": opts.max_calls }),
+            json!({ "command": opts.command, "budget_secs": opts.budget_secs,
+                    "max_calls": opts.max_calls, "max_tokens": opts.max_tokens }),
         ),
         start,
     );
@@ -531,12 +859,14 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
     // open must not hang `agent run`.
     let tool_calls = Arc::new(AtomicU64::new(0));
     let blocks = Arc::new(AtomicU64::new(0));
+    let tokens = Arc::new(TokenAtomics::default());
     let reader_done = Arc::new(AtomicBool::new(false));
     if let Some(stdout) = child.stdout.take() {
         let mem = mem.to_path_buf();
         let sid = sid.clone();
         let tool_calls = Arc::clone(&tool_calls);
         let blocks = Arc::clone(&blocks);
+        let tokens = Arc::clone(&tokens);
         let reader_done = Arc::clone(&reader_done);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -560,6 +890,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
                     continue;
                 };
                 tool_calls.fetch_add(supervisor::count_tool_use(&ev) as u64, Ordering::Relaxed);
+                tokens.observe(&ev);
                 if let Some(block) = supervisor::extract_thinking(&ev) {
                     if reasoning::append_thinking(&mem, &sid, &block, now_epoch_secs()).is_ok() {
                         blocks.fetch_add(1, Ordering::Relaxed);
@@ -595,14 +926,17 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
         }
         let over_wall = budget.wall_expired(run_started.elapsed());
         let over_calls = budget.tool_calls_exhausted(tool_calls.load(Ordering::Relaxed));
+        let over_tokens = budget.tokens_exhausted(tokens.total_tokens());
         let stopped = stopfile.exists();
-        if over_wall || over_calls || stopped {
+        if over_wall || over_calls || over_tokens || stopped {
             reason = if stopped {
                 "operator_stop"
             } else if over_wall {
                 "wall_budget"
-            } else {
+            } else if over_calls {
                 "tool_budget"
+            } else {
+                "token_budget"
             };
             // Kill the direct child (SIGKILL via std — guaranteed, so the wait()
             // below never blocks) AND its whole group (grandchildren holding the
@@ -636,6 +970,23 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
     let blocks = blocks.load(Ordering::Relaxed);
     let calls = tool_calls.load(Ordering::Relaxed);
 
+    // Token accounting summary: raw counts (authoritative, from the CLI's
+    // per-turn `usage`) plus the derived cache-efficiency metrics that make the
+    // spend actionable, and the authoritative USD cost when the CLI reported one.
+    let ledger = tokens.ledger();
+    let token_summary = json!({
+        "input": ledger.totals.input,
+        "output": ledger.totals.output,
+        "cache_creation": ledger.totals.cache_creation,
+        "cache_read": ledger.totals.cache_read,
+        "total": ledger.total_tokens(),
+        "turns": ledger.turns,
+        "cache_hit_ratio": ledger.cache_hit_ratio(),
+        "input_equiv_tokens": ledger.input_equiv_tokens(),
+        "cache_savings_tokens": ledger.cache_savings_tokens(),
+        "cost_usd": tokens.cost_usd(),
+    });
+
     let end = now_epoch_secs();
     write_session_journal(
         mem,
@@ -645,7 +996,7 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
             &opts.provider,
             &mcp::utc_iso8601(end),
             json!({ "reason": reason, "reasoning_blocks": blocks, "tool_calls": calls,
-                    "duration_secs": end.saturating_sub(start) }),
+                    "duration_secs": end.saturating_sub(start), "tokens": token_summary }),
         ),
         end,
     );
@@ -654,7 +1005,8 @@ pub fn agent_run(mem: &Path, run_dir: &Path, opts: AgentRunOpts) -> (Value, bool
 
     (
         json!({ "session": sid, "reason": reason, "reasoning_blocks": blocks,
-                "tool_calls": calls, "duration_secs": end.saturating_sub(start) }),
+                "tool_calls": calls, "duration_secs": end.saturating_sub(start),
+                "tokens": token_summary }),
         true,
     )
 }
@@ -747,6 +1099,39 @@ mod tests {
     }
 
     #[test]
+    fn memoized_fold_recomputes_after_an_append() {
+        let root = scratch("profile-memo");
+        std::fs::create_dir_all(root.join("user")).unwrap();
+        let path = root.join("user").join("updates.jsonl");
+        std::fs::write(
+            &path,
+            "{\"ts\":\"t1\",\"key\":\"k\",\"value\":\"v1\",\"source\":\"x\"}\n",
+        )
+        .unwrap();
+        assert_eq!(memory_profile_at(&root)["profile"]["k"], "v1");
+
+        // Append-only growth changes (len, mtime): the memoized fold must
+        // recompute, never serve the stale profile.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"{\"ts\":\"t2\",\"key\":\"k\",\"value\":\"v2\",\"source\":\"x\"}\n")
+                .unwrap();
+        }
+        assert_eq!(
+            memory_profile_at(&root)["profile"]["k"],
+            "v2",
+            "an appended update must invalidate the memoized fold"
+        );
+        // An unchanged file returns the same (cached) fold.
+        assert_eq!(memory_profile_at(&root)["profile"]["k"], "v2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn memory_projects_folds_by_path_sorted() {
         let root = scratch("projects");
         std::fs::create_dir_all(root.join("projects")).unwrap();
@@ -766,6 +1151,161 @@ mod tests {
         assert_eq!(projs[0]["path"], "/home/dev/a", "sorted by path");
         assert_eq!(projs[1]["path"], "/home/dev/b");
         assert_eq!(projs[1]["name"], "b-new", "last write wins per path");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_knowledge_consolidates_facts_dedup_last_write_wins() {
+        let root = scratch("knowledge");
+        std::fs::create_dir_all(root.join("knowledge")).unwrap();
+        let lines = [
+            // Same (subject, fact) re-asserted later -> the later confidence wins.
+            r#"{"id":"1","ts":"2026-07-01T00:00:00Z","subject":"proj","fact":"pnpm","confidence":0.5,"source":"a"}"#,
+            r#"{"id":"2","ts":"2026-07-20T00:00:00Z","subject":"proj","fact":"pnpm","confidence":0.9,"source":"b"}"#,
+            // Distinct fact for the same subject -> its own entry.
+            r#"{"id":"3","ts":"2026-07-10T00:00:00Z","subject":"proj","fact":"fedora","confidence":0.8,"source":"a"}"#,
+            r#"garbage"#,
+        ];
+        std::fs::write(
+            root.join("knowledge").join("facts.jsonl"),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
+        let v = memory_knowledge_at(&root);
+        let facts = v["knowledge"].as_array().unwrap();
+        assert_eq!(v["count"], 2, "deduped by (subject, fact)");
+        // Sorted by subject then fact: "fedora" before "pnpm".
+        assert_eq!(facts[0]["fact"], "fedora");
+        assert_eq!(facts[1]["fact"], "pnpm");
+        assert_eq!(facts[1]["confidence"], 0.9, "last write wins");
+        assert_eq!(facts[1]["source"], "b");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // --- memory reset -------------------------------------------------------
+
+    /// A fully populated store: init marker, the three birth files, one file in
+    /// every known subdirectory, plus one NESTED directory (the purge must take
+    /// whole subtrees, not only flat files).
+    fn populated_store(tag: &str) -> std::path::PathBuf {
+        let root = scratch(tag);
+        for sub in ["user", "projects", "journal", "knowledge", "reasoning"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(root.join(".initialized"), "").unwrap();
+        std::fs::write(root.join("identity.toml"), "schema = 1\n").unwrap();
+        std::fs::write(root.join("hardware.json"), "{}").unwrap();
+        std::fs::write(root.join("personality.toml"), "schema = 1\n").unwrap();
+        std::fs::write(root.join("user").join("updates.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("projects").join("updates.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("journal").join("2026-07-21.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("knowledge").join("facts.jsonl"), "{}\n").unwrap();
+        std::fs::write(root.join("reasoning").join("sess.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(root.join("knowledge").join("topics")).unwrap();
+        std::fs::write(root.join("knowledge").join("topics").join("x.md"), "x").unwrap();
+        root
+    }
+
+    #[test]
+    fn memory_reset_refuses_without_confirmation() {
+        let root = populated_store("reset-noyes");
+        let err = memory_reset_at(&root, false).unwrap_err();
+        let msg = err["error"].as_str().unwrap();
+        assert!(msg.contains("--yes"), "refusal must point at --yes: {msg}");
+        // The refusal says WHAT would be destroyed, so --yes is informed consent.
+        let files = err["would_remove"]["files"].as_array().unwrap();
+        assert!(files.iter().any(|f| f == "identity.toml"));
+        // And nothing was touched.
+        assert!(root.join(".initialized").exists());
+        assert!(root.join("identity.toml").exists());
+        assert!(root.join("user").join("updates.jsonl").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_reset_purges_and_keeps_the_layout() {
+        let root = populated_store("reset-purge");
+        let report = memory_reset_at(&root, true).unwrap();
+        assert_eq!(
+            report["errors"].as_array().unwrap().len(),
+            0,
+            "clean purge: {report}"
+        );
+        assert_eq!(report["rearmed"], true);
+        assert_eq!(report["removed_files"], 4, "marker + 3 birth files");
+        assert_eq!(
+            report["removed_entries"], 6,
+            "5 subdir files + 1 nested directory"
+        );
+        for f in [
+            ".initialized",
+            "identity.toml",
+            "hardware.json",
+            "personality.toml",
+        ] {
+            assert!(!root.join(f).exists(), "{f} must be gone");
+        }
+        // Root and subdirectories survive, EMPTY: the mount point is intact and
+        // the layout is exactly what the Genesis replay expects.
+        assert!(root.is_dir(), "store root must survive");
+        for sub in ["user", "projects", "journal", "knowledge", "reasoning"] {
+            let dir = root.join(sub);
+            assert!(dir.is_dir(), "{sub}/ must survive the reset");
+            assert_eq!(
+                std::fs::read_dir(&dir).unwrap().count(),
+                0,
+                "{sub}/ must be empty"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_reset_is_idempotent() {
+        let root = populated_store("reset-idem");
+        memory_reset_at(&root, true).unwrap();
+        // Second run: nothing left to remove, and that is NOT an error.
+        let second = memory_reset_at(&root, true).unwrap();
+        assert_eq!(second["removed_files"], 0);
+        assert_eq!(second["removed_entries"], 0);
+        assert_eq!(second["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(second["rearmed"], true, "still re-armed");
+        // A store that never existed (unmounted amnesic tmpfs): same contract.
+        let absent = scratch("reset-absent");
+        let v = memory_reset_at(&absent, true).unwrap();
+        assert_eq!(v["removed_files"], 0);
+        assert_eq!(v["removed_entries"], 0);
+        assert_eq!(v["errors"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CONTRACT (least surprise): the reset destroys ONLY what it knows — the
+    /// init marker, the birth files, and the content of the known
+    /// subdirectories. An unexpected entry at the store root (an operator's
+    /// stray backup, `lost+found` on a dedicated filesystem, a file from a
+    /// newer schema) is preserved: a factory reset must never eat data this
+    /// code did not write, because until LUKS-level erasure exists (Phase 3)
+    /// its mistakes are unrecoverable.
+    #[test]
+    fn memory_reset_leaves_unknown_root_entries_alone() {
+        let root = populated_store("reset-stray");
+        std::fs::write(root.join("operator-backup.tar"), "precious").unwrap();
+        std::fs::create_dir_all(root.join("lost+found")).unwrap();
+        std::fs::write(root.join("lost+found").join("blob"), "x").unwrap();
+        let report = memory_reset_at(&root, true).unwrap();
+        assert_eq!(report["errors"].as_array().unwrap().len(), 0);
+        assert!(
+            root.join("operator-backup.tar").exists(),
+            "unknown root file preserved"
+        );
+        assert!(
+            root.join("lost+found").join("blob").exists(),
+            "unknown root directory preserved, content included"
+        );
+        assert!(
+            !root.join("identity.toml").exists(),
+            "known files are still purged"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -952,6 +1492,7 @@ mod tests {
                 command: vec!["sh".into(), "-c".into(), script],
                 budget_secs: Some(30),
                 max_calls: None,
+                max_tokens: None,
                 session_id: Some("test-sess".into()),
                 provider: "fake".into(),
             },
@@ -1006,12 +1547,67 @@ mod tests {
                 command: vec!["sh".into(), "-c".into(), "sleep 30".into()],
                 budget_secs: Some(1),
                 max_calls: None,
+                max_tokens: None,
                 session_id: Some("budget-sess".into()),
                 provider: "fake".into(),
             },
         );
         assert!(ok);
         assert_eq!(summary["reason"], "wall_budget");
+        let _ = std::fs::remove_dir_all(&mem);
+        let _ = std::fs::remove_dir_all(&run);
+    }
+
+    #[test]
+    fn token_atomics_accumulate_usage_and_capture_cost() {
+        let t = TokenAtomics::default();
+        // Non-usage events are ignored; assistant usage accumulates; result cost
+        // is stored (last wins), mirroring supervisor::TokenLedger.
+        t.observe(&json!({"type":"system"}));
+        t.observe(&json!({"type":"assistant","message":{"usage":{
+            "input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":4000}}}));
+        t.observe(&json!({"type":"assistant","message":{"usage":{
+            "input_tokens":50,"output_tokens":150}}}));
+        t.observe(&json!({"type":"result","total_cost_usd":0.25}));
+        t.observe(&json!({"type":"result","total_cost_usd":0.37})); // cumulative: last wins
+        assert_eq!(t.total_tokens(), 1000 + 200 + 4000 + 50 + 150);
+        let led = t.ledger();
+        assert_eq!(led.turns, 2);
+        assert_eq!(led.totals.cache_read, 4000);
+        assert_eq!(t.cost_usd(), Some(0.37));
+        // No cost reported -> None, never a bogus 0.0.
+        assert!(TokenAtomics::default().cost_usd().is_none());
+    }
+
+    #[test]
+    fn agent_run_enforces_token_budget() {
+        let mem = mem_scratch("agenttok-mem");
+        let run = scratch("agenttok-run");
+        // The child emits ONE assistant usage event whose tokens (500) exceed the
+        // 100-token budget, then sleeps: the reader taps the event, the poll loop
+        // sees the ledger over budget and kills the run as `token_budget`.
+        let line =
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":500,"output_tokens":0}}}"#;
+        let (summary, ok) = agent_run(
+            &mem,
+            &run,
+            AgentRunOpts {
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!("printf '%s\\n' '{line}'; sleep 30"),
+                ],
+                budget_secs: None,
+                max_calls: None,
+                max_tokens: Some(100),
+                session_id: Some("tok-sess".into()),
+                provider: "fake".into(),
+            },
+        );
+        assert!(ok);
+        assert_eq!(summary["reason"], "token_budget");
+        assert_eq!(summary["tokens"]["input"], 500);
+        assert_eq!(summary["tokens"]["total"], 500);
         let _ = std::fs::remove_dir_all(&mem);
         let _ = std::fs::remove_dir_all(&run);
     }
@@ -1034,6 +1630,7 @@ mod tests {
                 command: vec!["sh".into(), "-c".into(), "sleep 20 & exit 0".into()],
                 budget_secs: Some(60),
                 max_calls: None,
+                max_tokens: None,
                 session_id: Some("gc-sess".into()),
                 provider: "fake".into(),
             },
@@ -1073,6 +1670,7 @@ mod tests {
                     command: vec![],
                     budget_secs: None,
                     max_calls: None,
+                    max_tokens: None,
                     session_id: None,
                     provider: "x".into(),
                 },
@@ -1087,6 +1685,7 @@ mod tests {
                     command: vec!["true".into()],
                     budget_secs: None,
                     max_calls: None,
+                    max_tokens: None,
                     session_id: Some("../evil".into()),
                     provider: "x".into(),
                 },

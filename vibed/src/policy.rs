@@ -348,6 +348,15 @@ impl PolicyEngine {
         self.rules.len()
     }
 
+    /// Accès en lecture seule aux règles chargées, pour en DÉRIVER un manifeste de
+    /// capacités (`policy.capabilities`, T0) sans dupliquer l'état : le rendu vit dans
+    /// l'outil (présentation), le moteur reste la source unique. La politique vit dans
+    /// `/etc` (config), l'exposer à l'agent ne lui accorde rien — elle décrit ses
+    /// propres bornes, et `evaluate` reste seul juge.
+    pub fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+
     /// Load every `*.toml` file in `dir`, sorted lexicographically.
     ///
     /// FAIL-CLOSED: any unreadable or invalid file aborts the load with an

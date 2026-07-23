@@ -12,12 +12,28 @@
 #                 Qt). Seul contrôle automatisé de la couche qui traduit le
 #                 format de vibed en ce que l'utilisateur lit ; le RENDU QML
 #                 reste machine-gated (pas de Quickshell headless).
+#   * zed-extension
+#                 zed/vibeos-claude-acp (TypeScript): tsc --noEmit + the vitest
+#                 suite (governance gate + layer-3 insight mappers). The
+#                 in-editor rendering stays machine-gated (Tier B).
 #   * shellcheck  memory/genesis.sh (first-boot Genesis script) and
 #                 os/rootfs/usr/bin/vibeos-hud (HUD launcher)
+#   * threatmodel-tools (step in the rust job) — every tool exposed by the MCP
+#                 catalog (build_tool_catalog) has a row in docs/THREAT-MODEL.md
+#                 §6. Turns the documented-but-unenforced "each tool adds its
+#                 row before merge" rule into a real guard.
 #   * policy      quick schema validation of security/policy.d/*.toml with
 #                 Python tomllib (canonical [[rule]] schema: id / tools /
 #                 tier / action / approval), mirroring vibed's fail-closed
 #                 load rules.
+#   * containers-policy
+#                 the client-side cosign verification policy, shipped STAGED
+#                 (os/rootfs/usr/share/vibeos/containers/policy-strict.json +
+#                 registries.d/anchors under os/rootfs/etc/): structure checks,
+#                 pinned sigstore trust anchors, and a MECHANICAL skopeo proof
+#                 that an unsigned image is rejected by the
+#                 ghcr.io/micka420-collab/vibeos requirement. The effect on a
+#                 real `bootc upgrade` (deployed machine) stays machine-gated.
 
 name: ci
 
@@ -44,6 +60,20 @@ on:
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
       # os/Containerfile plus haut.
       - "os/rootfs/usr/share/vibeos/saas/**"
+      # THREAT-MODEL.md est gardé par check-threatmodel-tools.py : l'éditer seul
+      # (retrait d'une ligne d'outil) doit déclencher le garde.
+      - "docs/THREAT-MODEL.md"
+      # Policy de vérification cosign côté client + ancres sigstore : sans ces
+      # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
+      # jamais le job containers-policy qui la garde. Même trou que pour
+      # os/Containerfile plus haut. La policy STRICTE vit en STAGED sous
+      # usr/share/vibeos/containers — l'oublier ici referait le trou.
+      - "os/rootfs/etc/containers/**"
+      - "os/rootfs/etc/pki/**"
+      - "os/rootfs/usr/share/vibeos/containers/**"
+      # Extension Zed : sans cette entrée, une PR qui ne touche QUE zed/**
+      # ne déclencherait jamais le job zed-extension qui la teste.
+      - "zed/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -69,6 +99,20 @@ on:
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
       # os/Containerfile plus haut.
       - "os/rootfs/usr/share/vibeos/saas/**"
+      # THREAT-MODEL.md est gardé par check-threatmodel-tools.py : l'éditer seul
+      # (retrait d'une ligne d'outil) doit déclencher le garde.
+      - "docs/THREAT-MODEL.md"
+      # Policy de vérification cosign côté client + ancres sigstore : sans ces
+      # entrées, une PR qui n'affaiblirait QUE la policy ne déclencherait
+      # jamais le job containers-policy qui la garde. Même trou que pour
+      # os/Containerfile plus haut. La policy STRICTE vit en STAGED sous
+      # usr/share/vibeos/containers — l'oublier ici referait le trou.
+      - "os/rootfs/etc/containers/**"
+      - "os/rootfs/etc/pki/**"
+      - "os/rootfs/usr/share/vibeos/containers/**"
+      # Extension Zed : sans cette entrée, une PR qui ne touche QUE zed/**
+      # ne déclencherait jamais le job zed-extension qui la teste.
+      - "zed/**"
       - "desktop/quickshell/**"
       - "scripts/**"
       - ".github/workflows/ci.yml"
@@ -92,7 +136,7 @@ jobs:
         working-directory: vibed
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-08)
@@ -137,6 +181,15 @@ jobs:
       - name: Hygiène des logs (aucun secret loggé)
         working-directory: .
         run: python3 scripts/check-log-hygiene.py
+
+      # THREAT-MODEL.md §6 énonce « chaque outil MCP exposé ajoute sa ligne au
+      # tableau §6 avant merge » — règle réelle mais qui était NON EXÉCUTÉE, et
+      # qui avait dérivé (la moitié du catalogue sans ligne). Ce garde la rend
+      # exécutable : un outil du catalogue `build_tool_catalog` sans ligne §6
+      # fait rougir la CI.
+      - name: Outils MCP tous dans le modèle de menace
+        working-directory: .
+        run: python3 scripts/check-threatmodel-tools.py
 
       # Le 2026-07-15, VibeOS construisait depuis 49 jours sur Fedora Kinoite 42,
       # EOL le 2026-05-27 — zéro correctif de sécurité, et AUCUN signal : quand
@@ -193,7 +246,7 @@ jobs:
         working-directory: vibed
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-08)
@@ -201,7 +254,7 @@ jobs:
       # Prebuilt binary — no from-source recompile of cargo-audit and its ~200
       # deps on every run (cohérent avec la politique de pins SHA du dépôt).
       - name: Install cargo-audit (prebuilt)
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
         with:
           tool: cargo-audit
 
@@ -217,7 +270,7 @@ jobs:
         working-directory: vibed
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Verify the rust-version = "1.75" declared in Cargo.toml actually builds
       # and tests (the `rust` job uses stable; this locks the floor). Cargo.lock
@@ -235,7 +288,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # desktop/quickshell/vibed_client.js is a QML `.pragma library`: plain
       # ECMAScript, so it runs under the runner's preinstalled node without Qt.
@@ -246,13 +299,39 @@ jobs:
       - name: HUD client checks
         run: node scripts/check-hud-client.js
 
+  # The Zed extension (governance gate + layer-3 insight mappers) had a full
+  # vitest suite that NO CI job ever executed — the README's "N Zed tests"
+  # claim rested on manual runs alone, the same silent-bypass class the other
+  # paths: comments in this file document. tsc --noEmit types the whole
+  # extension; vitest runs the suite. npm ci obeys the committed lockfile
+  # (supply-chain posture, same reasoning as --locked for cargo).
+  zed-extension:
+    name: Zed extension (TS) — types + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: zed/vibeos-claude-acp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies (lockfile-exact)
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Tests (vitest)
+        run: npm test
+
   shellcheck:
     name: scripts shell — shellcheck
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install shellcheck
         run: |
@@ -298,6 +377,10 @@ jobs:
           T="$(mktemp -d)"
           VIBEOS_MEMORY_DIR="$T/mem" bash memory/genesis.sh
           test -f "$T/mem/.initialized"
+          # Interview contract (a): a DEFAULT first boot — no TTY on stdin, no
+          # VIBEOS_INTERVIEW=1 — must not create user/updates.jsonl at all. The
+          # interview is opt-in; an unattended boot writes nothing to user/.
+          test ! -e "$T/mem/user/updates.jsonl"
           python3 - "$T/mem" <<'PY'
           import json, sys, pathlib
           root = pathlib.Path(sys.argv[1])
@@ -313,8 +396,69 @@ jobs:
           assert j, "no journal file written"
           ev = json.loads(open(j[0]).read().splitlines()[0])
           assert ev["type"] == "genesis" and ev["source"] == "genesis.sh"
+          # The genesis event carries the born character (name/archetype/seed).
+          persona = ev["data"]["personality"]
+          assert persona["name"] and persona["archetype"] and persona["seed"], persona
+          # personality.toml — the AI citizen's birth character (§3.8).
+          import re
+          p = (root / "personality.toml").read_text()
+          def field(name):
+              m = re.search(rf'^{name} = "(.*)"$', p, re.M)
+              assert m, f"{name} missing from personality.toml"
+              return m.group(1)
+          assert re.search(r"^schema = 1$", p, re.M), "personality schema must be 1"
+          name, archetype, tone = field("name"), field("archetype"), field("tone")
+          assert "[traits]" in p and "[adaptation]" in p, "traits/adaptation tables"
+          traits = {}
+          for axis in ("curiosity", "caution", "initiative", "warmth", "concision", "playfulness"):
+              v = int(re.search(rf"^{axis} = (\d+)$", p, re.M).group(1))
+              assert 0 <= v <= 100, f"{axis} out of range: {v}"
+              traits[axis] = v
+          assert traits["caution"] >= 50, f"caution floor is 50, got {traits['caution']}"
+          # Archetype must be the dominant axis, first-max-wins (mirrors the -gt
+          # chain in genesis.sh): a wrong-but-stable label would pass a mere
+          # presence check and survive the determinism diff.
+          order = [("caution", "sentinelle"), ("curiosity", "exploratrice"),
+                   ("initiative", "stratège"), ("warmth", "compagne"),
+                   ("concision", "artisane"), ("playfulness", "muse")]
+          best_axis, best_arch, best_val = order[0][0], order[0][1], traits[order[0][0]]
+          for axis, arch in order[1:]:
+              if traits[axis] > best_val:
+                  best_axis, best_arch, best_val = axis, arch, traits[axis]
+          assert archetype == best_arch, f"archetype {archetype!r} != dominant {best_arch!r} ({traits})"
+          # Tone follows the threshold ladder in genesis.sh.
+          if traits["concision"] >= 66: exp_tone = "concis et direct"
+          elif traits["warmth"] >= 66: exp_tone = "chaleureux et pédagogue"
+          elif traits["playfulness"] >= 66: exp_tone = "vif et curieux"
+          else: exp_tone = "posé et précis"
+          assert tone == exp_tone, f"tone {tone!r} != expected {exp_tone!r} ({traits})"
+          # The journal's character must AGREE with personality.toml (a reordered
+          # printf arg would otherwise pass the truthiness check above).
+          assert persona["name"] == name, (persona["name"], name)
+          assert persona["archetype"] == archetype, (persona["archetype"], archetype)
+          assert persona["seed"] == field("seed"), (persona["seed"], field("seed"))
           print("Genesis smoke test OK")
           PY
+
+          # fnv1a32 known-answer test: the determinism diff proves two runs AGREE,
+          # not that the hash is CORRECT. Pin canonical FNV-1a/32 vectors so a
+          # wrong offset/prime/mask (still deterministic) is caught.
+          eval "$(sed -n '/^fnv1a32() {/,/^}/p' memory/genesis.sh)"
+          for pair in ":2166136261" "a:3826002220" "foobar:3214735720" "hello:1335831723"; do
+            in="${pair%%:*}"; want="${pair##*:}"; got="$(fnv1a32 "$in")"
+            test "$got" = "$want" || { echo "FAIL fnv1a32('$in')=$got want $want"; exit 1; }
+          done
+          echo "Genesis fnv1a32 known-answer OK"
+
+          # The awakening (birth_ceremony) is delivered but called `|| true`, so a
+          # future breakage would print nothing and stay green. Capture stderr and
+          # assert it ran to the LAST line (the manifesto), proving no mid-abort.
+          VIBEOS_MEMORY_DIR="$T/mem4" bash memory/genesis.sh 2>"$T/awaken.log" >/dev/null
+          grep -q "un citoyen s'éveille" "$T/awaken.log"
+          grep -q '▓' "$T/awaken.log"      # trait gauges rendered
+          grep -q 'Apprenons-nous' "$T/awaken.log"  # printed LAST → block completed
+          grep -qF "$(sed -n 's/^name = "\(.*\)"$/\1/p' "$T/mem4/personality.toml")" "$T/awaken.log"
+          echo "Genesis awakening OK (ceremony ran to completion)"
           # Idempotency, take 1 — the GUARD: with the sentinel present the script
           # must exit immediately and touch nothing.
           before="$(find "$T/mem" -type f | sort | xargs sha256sum)"
@@ -339,9 +483,74 @@ jobs:
           test "$births" -eq 1 \
             || { echo "FAIL: replayed partial run stamped $births births, expected 1"; exit 1; }
           echo "Genesis re-entrancy OK (replay after a partial run: still one birth)"
+          # The crash-replay above ran without VIBEOS_INTERVIEW: the interview
+          # wired into genesis.sh must have stayed a no-op on that path too.
+          test ! -e "$T/mem/user/updates.jsonl"
           # Amnesic marker written by genesis event data.
           VIBEOS_MEMORY_DIR="$T/mem2" VIBEOS_MEMORY_MODE=amnesic bash memory/genesis.sh
           grep -q '^mode = "amnesic"' "$T/mem2/identity.toml"
+
+          # Personality DETERMINISM: same host (same machine_id) => the same
+          # character born again, birth timestamp aside. This is the property
+          # that makes "the AI picks its own personality" reproducible rather
+          # than random, and keeps the soul stable across an amnesic reboot.
+          VIBEOS_MEMORY_DIR="$T/mem3" bash memory/genesis.sh
+          if ! diff <(grep -v '^birth = ' "$T/mem/personality.toml") \
+                    <(grep -v '^birth = ' "$T/mem3/personality.toml") >/dev/null; then
+            echo "FAIL: personality is not deterministic for a fixed machine_id"; exit 1
+          fi
+          echo "Genesis personality OK (deterministic character, birth aside)"
+
+          # --- Birth interview (genesis-interview.sh) --------------------------
+          # Scripted mode, contract (b): VIBEOS_INTERVIEW=1 + injected answers,
+          # no TTY needed. The COLLAB answer is deliberately hostile (newline,
+          # quotes, backslash): every recorded line must still parse as
+          # standalone JSON, or an answer could forge extra lines/keys in
+          # user/updates.jsonl (A1 poisoning).
+          VIBEOS_MEMORY_DIR="$T/mem" VIBEOS_INTERVIEW=1 \
+            VIBEOS_INTERVIEW_NAME="Ada Lovelace" \
+            VIBEOS_INTERVIEW_LANG="français" \
+            VIBEOS_INTERVIEW_DOMAIN="génie logiciel" \
+            VIBEOS_INTERVIEW_COLLAB=$'direct "et" concis\navec \\ des pièges' \
+            bash memory/genesis-interview.sh
+          python3 - "$T/mem/user/updates.jsonl" <<'PY'
+          import json, sys
+          lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+          entries = [json.loads(line) for line in lines]  # each line: valid JSON
+          assert [e["key"] for e in entries] == [
+              "profile.name", "profile.lang", "profile.domain",
+              "preferences.collaboration"], entries
+          for e in entries:
+              assert set(e) == {"ts", "key", "value", "source"}, e
+              assert e["source"] == "genesis-interview", e
+          values = {e["key"]: e["value"] for e in entries}
+          assert values["profile.name"] == "Ada Lovelace"
+          assert values["profile.lang"] == "français"
+          # The hostile answer round-trips intact — escaped, never re-shaped.
+          assert values["preferences.collaboration"] == 'direct "et" concis\navec \\ des pièges'
+          print("Interview scripted mode OK")
+          PY
+          # Contract (c): a REPLAY (same crash-recovery path genesis.sh takes)
+          # must append NOTHING — the source-tag guard trips, because an
+          # append-only file cannot be "overwritten back" to its prior state.
+          before_iv="$(sha256sum "$T/mem/user/updates.jsonl")"
+          VIBEOS_MEMORY_DIR="$T/mem" VIBEOS_INTERVIEW=1 \
+            VIBEOS_INTERVIEW_NAME="Ada Lovelace" \
+            bash memory/genesis-interview.sh
+          after_iv="$(sha256sum "$T/mem/user/updates.jsonl")"
+          test "$before_iv" = "$after_iv" \
+            || { echo "FAIL: interview replay appended duplicate lines"; exit 1; }
+          echo "Interview scripted + replay OK (no duplicate lines)"
+          # Wiring: a first boot that opts in records the answers THROUGH
+          # genesis.sh (best-effort call between the awakening and the
+          # sentinel) and Genesis still completes. Fresh dir: mem4 was already
+          # initialized by the awakening-capture run above.
+          VIBEOS_MEMORY_DIR="$T/mem5" VIBEOS_INTERVIEW=1 \
+            VIBEOS_INTERVIEW_NAME="Grace" VIBEOS_INTERVIEW_LANG="english" \
+            bash memory/genesis.sh
+          test -f "$T/mem5/.initialized"
+          grep -q '"key":"profile.name"' "$T/mem5/user/updates.jsonl"
+          echo "Interview wiring through genesis.sh OK"
           rm -rf "$T"
 
   policy:
@@ -350,7 +559,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Fast structural check (the deep check is the Rust integration test in
       # the `rust` job, which uses vibed's real parser). Mirrors vibed's
@@ -425,3 +634,37 @@ jobs:
 
           sys.exit(1 if failed else 0)
           EOF
+
+  containers-policy:
+    name: containers — policy de signature (cosign côté client)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # build-os.yml signe chaque release cosign keyless — signer sans que
+      # personne ne vérifie est du théâtre. Le garde vérifie la policy CLIENT
+      # STAGED (os/rootfs/usr/share/vibeos/containers/policy-strict.json —
+      # staged et non active : activée aujourd'hui elle rejetterait AUSSI
+      # l'image authentique, c/image ne matchant que les SAN e-mail ; le
+      # check 0 du garde épingle cet état volontairement) :
+      #   (a) JSON valide + structure : `default` resté permissif (podman
+      #       utilisateur intact), exigence sigstoreSigned KEYLESS (fulcio
+      #       OIDC GitHub Actions + rekor) sur ghcr.io/micka420-collab/vibeos,
+      #       ancres sigstore épinglées à l'octet près ;
+      #   (b) preuve de rejet MÉCANIQUE : une image OCI non signée construite
+      #       par le script passe sous le `default`, mais est REJETÉE
+      #       (« signature » dans l'erreur) par l'exigence du repo vibeos
+      #       extraite VERBATIM de la policy shippée. Exigence retirée ou
+      #       affaiblie => la copie passe => rouge.
+      # skopeo est préinstallé sur ubuntu-latest ; le garde échoue FERMÉ s'il
+      # manque. Portée honnête : ceci prouve le rejet par l'outillage c/image,
+      # pas l'effet au `bootc upgrade` d'une machine déployée (machine-gated)
+      # — limites détaillées dans os/rootfs/etc/containers/registries.d/vibeos.yaml.
+      - name: Policy conteneurs — structure + preuve de rejet (skopeo)
+        run: |
+          # skopeo est préinstallé sur ubuntu-latest — ceinture-bretelles au
+          # cas où l'image runner le retirerait : le garde échoue fermé sans.
+          command -v skopeo >/dev/null || { sudo apt-get update && sudo apt-get install -y skopeo; }
+          python3 scripts/check-containers-policy.py

@@ -260,7 +260,7 @@ pub fn list_sessions(root: &Path) -> (Vec<SessionMeta>, usize) {
     let sessions = rows
         .into_iter()
         .map(|(id, last_unix, bytes)| {
-            let started_unix = first_block_ts(&session_file(root, &id));
+            let started_unix = first_block_ts_cached(&session_file(root, &id));
             SessionMeta {
                 id,
                 started_unix,
@@ -270,6 +270,36 @@ pub fn list_sessions(root: &Path) -> (Vec<SessionMeta>, usize) {
         })
         .collect();
     (sessions, total)
+}
+
+/// Memoized [`first_block_ts`]. The store is strictly append-only (`O_APPEND`,
+/// one line at a time), so a session file's FIRST line — and therefore its
+/// `ts_unix` — is immutable once written: reading it again on every HUD poll
+/// (one open + head read + parse per listed session, per probe) only repeats
+/// work. A `None` head (empty or torn file) is NOT cached, so a session whose
+/// first line lands later is retried. Hard-bounded: the map is cleared when it
+/// outgrows several full rosters (an out-of-band store purge then repopulates
+/// it on demand — at worst one uncached probe).
+fn first_block_ts_cached(path: &Path) -> Option<u64> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, u64>>> = OnceLock::new();
+    const CACHE_MAX: usize = 4 * REASONING_MAX_SESSIONS;
+
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ts) = map.get(path) {
+            return Some(*ts);
+        }
+    }
+    let ts = first_block_ts(path)?;
+    let mut map = cache.lock().unwrap_or_else(|p| p.into_inner());
+    if map.len() >= CACHE_MAX {
+        map.clear();
+    }
+    map.insert(path.to_path_buf(), ts);
+    Some(ts)
 }
 
 /// Cap on how many bytes are read to recover a session's first line. A line is
@@ -451,6 +481,27 @@ mod tests {
         // can tell it is seeing a window.
         assert_eq!(sessions.len(), REASONING_MAX_SESSIONS);
         assert_eq!(total, over);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_sessions_started_ts_is_stable_across_appends_and_probes() {
+        let root = scratch("startcache");
+        append_thinking(&root, "s", &json!({"a": 1}), 100).unwrap();
+        let (first, _) = list_sessions(&root);
+        assert_eq!(first[0].started_unix, Some(100));
+
+        // Append-only growth: the first line is immutable, so the (now cached)
+        // start timestamp must stay exactly the first block's, probe after
+        // probe — never drift to a later block's ts.
+        append_thinking(&root, "s", &json!({"a": 2}), 200).unwrap();
+        let (second, _) = list_sessions(&root);
+        assert_eq!(
+            second[0].started_unix,
+            Some(100),
+            "start ts is the FIRST block's"
+        );
+        assert!(second[0].last_unix >= first[0].last_unix);
         let _ = std::fs::remove_dir_all(&root);
     }
 

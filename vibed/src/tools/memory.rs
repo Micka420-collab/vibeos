@@ -18,6 +18,24 @@ pub(crate) fn memory_query(args: &Value) -> Result<String, String> {
     memory_query_at(std::path::Path::new(MEMORY_DIR), args)
 }
 
+/// Case-insensitive (ASCII) substring test WITHOUT allocating a lowercased
+/// copy of the haystack. `needle` is already lowercased by the caller; matching
+/// folds ASCII case on the fly, so it differs from a full Unicode
+/// `to_lowercase().contains()` ONLY on non-ASCII case pairs (Turkish İ, German
+/// ß, …) — acceptable for a memory search, and it removes a per-file duplicate
+/// of up to MAX_MEMORY_SCAN_BYTES (64 KiB) that memory.query used to allocate
+/// for EVERY scanned file, on a path the HUD polls.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() {
+        return true;
+    }
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 /// Read up to MAX_MEMORY_SCAN_BYTES of `path` (bounded, O_NOFOLLOW) and return
 /// the UTF-8-lossy text plus whether the file exceeded the scan window. The
 /// bound caps the allocation; O_NOFOLLOW refuses a final component swapped for
@@ -108,24 +126,121 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
                 out["folded"] = json!(true);
                 return Ok(out.to_string());
             }
+            // Consolidated knowledge: facts.jsonl deduped by (subject, fact),
+            // last-write-wins (ADR-030). Confidence is NEVER raised by the fold
+            // (THREAT-MODEL §9: source/fact/confidence are agent-declared).
+            Some("knowledge") => {
+                let mut out = crate::vibectl::memory_knowledge_at(root);
+                out["scope"] = json!("knowledge");
+                out["folded"] = json!(true);
+                return Ok(out.to_string());
+            }
             _ => {
-                return Err(
-                    "memory.query: 'fold' applies only to scope 'user' or 'projects'".to_string(),
-                )
+                return Err("memory.query: 'fold' applies only to scope 'user', \
+                            'projects' or 'knowledge'"
+                    .to_string())
             }
         }
     }
 
-    // Bounded iterative walk: no recursion, hard cap on visited files, and
-    // NEVER follows symlinks (entry.file_type() / symlink_metadata do not
-    // traverse) — a link planted inside the store cannot route the walk (or
-    // the content scan) outside /var/lib/vibeos/memory, e.g. into the audit
-    // trail.
+    // `rank`: additive, opt-in (same precedent as `fold`). For `journal` /
+    // `knowledge`, return EVENTS ranked by the recall score (recency +
+    // importance + relevance — recall.rs / ADR-030) instead of files in
+    // filesystem-walk order, so `limit` keeps the MOST relevant rather than the
+    // first encountered (the default order is filesystem-dependent). Default
+    // false: the classic per-file path below is byte-for-byte unchanged.
+    let rank = match args.get("rank") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("memory.query: 'rank' must be a boolean".to_string()),
+    };
+
+    // Bounded, symlink-safe file collection — shared verbatim by the default
+    // per-file match below and the ranked-event path.
+    let files = collect_scope_files(root, scope);
+
+    if rank {
+        return match scope.map(|(name, _, _)| name) {
+            Some("journal") | Some("knowledge") => {
+                // `now` is the only impurity; the ranking itself is pure and
+                // injectable (see memory_query_ranked's tests).
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                memory_query_ranked(root, scope.map(|(n, _, _)| n), &files, &query, limit, now)
+            }
+            _ => Err(
+                "memory.query: 'rank' applies only to scope 'journal' or 'knowledge'".to_string(),
+            ),
+        };
+    }
+
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    for path in &files {
+        if matches.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        // Read a bounded window ONCE and reuse it for both the content match
+        // test and the returned snippet.
+        let scanned = read_memory_scan(path);
+        let name_hit = !query.is_empty() && contains_ascii_ci(&relative, &query);
+        let content_hit = !query.is_empty()
+            && scanned
+                .as_ref()
+                .is_some_and(|(text, _)| contains_ascii_ci(text, &query));
+        if !(query.is_empty() || name_hit || content_hit) {
+            continue;
+        }
+        // Bounded snippet so the agent can read the memory in this single call.
+        let (snippet, snippet_truncated) = match &scanned {
+            Some((text, longer)) => {
+                let snippet: String = text.chars().take(MEMORY_SNIPPET_CHARS).collect();
+                let trunc = *longer || snippet.chars().count() < text.chars().count();
+                (snippet, trunc)
+            }
+            None => (String::new(), false),
+        };
+        matches.push(json!({
+            "file": relative,
+            "snippet": snippet,
+            "snippet_truncated": snippet_truncated
+        }));
+    }
+
+    Ok(json!({
+        "initialized": true,
+        "query": query,
+        "scope": scope.map(|(name, _, _)| name),
+        "scanned_files": files.len(),
+        "matches": matches,
+        "truncated": truncated
+    })
+    .to_string())
+}
+
+/// Bounded, symlink-safe collection of the files under a scope (or the whole
+/// store). Iterative (no recursion), hard-capped at `MAX_MEMORY_FILES`, and
+/// NEVER follows symlinks (`symlink_metadata` / `entry.file_type()` do not
+/// traverse) — a link planted inside the store cannot route the walk outside
+/// `/var/lib/vibeos/memory`, e.g. into the audit trail. Extracted verbatim from
+/// `memory.query` so the default and ranked paths share ONE audited walk.
+fn collect_scope_files(
+    root: &std::path::Path,
+    scope: Option<(&str, &str, bool)>,
+) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = Vec::new();
     // A walk root is only pushed if it is a REAL directory (symlink_metadata
-    // does not follow): if `journal` (or the store root itself) is a symlink,
-    // the walk must not descend through it out of the store.
+    // does not follow): if a scope dir (or the store root) is a symlink, the
+    // walk must not descend through it out of the store.
     let push_if_real_dir = |stack: &mut Vec<std::path::PathBuf>, p: std::path::PathBuf| {
         if p.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
             stack.push(p);
@@ -167,51 +282,156 @@ fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, Strin
             break;
         }
     }
+    files
+}
 
-    let mut matches = Vec::new();
-    let mut truncated = false;
-    for path in &files {
-        if matches.len() >= limit {
-            truncated = true;
-            break;
-        }
+/// Demi-vie de récence du classement (une semaine) : un événement d'il y a 7
+/// jours pèse moitié moins qu'aujourd'hui sur l'axe récence.
+const RANK_HALF_LIFE_SECS: u64 = 7 * 86_400;
+/// Borne dure du nombre d'événements classés en un appel (anti-DoS mémoire, en
+/// plus de la borne d'octets par fichier de `read_memory_scan`).
+const MAX_RANK_EVENTS: usize = 5_000;
+
+/// Métadonnées d'un événement classé, pour reconstruire la réponse après le tri
+/// (le classeur pur `recall` ne connaît que `id`/`ts`/`importance`/`text`).
+struct RankMeta {
+    file: String,
+    line: usize,
+    ts: String,
+    kind: String,
+    snippet: String,
+    snippet_truncated: bool,
+}
+
+/// Mode `rank` de `memory.query` (opt-in, journal/knowledge) : classe les
+/// ÉVÉNEMENTS par le score de rappel (`recall::top_k_lexical`) au lieu de rendre
+/// des fichiers dans l'ordre du walk. `now_epoch` est injecté (déterminisme des
+/// tests). Fail-closed : une ligne malformée ou non-objet est ignorée, jamais un
+/// panic ; bornes `MAX_MEMORY_FILES` (walk), `MAX_MEMORY_SCAN_BYTES` (octets/
+/// fichier) et `MAX_RANK_EVENTS` (nombre d'événements) respectées.
+fn memory_query_ranked(
+    root: &std::path::Path,
+    scope_name: Option<&str>,
+    files: &[std::path::PathBuf],
+    query: &str,
+    limit: usize,
+    now_epoch: u64,
+) -> Result<String, String> {
+    use crate::tools::recall;
+
+    let mut items: Vec<recall::MemoryItem> = Vec::new();
+    let mut metas: std::collections::BTreeMap<String, RankMeta> = std::collections::BTreeMap::new();
+    let mut capped = false;
+
+    'outer: for path in files {
         let relative = path
             .strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        // Read a bounded window ONCE and reuse it for both the content match
-        // test and the returned snippet.
-        let scanned = read_memory_scan(path);
-        let name_hit = !query.is_empty() && relative.to_lowercase().contains(&query);
-        let content_hit = !query.is_empty()
-            && scanned
-                .as_ref()
-                .is_some_and(|(text, _)| text.to_lowercase().contains(&query));
-        if !(query.is_empty() || name_hit || content_hit) {
+        let Some((text, _longer)) = read_memory_scan(path) else {
             continue;
-        }
-        // Bounded snippet so the agent can read the memory in this single call.
-        let (snippet, snippet_truncated) = match &scanned {
-            Some((text, longer)) => {
-                let snippet: String = text.chars().take(MEMORY_SNIPPET_CHARS).collect();
-                let trunc = *longer || snippet.chars().count() < text.chars().count();
-                (snippet, trunc)
-            }
-            None => (String::new(), false),
         };
-        matches.push(json!({
-            "file": relative,
-            "snippet": snippet,
-            "snippet_truncated": snippet_truncated
-        }));
+        for (line_no, raw) in text.lines().enumerate() {
+            if items.len() >= MAX_RANK_EVENTS {
+                capped = true;
+                break 'outer;
+            }
+            let line = raw.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // Fail-closed: only well-formed JSON OBJECTS are events; anything
+            // else (a corrupt line, a bare scalar) is skipped, never fatal.
+            let Ok(ev) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if !ev.is_object() {
+                continue;
+            }
+            let ts = ev.get("ts").and_then(Value::as_str).unwrap_or("");
+            // Day-granular recency from the event's own ts; a missing/invalid ts
+            // ⇒ epoch 0 (treated as very old), never a crash.
+            let ts_unix = recall::epoch_day_from_iso(ts).unwrap_or(0);
+            // Importance from the SYSTEM-derived type (journal) or the stored
+            // confidence (knowledge) — NEVER from an agent-declared field beyond
+            // those (THREAT-MODEL §1: source/data are untrusted).
+            let (importance, kind) = match scope_name {
+                Some("knowledge") => {
+                    let c = ev
+                        .get("confidence")
+                        .and_then(Value::as_f64)
+                        .map(|c| c as f32)
+                        .unwrap_or(0.5)
+                        .clamp(0.0, 1.0);
+                    (c, "fact".to_string())
+                }
+                _ => {
+                    let t = ev.get("type").and_then(Value::as_str).unwrap_or("");
+                    (recall::importance_of_type(t), t.to_string())
+                }
+            };
+            let snippet: String = line.chars().take(MEMORY_SNIPPET_CHARS).collect();
+            let snippet_truncated = snippet.chars().count() < line.chars().count();
+            let id = format!("{relative}#{line_no}");
+            metas.insert(
+                id.clone(),
+                RankMeta {
+                    file: relative.clone(),
+                    line: line_no,
+                    ts: ts.to_string(),
+                    kind,
+                    snippet,
+                    snippet_truncated,
+                },
+            );
+            items.push(recall::MemoryItem {
+                id,
+                ts_unix,
+                importance,
+                // Raw line is the relevance text: the tokenizer strips JSON
+                // punctuation, and field names are constant across events so
+                // they never skew the ranking.
+                text: line.to_string(),
+            });
+        }
     }
+
+    let weights = recall::RecallWeights::default();
+    let hits = recall::top_k_lexical(
+        query,
+        &items,
+        now_epoch,
+        RANK_HALF_LIFE_SECS,
+        &weights,
+        limit,
+    );
+    let matches: Vec<Value> = hits
+        .iter()
+        .filter_map(|(item, score)| {
+            metas.get(&item.id).map(|m| {
+                json!({
+                    "file": m.file,
+                    "line": m.line,
+                    "ts": m.ts,
+                    "type": m.kind,
+                    // 3 decimals: enough to see the ranking, not float noise.
+                    "score": (f64::from(*score) * 1000.0).round() / 1000.0,
+                    "snippet": m.snippet,
+                    "snippet_truncated": m.snippet_truncated,
+                })
+            })
+        })
+        .collect();
+    let truncated = capped || items.len() > matches.len();
 
     Ok(json!({
         "initialized": true,
         "query": query,
-        "scope": scope.map(|(name, _, _)| name),
+        "scope": scope_name,
+        "ranked": true,
         "scanned_files": files.len(),
+        "scanned_events": items.len(),
         "matches": matches,
         "truncated": truncated
     })
@@ -540,6 +760,11 @@ mod tests {
             "schema = 1\nhostname = \"testhost\"\n",
         )
         .expect("write identity");
+        std::fs::write(
+            dir.join("personality.toml"),
+            "schema = 1\nname = \"Lumen\"\narchetype = \"sentinelle\"\n\n[traits]\ncaution = 71\n",
+        )
+        .expect("write personality");
         std::fs::write(dir.join("user").join("profile.toml"), "lang = \"fr\"\n")
             .expect("write profile");
         std::fs::write(
@@ -552,6 +777,330 @@ mod tests {
 
     fn parse_result(result: Result<String, String>) -> Value {
         serde_json::from_str(&result.expect("tool call succeeds")).expect("valid JSON payload")
+    }
+
+    // -- memory.query rank mode (ADR-030, recall.rs) --------------------------
+
+    /// A fixed "now" for deterministic recency: midday 2026-07-22 UTC.
+    fn fixed_now() -> u64 {
+        crate::tools::recall::epoch_day_from_iso("2026-07-22T12:00:00Z").unwrap()
+    }
+
+    /// Run the ranked path deterministically (injected `now`), via the SAME
+    /// bounded walk the live tool uses.
+    fn ranked(root: &std::path::Path, scope_name: &str, query: &str, limit: usize) -> Value {
+        let scope = MEMORY_SCOPES
+            .iter()
+            .find(|(n, _, _)| *n == scope_name)
+            .copied();
+        let files = collect_scope_files(root, scope);
+        parse_result(memory_query_ranked(
+            root,
+            Some(scope_name),
+            &files,
+            query,
+            limit,
+            fixed_now(),
+        ))
+    }
+
+    fn write_journal_day(root: &std::path::Path, date: &str, lines: &[&str]) {
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(root.join("journal").join(format!("{date}.jsonl")), body)
+            .expect("write journal day");
+    }
+
+    #[test]
+    fn rank_orders_by_relevance_within_same_recency_and_type() {
+        let root = memory_scratch("rankrel");
+        // Drop the scratch's genesis line so exactly the two crafted events rank.
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        // Two observations, SAME day and SAME type -> only relevance separates them.
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"le projet utilise pnpm"}}"#,
+                r#"{"ts":"2026-07-20T11:00:00Z","type":"observation","source":"a","data":{"note":"une recette de cuisine"}}"#,
+            ],
+        );
+        let payload = ranked(&root, "journal", "pnpm", 10);
+        let matches = payload["matches"].as_array().unwrap();
+        assert!(payload["ranked"].as_bool().unwrap());
+        assert!(
+            matches[0]["snippet"].as_str().unwrap().contains("pnpm"),
+            "the query-relevant event ranks first: {payload}"
+        );
+        // rank is a RANKING, not a filter: the non-matching event is still
+        // returned (just lower) — a silent regression to substring-filtering
+        // would drop it and this would catch it.
+        assert_eq!(
+            matches.len(),
+            2,
+            "all events are ranked and returned, not filtered to query matches: {payload}"
+        );
+        assert!(
+            matches[1]["snippet"].as_str().unwrap().contains("cuisine"),
+            "the non-matching event survives, ranked last: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_respects_limit_and_flags_truncation() {
+        let root = memory_scratch("ranklimit");
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        // Three events, all scanned; ask for the top 2.
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"un"}}"#,
+                r#"{"ts":"2026-07-20T11:00:00Z","type":"decision","source":"a","data":{"note":"deux"}}"#,
+                r#"{"ts":"2026-07-20T12:00:00Z","type":"preference","source":"a","data":{"note":"trois"}}"#,
+            ],
+        );
+        let payload = ranked(&root, "journal", "", 2);
+        assert_eq!(
+            payload["scanned_events"].as_u64().unwrap(),
+            3,
+            "all 3 scanned"
+        );
+        assert_eq!(
+            payload["matches"].as_array().unwrap().len(),
+            2,
+            "limit keeps the top 2: {payload}"
+        );
+        assert!(
+            payload["truncated"].as_bool().unwrap(),
+            "more events than returned -> truncated: {payload}"
+        );
+        // limit >= events -> not truncated.
+        let full = ranked(&root, "journal", "", 10);
+        assert!(
+            !full["truncated"].as_bool().unwrap(),
+            "nothing dropped: {full}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_keeps_event_with_missing_or_invalid_ts() {
+        let root = memory_scratch("rankts");
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        // One event with NO ts, one recent. The ts-less event maps to epoch 0
+        // (very old) but must STILL appear in the ranking, just ranked lower —
+        // never silently dropped.
+        write_journal_day(
+            &root,
+            "2026-07-21",
+            &[
+                r#"{"type":"observation","source":"a","data":{"note":"sans horodatage"}}"#,
+                r#"{"ts":"2026-07-21T10:00:00Z","type":"observation","source":"a","data":{"note":"recent"}}"#,
+            ],
+        );
+        let payload = ranked(&root, "journal", "", 10);
+        assert_eq!(
+            payload["scanned_events"].as_u64().unwrap(),
+            2,
+            "the ts-less event is kept, not dropped: {payload}"
+        );
+        let matches = payload["matches"].as_array().unwrap();
+        // The recent event ranks above the epoch-0 one.
+        assert!(matches[0]["snippet"].as_str().unwrap().contains("recent"));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m["snippet"].as_str().unwrap().contains("sans horodatage")),
+            "the ts-less event is present in the ranking: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_orders_by_recency_for_empty_query() {
+        let root = memory_scratch("rankrec");
+        write_journal_day(
+            &root,
+            "2026-07-21",
+            &[
+                r#"{"ts":"2026-07-21T10:00:00Z","type":"observation","source":"a","data":{"note":"tout frais"}}"#,
+            ],
+        );
+        write_journal_day(
+            &root,
+            "2026-07-02",
+            &[
+                r#"{"ts":"2026-07-02T10:00:00Z","type":"observation","source":"a","data":{"note":"deja vieux"}}"#,
+            ],
+        );
+        // Empty query -> relevance 0 for all -> recency (same type) decides.
+        let payload = ranked(&root, "journal", "", 10);
+        let matches = payload["matches"].as_array().unwrap();
+        assert_eq!(
+            matches[0]["ts"].as_str().unwrap(),
+            "2026-07-21T10:00:00Z",
+            "the most recent event ranks first: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_importance_prefers_decision_over_observation_same_day() {
+        let root = memory_scratch("rankimp");
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"x"}}"#,
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"decision","source":"a","data":{"note":"y"}}"#,
+            ],
+        );
+        // Empty query, same day -> importance (decision > observation) decides.
+        let payload = ranked(&root, "journal", "", 10);
+        assert_eq!(
+            payload["matches"][0]["type"].as_str().unwrap(),
+            "decision",
+            "the more salient type ranks first: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_knowledge_uses_confidence_for_importance() {
+        let root = memory_scratch("rankknow");
+        std::fs::write(
+            root.join("knowledge").join("facts.jsonl"),
+            format!(
+                "{}\n{}\n",
+                r#"{"id":"f1","ts":"2026-07-20T10:00:00Z","subject":"lowsubj","fact":"peu sûr","confidence":0.1,"source":"a"}"#,
+                r#"{"id":"f2","ts":"2026-07-20T10:00:00Z","subject":"highsubj","fact":"très sûr","confidence":0.95,"source":"a"}"#,
+            ),
+        )
+        .expect("write facts");
+        // Empty query, same ts -> confidence decides (0.95 over 0.1).
+        let payload = ranked(&root, "knowledge", "", 10);
+        assert_eq!(payload["matches"][0]["type"].as_str().unwrap(), "fact");
+        assert!(
+            payload["matches"][0]["snippet"]
+                .as_str()
+                .unwrap()
+                .contains("highsubj"),
+            "the higher-confidence fact ranks first: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_skips_malformed_and_nonobject_lines() {
+        let root = memory_scratch("rankskip");
+        // Remove the scratch's genesis line so the count is exact.
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        write_journal_day(
+            &root,
+            "2026-07-20",
+            &[
+                r#"{"ts":"2026-07-20T10:00:00Z","type":"observation","source":"a","data":{"note":"real"}}"#,
+                "not json at all",
+                "123",
+                "",
+            ],
+        );
+        let payload = ranked(&root, "journal", "", 10);
+        assert_eq!(
+            payload["scanned_events"].as_u64().unwrap(),
+            1,
+            "only the well-formed object is an event: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fold_knowledge_returns_consolidated_view() {
+        let root = memory_scratch("foldknow");
+        std::fs::write(
+            root.join("knowledge").join("facts.jsonl"),
+            format!(
+                "{}\n{}\n",
+                r#"{"id":"1","ts":"2026-07-01T00:00:00Z","subject":"s","fact":"f","confidence":0.4,"source":"a"}"#,
+                r#"{"id":"2","ts":"2026-07-09T00:00:00Z","subject":"s","fact":"f","confidence":0.7,"source":"b"}"#,
+            ),
+        )
+        .expect("write facts");
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"scope": "knowledge", "fold": true}),
+        ));
+        assert_eq!(payload["folded"], json!(true));
+        assert_eq!(payload["scope"], "knowledge");
+        assert_eq!(payload["count"], 1, "the two re-assertions fold into one");
+        assert_eq!(
+            payload["knowledge"][0]["confidence"], 0.7,
+            "last write wins"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_arg_plumbing_and_scope_guard() {
+        let root = memory_scratch("rankarg");
+        // rank:true on journal returns the ranked shape.
+        let payload = parse_result(memory_query_at(
+            &root,
+            &json!({"scope": "journal", "rank": true}),
+        ));
+        assert!(payload["ranked"].as_bool().unwrap_or(false));
+        // rank only applies to journal/knowledge.
+        assert!(
+            memory_query_at(&root, &json!({"scope": "identity", "rank": true})).is_err(),
+            "rank rejects non journal/knowledge scopes"
+        );
+        assert!(
+            memory_query_at(&root, &json!({"rank": true})).is_err(),
+            "rank with no scope is rejected"
+        );
+        // rank must be a boolean.
+        assert!(
+            memory_query_at(&root, &json!({"scope": "journal", "rank": "yes"})).is_err(),
+            "non-boolean rank is rejected"
+        );
+        // Default path is untouched: no `ranked` flag without rank:true.
+        let classic = parse_result(memory_query_at(&root, &json!({"scope": "journal"})));
+        assert!(classic.get("ranked").is_none(), "default path is unchanged");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn contains_ascii_ci_matches_case_insensitively_without_allocating() {
+        assert!(contains_ascii_ci("Hello WORLD", "world"));
+        assert!(contains_ascii_ci("preferences.EDITOR = neovim", "editor"));
+        assert!(contains_ascii_ci("abc", "abc"));
+        assert!(contains_ascii_ci("anything", ""), "empty needle matches");
+        assert!(!contains_ascii_ci("short", "longer-than-haystack"));
+        assert!(!contains_ascii_ci("hello", "xyz"));
+        // Fold is ASCII-only by design: the needle arrives already lowercased,
+        // and matching is symmetric via eq_ignore_ascii_case.
+        assert!(contains_ascii_ci("MixedCASE", "mixedcase"));
+    }
+
+    #[test]
+    fn memory_query_content_match_is_case_insensitive() {
+        let root = memory_scratch("qcasefold");
+        // The journal genesis line contains lowercase text; query in UPPERCASE
+        // must still hit it (ASCII case fold, no allocation).
+        let payload = parse_result(memory_query_at(&root, &json!({"query": "GENESIS"})));
+        assert!(
+            payload["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["file"]
+                    .as_str()
+                    .is_some_and(|f| f.starts_with("journal/"))),
+            "an uppercase query matches lowercase content: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -568,6 +1117,25 @@ mod tests {
         // a scope never leaks files from another scope.
         let payload = parse_result(memory_query_at(&root, &json!({"scope": "knowledge"})));
         assert_eq!(payload["matches"].as_array().unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn memory_query_personality_scope_resolves_the_character() {
+        // The AI citizen's birth character (personality.toml, written by
+        // Genesis §3.8) is a first-class, addressable, read-only scope — so the
+        // HUD/agent can ask "who are you?" without walking the whole store.
+        let root = memory_scratch("qpersona");
+        let payload = parse_result(memory_query_at(&root, &json!({"scope": "personality"})));
+        assert_eq!(payload["scope"], "personality");
+        assert_eq!(payload["scanned_files"], 1);
+        assert_eq!(payload["matches"][0]["file"], "personality.toml");
+        assert!(
+            payload["matches"][0]["snippet"]
+                .as_str()
+                .is_some_and(|s| s.contains("archetype")),
+            "personality snippet carries the character: {payload}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -888,8 +1456,8 @@ mod tests {
     #[test]
     fn memory_append_rejects_readonly_and_unknown_scopes() {
         let root = memory_scratch("ascope");
-        // identity/hardware are written by Genesis only — never via memory.append.
-        for scope in ["identity", "hardware"] {
+        // identity/hardware/personality are written by Genesis only — never via memory.append.
+        for scope in ["identity", "hardware", "personality"] {
             let err = memory_append_at(
                 &root,
                 &json!({"scope": scope, "entry": {"source": "x"}}),

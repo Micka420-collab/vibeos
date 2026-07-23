@@ -46,7 +46,7 @@ sudo /usr/libexec/vibeos/vibeos-selfcheck.sh --json   # sortie machine
 `exit 0` = aucun **FAIL** (les **SKIP** sont normaux : le script est tolérant aux
 versions, une capacité absente d'une image plus ancienne est SKIP, jamais FAIL).
 
-Reporte ici la sortie **telle quelle**. Les 17 checks, dans l'ordre où le script
+Reporte ici la sortie **telle quelle**. Les 20 checks, dans l'ordre où le script
 les émet :
 
 | Check | Invariant prouvé | PASS/FAIL/SKIP | Notes |
@@ -55,6 +55,7 @@ les émet :
 | `root-readonly` | écrire sous `/usr` échoue (racine immuable) | | |
 | `bootc-status` | déploiement bootc valide | | |
 | `genesis-done` | `…/memory/.initialized` présent (Genesis 1er boot fait) | | |
+| `ai-personality` | caractère du citoyen IA né (`personality.toml`, ADR-029) — SKIP si image antérieure | | |
 | `vibed-service` | `vibed.service` **active (running)** | | |
 | `user-vibed` | user `vibed` créé (sysusers.d) | | |
 | `group-agents` | groupe `vibeos-agents` créé | | |
@@ -68,6 +69,8 @@ les émet :
 | `mcp-t2-floor` | `policy.check(svc.restart)` = `require_approval` (plancher T2) | | |
 | `audit-present` | journal append-only présent | | |
 | `audit-chain` | **chaîne SHA-256 intègre** (`vibectl audit verify`) | | |
+| `kernel-tuning` | sysctl IA livré **appliqué** (`vm.page-cluster=0` + module `tcp_bbr` autochargé — ADR-025) | | |
+| `operating-mode` | mode d'exploitation rapporté (**governed** par défaut / **open** = autonome, ADR-027) — open est PASS mais signalé fort | | |
 
 **Exit code observé :** *(à remplir)*
 

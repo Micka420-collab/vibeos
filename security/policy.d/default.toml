@@ -78,6 +78,7 @@ reason = "Read-only file access and directory listing outside the audit trail, s
 [rule.paths]
 denied = [
   "/var/lib/vibeos/audit/**",  # audit trail: agents must never read or probe it
+  "/var/lib/vibeos/approvals/**", # approval store: agents must not read or forge grants
   "/etc/shadow*",              # /etc/shadow and /etc/shadow- (password hashes)
   "/etc/gshadow*",             # group password hashes
   "**/.ssh/**",                # SSH key material, wherever it lives
@@ -92,10 +93,12 @@ denied = [
   "/etc/ipsec.secrets",        # IPsec PSK/keys
   "/etc/ipsec.d/private/**",   # IPsec private keys
   "/etc/pki/**/private/**",    # TLS/PKI private keys (public certs stay readable)
-  "**/.docker/config.json",    # container registry auth tokens
+  "**/.docker/config.json",    # container registry auth tokens (Docker)
+  "**/.config/containers/auth.json", # Podman/skopeo/buildah registry authfile (Podman-first image)
   "**/.kube/config",           # kubernetes cluster credentials
   "**/.netrc",                 # machine login credentials
   "/root/**",                  # root's home directory
+  "/var/roothome/**",          # canonical form of /root on OSTree (matcher is alias-blind)
   "/proc/*/environ",           # process environments may leak secrets
   "/proc/**/environ",          # ...including /proc/<pid>/task/<tid>/environ
   "/proc/**/cmdline",          # command lines may carry secrets/tokens
@@ -123,7 +126,8 @@ denied = [
   "**/.local/share/opencode/**", # opencode auth.json + agent-internal state
   "**/.ollama/**",             # ollama keypair (id_ed25519)
   "**/.npmrc",                 # npm registry authTokens
-  "**/.git-credentials",       # plaintext git credentials store
+  "**/.git-credentials",       # plaintext git credentials store (home-root)
+  "**/.config/git/credentials", # git-credential-store XDG fallback
   "**/.config/sops/**",        # SOPS/age private keys (keys.txt)
 ]
 
@@ -181,6 +185,7 @@ denied = [
   "/var/lib/vibeos/memory/**",
   "/var/lib/vibeos/audit/**",
   "/etc/vibeos/policy.d/**",
+  "/var/lib/vibeos/mode.json", # no-self-escalation (ADR-027): an agent must never write itself into open mode
 ]
 
 [[rule]]
@@ -206,10 +211,10 @@ reason = "Read-only, bounded tail of an autonomous session's captured reasoning 
 
 [[rule]]
 id = "agent-observability"
-tools = ["agent.sessions", "agents.list"]
+tools = ["agent.sessions", "agents.list", "agent.activity"]
 tier = "T0"
 action = "allow"
-reason = "Read-only HUD observability. agent.sessions lists reasoning-session ids (discovery for agent.thinking). agents.list is a per-uid roster derived from the audit trail, CONFINED to the caller's own uid (never another user's activity). Bounded output, rate-limited like any tool."
+reason = "Read-only HUD/self observability, all CONFINED to the caller's own uid. agent.sessions lists reasoning-session ids (discovery for agent.thinking). agents.list is a per-uid roster (other pids) derived from the audit trail. agent.activity is the caller's OWN recent governed tool calls incl. its refusals (ADR-026) — the 'deeds' half of AI-citizen self-knowledge, exposing nothing agents.list would not for the same uid. Bounded output, rate-limited like any tool."
 
 [[rule]]
 id = "policy-check"
@@ -217,6 +222,20 @@ tools = ["policy.check"]
 tier = "T0"
 action = "allow"
 reason = "Read-only classification of a hypothetical (tool, target) call — returns the policy decision + tier without executing, approving, or touching the approval store. A hint for the governed editor auto-mode (ADR-014); real enforcement stays at execution."
+
+[[rule]]
+id = "policy-capabilities"
+tools = ["policy.capabilities"]
+tier = "T0"
+action = "allow"
+reason = "Read-only capability manifest DERIVED from the loaded policy (tools/tier/approval/target constraints) so the agent plans in reality instead of discovering limits by refusal. Indicative only; the authoritative decision stays the per-call evaluation, so it can never over-promise."
+
+[[rule]]
+id = "user-model"
+tools = ["user.model"]
+tier = "T0"
+action = "allow"
+reason = "Read-only, DERIVED and TRANSPARENT model of how the human works, for symbiosis (ADR-028). Folded from data VibeOS already holds under governance — the user-memory profile and the audit trail CONFINED to the caller's uid — plus recent typed journal notes; anticipations are a deterministic frequency×recency heuristic, never a trained predictor. No NEW leak (same underlying data as memory.query + agent.activity for the same uid), no new surveillance (never the human's raw keystrokes), local and user-owned (the memory belongs to its user). Bounded output, rate-limited like any tool."
 
 [[rule]]
 id = "memory-append"

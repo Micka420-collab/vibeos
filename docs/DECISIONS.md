@@ -1357,6 +1357,187 @@ agent ne peut pas, via le navigateur, installer un paquet, redémarrer un servic
 écrire hors du home de l'appelant. Et le contenu d'une page lue **n'est jamais une
 instruction** — quel que soit le tier des clics.
 
+### Addendum (2026-07-21, autonomie) — modèle de SESSION : batch éphémère, pas de chromium persistant
+
+**Statut** : **DÉCIDÉ pour v1** (décision d'implémentation prise en autonomie ; ouverte à
+l'override de Micka). Résout la seule micro-décision keystone qu'ADR-022 avait laissée
+implicite et qui **bloque toute la couche d'exécution** (`run_browser`, câblage dispatch).
+**Durci après une revue adversariale Fable 5 (2026-07-21)** : verdict *SOUND pour v1* (le choix
+batch survit, aucune option ratée), mais 4 surclamations/trous corrigés ci-dessous — la
+gouvernance batch est un **échange** (pas un gain), l'enforcement domaine est le **proxy** (pas
+le check par-navigate), l'état d'action doit distinguer **`indeterminate`** (double-POST), et
+l'approbation T2 doit énumérer les causes par action — plus 3 renforts d'implémentation (screening
+`fill`, étapes `assert`, bornes de batch).
+
+**Le problème.** ADR-019 est **process-par-appel** : chaque outil gouverné spawne une unité
+transitoire jetable. Mais `browser.navigate` puis `browser.read` sont **deux appels MCP
+distincts**, gouvernés séparément. S'ils spawnent chacun un chromium neuf, `read` observe une
+page **vierge** — `navigate` a chargé la page dans un chromium déjà mort. Il faut un modèle
+qui partage une page vivante entre plusieurs verbes, **sans** casser le confinement ADR-019.
+
+**Options pesées.**
+- **A — process-par-verbe (sans état)** : chaque verbe = chromium neuf. Perd toute continuité ;
+  contredit la surface de verbes déjà décidée (navigate/read/click… séparés). **Rejeté.**
+- **B/D — session persistante** : un chromium **vivant** sur plusieurs appels MCP, piloté par
+  une IPC bidirectionnelle. Continuité parfaite, mais : (1) **casse le confinement ADR-019**
+  (processus hostile de longue durée) ; (2) `vibed` doit gérer un cycle de vie de session
+  (ouverture/fermeture, timeout d'inactivité, concurrence, un-par-agent) — **surface neuve
+  massive** ; (3) transforme l'IPC à sens unique de `systemd-run --pipe` en protocole de
+  streaming. **Différé** (voir ci-dessous).
+- **C — batch éphémère (RETENU)** : une **séquence d'actions** (`[navigate, read, click, read]`)
+  est soumise comme **un seul appel gouverné**, exécutée par **un chromium dans une unité
+  transitoire**, qui rend **tous** les résultats puis meurt. Continuité **au sein** du batch ;
+  chromium mort à la fin de chaque appel gouverné.
+
+**Pourquoi C est cohérent (pas un pis-aller).** Le **profil éphémère** d'ADR-022 scope déjà v1
+à la **navigation non authentifiée** (le § « Résiduel introduit » dit noir sur blanc que le
+credential-free n'est un durcissement net *que si* le navigateur ne sert qu'à ça). Or les seuls
+flux que le batch ne couvre pas — lire-puis-agir-conditionnellement sur la **même** page vivante,
+wizards multi-étapes **avec état de session** — sont précisément les flux **authentifiés
+multi-étapes qu'ADR-022 diffère déjà**. Le batch sert donc **exactement** le périmètre v1 :
+fetch/extraction (`navigate→read/screenshot`) et action aveugle idempotente
+(`navigate→fill→submit→read`). La session persistante (B/D) n'est requise **que** le jour où le
+travail authentifié atterrit — et ce jour-là elle arrive **avec** le patron de ré-auth ADR-021
+(secret scellé hors de portée de l'agent), pas avant.
+
+**Ce que le batch préserve.**
+1. **Confinement ADR-019 intact** : une unité transitoire par appel, chromium jeté à la fin —
+   **aucun** processus hostile de longue durée, **aucune** gestion de session dans `vibed`.
+2. **IPC à sens unique inchangée** : un `control_payload` (le batch d'actions) descend, des
+   **résultats bornés** remontent — **exactement** la forme `run_deploy`/`run_cli` (le batch
+   EST le payload de contrôle que le mode `run_browser` du helper lit sur stdin).
+3. **Gouvernance : un ÉCHANGE, pas un gain net (Fable 5).** Le tier du batch = **max** des tiers
+   de ses verbes (un `submit` → batch **T2**). Le batch **gagne** la visibilité de *plan* mais
+   **perd** la visibilité d'*état* : un `submit` T2 est approuvé **avant** que son `navigate` ait
+   tourné, donc l'humain approuve une action contre un état de page que **personne** — ni lui ni
+   l'agent — n'a encore vu ; il approuve une *intention*, plus une *action* (en per-verbe,
+   l'approbation arrivait **après** les `read`, l'état sous les yeux). Acceptable v1 (formulaires
+   publics, enjeu bas) **à deux garde-fous obligatoires** :
+   - **l'approbation T2 affiche le PLAN INTÉGRAL** — chaque action, ses valeurs de `fill`, tous
+     les domaines visités — pas un « batch T2 » opaque ;
+   - **le payload d'approbation énumère les CAUSES d'escalade PAR ACTION** (tier + raison :
+     `submit` ? domaine hors-allowlist, lequel ?). Le `max` est correct comme *plancher* mais
+     **insuffisant comme présentation** : sans énumération, un batch escaladé pour **deux** causes
+     (un `submit` **et** un `navigate` hors-liste) n'en montre qu'une, et le batching devient un
+     mécanisme d'**enfouissement d'escalades**.
+
+**L'enforcement du domaine est le PROXY, pas le check par-navigate (Fable 5).** Évaluer
+`[rule.domains]` sur les args de `navigate` dans `vibed` est un **lint advisory**, **pas**
+l'enforcement : un `click` sur un lien, une **redirection 302**, changent de domaine **sans**
+`navigate` — invisibles de ce check. Le contrôle réel est le **proxy CONNECT par-requête**
+(ADR-022) + le snapshot de politique compilé descendu dans le helper (ADR-019 §2). Corollaire
+**multiplié par le batch** : l'invariant catch-all d'ADR-022 (un prédicat `[rule.domains]` est
+contournable par l'ordre des règles) ne laisse plus passer un *verbe* T1 sur domaine hostile mais
+un **batch entier** en T1 silencieux ; la politique navigateur livrée ne doit donc porter
+**aucun** catch-all `browser.*` permissif sans contrainte de domaine.
+
+**Limite assumée (honnête).** Le batch **ne peut pas** réagir en cours de route : l'agent doit
+planifier la séquence **avant** de voir ce qu'un `read` retourne. Pour agir sur ce qu'il vient
+de lire, il resoumet un **second batch** — qui **recharge** la page (chromium neuf), donc l'état
+non idempotent (post-login, panier multi-étapes) est **perdu**. C'est acceptable **parce que**
+ce cas = flux authentifié/stateful = hors périmètre v1 (ci-dessus). **Cas dangereux à nommer
+(Fable 5)** : tout formulaire à **jeton CSRF par session** (la majorité, même publics) rend
+« lire au batch 1, soumettre au batch 2 » impossible (session neuve → jeton invalide) — donc le
+**seul** chemin vers un `submit` est **aveugle dans le même batch**, précisément sur le verbe T2
+où la vérification importerait. La réponse **n'est PAS** la session persistante (B/D déguisé) mais
+des **étapes `assert` déclaratives** (ci-dessous). Le jour où même ça ne suffit plus, c'est le
+signal de construire la session persistante — **pas** de bricoler C.
+
+**Conséquence pour l'implémentation (invariants, dont durcissements Fable 5).** Le mode
+`run_browser` du helper lit un **batch d'actions validées** (chacune passée par `plan_action`) sur
+son stdin, lance chromium (`chromium_argv`), fait **une fois** `attach_page` → un `sessionId`,
+puis exécute les actions **en séquence** via `run_action(session, action, &page)` contre la
+**même** page, agrège des résultats bornés et rend un JSON. Invariants **obligatoires** :
+
+- **État d'action à TROIS valeurs — `completed` / `failed` / `indeterminate`** (jamais un binaire
+  « partiel + erreur », ambigu là où c'est dangereux). Tout **T2** ayant **dépassé le point de
+  dispatch réseau** (le POST est parti, la réponse a timeout) est **`indeterminate`**, jamais
+  `failed` : le rendre `failed` inviterait l'agent à re-soumettre → **double POST**/webhook tiré
+  deux fois sur un formulaire non idempotent. **Retry automatique d'un batch contenant du T2 =
+  INTERDIT.**
+- **Audit PAR ACTION dans la transaction**, corrélé aux logs du proxy par un **batch-id propagé**
+  (sinon les chaînes de redirection résolues à runtime sont invisibles de l'audit).
+- **Screening des valeurs de `fill` au plan (Fable 5)** : matcher chaque valeur contre le matériel
+  secret atteignable par l'agent (env, patterns de tokens) → **deny ou escalade T2**. C'est la
+  seule mise en application de l'invariant ADR-022 « jamais un secret via `browser.fill` », qui
+  n'a aujourd'hui **aucun** enforcement ; le batch rend ce contrôle bon marché (toutes les valeurs
+  sont visibles avant le spawn).
+- **Étapes `assert` déclaratives dans le schéma d'actions** (« ce sélecteur existe », « le texte
+  de X matche Y », « l'URL courante matche Z ») qui **abortent fail-closed** si non satisfaites.
+  Pré-approuvées par l'humain **dans le plan**, exécutées par le helper, **zéro IPC retour** :
+  c'est la vérification-avant-`submit` **sans** réactivité (réponse au CSRF ci-dessus).
+- **Bornes anti-« processus long » (Fable 5)** : la revendication « chromium jeté » s'érode avec la
+  taille du batch (200 actions = chromium hostile vivant longtemps dans une unité approuvée une
+  fois). **Cap dur d'actions par batch** (petit — ~10–20), **`RuntimeMaxSec`** sur l'unité, et les
+  « résultats bornés » doivent borner l'**agrégat** remonté, pas seulement chaque action.
+
+Une action qui échoue **arrête** le batch (fail-closed) et rend les résultats jusque-là + l'état
+de l'action fautive. `browser.evaluate` reste exclu ; le binding par-objet reste l'invariant.
+
+### Addendum — la FORME du proxy CONNECT : netns partagé + egress cgroup par-unité — *PROPOSÉ (2026-07-22, autonomie de nuit), à ratifier on-target*
+
+Le **code du relais** est livré (PR #180 : `is_internal_ip` anti-SSRF/rebinding, `serve_connection`
+dial-sûr+splice+timeouts, listener + entrée helper `run_proxy`, tous Fable-durcis). Restait la
+**« décision de forme à trancher »** : *où* le proxy tourne pour que `chromium` — dont l'egress est
+plancheté à `IPAddressDeny=any` + `127.66.0.1/32` — puisse l'atteindre, alors que le proxy, lui,
+doit joindre l'Internet. Le paradoxe apparent (mêmes `127.66.0.1`, egress opposés) se résout par un
+fait clé : **le filtrage egress `IPAddressAllow`/`Deny` de systemd est appliqué par eBPF au niveau
+du CGROUP, donc PAR-UNITÉ — pas par netns.** Deux unités peuvent partager un netns et avoir des
+règles egress différentes.
+
+**Forme retenue (V1, la plus simple qui confine) — netns de l'hôte, deux unités, egress cgroup
+divergent :**
+
+1. **Unité `chromium`** (la classe `Browser` d'ADR-019, existante) : `IPAddressDeny=any` +
+   `IPAddressAllow=127.66.0.1/32`. Le cgroup eBPF **jette** tout paquet vers une destination ≠
+   `127.66.0.1` — Internet ET autres services loopback (`127.0.0.1`, `::1`) inclus. `chromium` ne
+   peut donc joindre **que** le proxy, même s'il essaie l'interface réelle directement.
+2. **Unité `proxy`** (`vibed helper proxy`, nouvelle) : egress Internet (pas de `IPAddressDeny=any`,
+   ou allow explicite). Bind `127.66.0.1:8888`. Durcissement ADR-019 par ailleurs (DynamicUser,
+   NNP, seccomp, caps vidées, `RuntimeMaxSec`) ; **pas** de credential, **pas** de FS.
+3. **Les deux dans le netns de l'hôte** (pas de `PrivateNetwork`) : `127.66.0.1` vit sur la loopback
+   de l'hôte (tout `127/8` route vers `lo` sans `ip addr add`), donc `chromium` l'atteint et le
+   proxy y écoute. Le proxy a l'interface réelle pour son egress Internet.
+
+**Pourquoi c'est sûr** : le confinement de `chromium` ne dépend **pas** du netns mais de son cgroup
+egress (`127.66.0.1/32` seul) — un `chromium` compromis ne peut ni sortir sur Internet ni scanner
+les services loopback de l'hôte. Le proxy est le **seul** gate domaine (le lint `navigate` de vibed
+n'est qu'un lint) ; il applique `[rule.domains]` par requête et refuse toute IP interne résolue
+(anti-rebinding, `is_internal_ip`). Résidu accepté en V1 : **tout process de l'hôte** peut se
+connecter à `127.66.0.1:8888` — mais n'obtient que le **même** tunneling gouverné (deny-par-défaut
+vers les domaines approuvés), aucune élévation. Fermé en V2 ci-dessous.
+
+**Orchestration (dans le dispatch `browser.run`, mcp.rs, après gouvernance) :**
+
+1. Spawn l'unité `proxy`, config `{ "bind": "127.66.0.1:8888", "allowed": [<domaines navigate
+   approuvés du batch> ] }` **écrite sur son stdin puis pipe FERMÉ** (le helper lit jusqu'à EOF —
+   ne pas fermer = deadlock de liveness ; même contrat que `deploy`). ⚠️ Ce spawn n'est **PAS**
+   `spawn_transient` (qui attend la sortie + capture stdout comme résultat) : le proxy tourne
+   jusqu'au teardown. Nouveau mécanisme **spawn-and-hold** : `systemd-run --unit=<nom>` nommé (pas
+   auto-collect), garder le nom, `systemctl stop` au teardown.
+2. Spawn l'unité `chromium` (`run_browser`, existant) qui pilote le batch et **rend** son résultat
+   (via `spawn_transient`, qui attend).
+3. **Teardown** : `systemctl stop` de l'unité proxy (et cleanup du profil éphémère). `try`/finally :
+   le proxy est stoppé **même si** le batch échoue.
+
+**Profil éphémère écrivable** (bloqueur partagé avec le dispatch #179) : la classe `Browser` doit
+fournir un `--user-data-dir` **écrivable**. `RuntimeDirectory=vibeos-browser/<id>` (tmpfs sous
+`/run`, mode 0700, nettoyé à l'arrêt de l'unité) — écrivable par le `DynamicUser`, éphémère et sans
+credential par construction. `run_browser` reçoit ce chemin dans son `BrowserRequest.profile_dir`.
+
+**V2 — durcissement (évolution, pas V1)** : netns **dédié** (pas l'hôte) pour la paire
+chromium+proxy, avec un `veth`/`slirp4netns` pour l'egress Internet du seul proxy. Ferme le résidu
+« un process hôte joint le proxy » et isole totalement. Coût : plomberie netns/veth + NAT, à peser
+quand la surface le justifie.
+
+**À VALIDER ON-TARGET (Micka)** — c'est ici que le test systemd/netns est décisif, off-target étant
+impossible : (a) le filtrage egress cgroup `IPAddressAllow=127.66.0.1/32` **jette bien** l'egress
+Internet ET loopback de `chromium` tout en laissant passer `127.66.0.1` (loopback) ; (b) le bind
+`127.66.0.1` sur `lo` de l'hôte depuis l'unité proxy durcie fonctionne ; (c) `RuntimeDirectory`
+donne un profil écrivable sous le durcissement `Browser` ; (d) le spawn-and-hold + `systemctl stop`
+au teardown ne laisse pas d'unité orpheline. Une fois ratifié, le wiring spawn dans `mcp.rs` +
+`sandbox.rs` est un incrément mécanique.
+
 ## ADR-021 — `deploy.*` gouverné : mettre en production sans jamais donner le token à l'agent — *proposé (2026-07-19, autonomie week-end), à trancher*
 
 **Statut** : **PROPOSÉ**, non tranché. Aucun code écrit. C'est le design concret de la capacité que la demande initiale nomme « le mettre en production » et qu'**ADR-020** a délibérément reportée (« brique gouvernée future »). Il **dépend de deux décisions de Micka** : (a) le **modèle d'allowlist de cibles** ci-dessous ; (b) la décision sur **ADR-019** (le helper-process), dont l'isolation des credentials hérite **entièrement** — sans ADR-019, `deploy.apply` ne se construit pas.
@@ -1430,6 +1611,418 @@ Aujourd'hui `apply_rule` réduit **tout ≥ T2** à `RequireApproval` (`policy.r
 - Le **provider** reste un tiers de confiance (Fly/Vercel compromis → l'artefact approuvé part). Hors périmètre.
 - Une **seule** approbation autorise un `apply` dont le coût est non borné (un deploy peut lever beaucoup de machines) — mais c'est du contenu approuvé par l'humain. Le grant one-shot (consommé atomiquement au démarrage, `mcp.rs`) ferme bien « approuve une fois, boucle » : un `apply` identique re-rencontre `RequireApproval`.
 - L'approbation suppose que l'opérateur **sait lire** ce qu'il approuve (le digest lié à SON build) — garde-fou ultime humain, par conception.
+
+## ADR-023 — `policy.capabilities` (T0) : un manifeste de capacités DÉRIVÉ de la politique — *décidé & livré (idéation Fable 5, symbiose IA-citoyenne)*
+
+**Statut** : **DÉCIDÉ & livré**. Première brique de l'idéation « IA citoyenne » : la
+moitié *efficacité* du citoyen. (ADR-018 est resté un numéro sauté ; on continue à
+023 pour ne pas rouvrir d'ambiguïté.)
+
+### Contexte
+
+Aujourd'hui un agent découvre ses limites **par le refus** : il tente un outil, la
+politique répond `deny`/`require_approval`, il ré-essaie. C'est coûteux (tours,
+tokens, latence) et frustrant pour une IA qui *vit* dans l'OS. Un vrai citoyen doit
+pouvoir **lire la carte** de ce qu'il a le droit de faire, pour planifier dans la
+réalité.
+
+### Décision
+
+Un outil **`policy.capabilities` (T0, lecture seule, sans argument)** qui rend la
+**politique chargée** en un manifeste JSON : par règle, ses `tools`, son `tier`, son
+`action`, son mode d'`approval`, sa `base_decision` (hors contexte) et ses
+contraintes de cibles (`paths`/`services`/`domains` allowlists, `deploy` targets).
+
+**Ce qui rend ça sûr, par conception :**
+- **Dérivé, pas dupliqué** : le rendu (dans l'outil `tools/policy_tool.rs`, la
+  présentation) lit les **mêmes** règles que `PolicyEngine::evaluate` via un
+  accesseur `rules()` ; le moteur reste la source unique, donc le manifeste **ne
+  peut pas sur-promettre**.
+- **Indicatif, pas contractuel** : le champ s'appelle `base_decision`, pas
+  `decision`. La décision **fait foi via `evaluate` à l'appel** (premier-match,
+  plancher de tier, prédicat `[rule.domains]`, verdict `[rule.deploy]`, contraintes
+  de contexte). Un manifeste « faux » (par ex. après un rechargement de politique)
+  ne peut donc rien débloquer — l'enforcement reste à l'exécution.
+- **N'accorde rien** : la politique décrit les **propres bornes** de l'agent ;
+  les lui montrer ne lui donne aucun pouvoir qu'il n'a pas. Les allow-lists /
+  deny-lists exposées sont des frontières qu'il ne peut pas franchir de toute façon.
+- **Aucune fuite NOUVELLE** (revue Fable 5) : les fichiers de politique sont déjà
+  lisibles par l'agent — `fs.read /etc/vibeos/policy.d/**` est T0-allow, seul l'écrit
+  y est interdit. Le manifeste n'expose donc **rien** qu'un unique `fs.read` ne
+  donnerait déjà (ids, globs, deny-lists, paires deploy — tout est aussi dans le
+  dépôt public). L'omission du champ `reason` (notes humaines) est de la **propreté**
+  de la vue de commodité, **pas une frontière de sécurité** : si un jour on veut que
+  le manifeste soit la vue *sanctionnée unique*, il faudra bloquer la lecture de
+  `policy.d/**` (décision séparée). La `note` du manifeste dit aussi qu'une denylist
+  **intégrée au code** (+ confinement home, rate-limit) s'applique EN PLUS.
+
+### Conséquences
+
+- L'agent planifie sans tâtonner : moins de refus, moins de tokens, moins de
+  latence — sans élargir d'un iota sa surface de pouvoir.
+- Fondation pour la suite de l'idéation : le **manifeste de capacités** est aussi
+  l'entrée du « diff de capacités » qu'une future `os.propose` présentera à
+  l'humain (approbation sur preuves), et la surface que la **teinte de session**
+  restreindra.
+- Résiduel accepté : `base_decision` est une simplification (elle n'exécute pas
+  `evaluate`) ; c'est assumé et **documenté dans le manifeste lui-même** (`note`).
+
+---
+
+## ADR-025 — Réglage noyau pour charges IA : `sysctl.d` + zram zstd livrés dans l'image — *décidé & livré (session Fable 5, perf couche basse)*
+
+**Statut** : **DÉCIDÉ & livré**. Première configuration noyau custom du dépôt —
+jusqu'ici l'image ne livrait **aucun** `sysctl.d`. (ADR-024 est réservée par
+`os.propose`, ADR-018 reste un numéro sauté — on continue à 025.)
+
+### Contexte
+
+VibeOS est un OS **pour** charges IA : inférence locale (ollama/llama.cpp,
+modèles 7B-13B mmap-és sur 16 Go de référence), téléchargements multi-Go
+(modèles, images OCI), agents qui **surveillent** des arbres de fichiers
+(Claude Code, éditeurs, HUD). Le noyau Fedora générique est réglé pour un
+poste générique. La couche la plus basse que ce dépôt contrôle **sans**
+préempter les chantiers actés est le réglage des tunables à l'exécution :
+
+- la **config kernel dédiée** (compilation) est un chantier **Phase 7+**
+  (ROADMAP §9, axe 2) — cette ADR n'y touche pas, le noyau reste celui de
+  Fedora, signé Fedora ;
+- la **cmdline** sera scellée dans l'**UKI signée** (Phase 4) — cette ADR n'y
+  ajoute **rien** (pas de `vibeos.*=`, pas de paramètre de boot) pour ne pas
+  préempter cette chaîne ni la décision de séquencement de Micka ;
+- le canal choisi — fichiers sous `/usr/lib` cuits dans l'image — est
+  atomique, rollbackable avec l'image (ADR-001) et surchargeable par l'admin
+  via `/etc` (cascade standard `sysctl.d(5)` / `zram-generator.conf(5)`).
+
+### Décision
+
+Deux fichiers de configuration, **zéro binaire, zéro démon** (doctrine
+outils-passifs d'ADR-020 respectée), livrés par le `COPY os/rootfs/` :
+
+1. **`os/rootfs/usr/lib/sysctl.d/50-vibeos-ai.conf`** — chaque valeur y est
+   commentée avec sa source primaire :
+   - `vm.page-cluster=0`, `vm.swappiness=180`, `vm.watermark_boost_factor=0`,
+     `vm.watermark_scale_factor=125` : le jeu cohérent documenté pour un
+     système dont **tout le swap est zram** (Pop!_OS `default-settings`
+     PR #163, Arch Wiki « Zram », noyau `admin-guide/sysctl/vm.rst` — qui
+     autorise explicitement swappiness > 100 pour un swap en mémoire).
+     Le kickstart ne crée **aucune** partition swap (`installer/vibeos.ks`,
+     racine btrfs) : la condition d'application est structurelle, et le
+     garde-fou (« si un swap disque apparaît, redescendre ≤ 100 ») est écrit
+     dans le fichier même.
+   - `vm.dirty_background_bytes=128 Mio`, `vm.dirty_bytes=256 Mio` : bornes
+     **absolues** de writeback (valeurs Pop!_OS ; LWN « The pernicious
+     USB-stick stall ») — un pull ollama multi-Go ne fige plus le bureau à
+     chaque synchronisation de ~3,2 Go de pages sales (20 % de 16 Go).
+   - `fs.inotify.max_user_instances=1024` : le goulot réel des agents
+     observateurs (128 **par uid**, tous processus confondus) ;
+     `max_user_watches` est déjà auto-dimensionné (noyau ≥ 5.11) — pas touché.
+   - `net.ipv4.tcp_congestion_control=bbr` : débit tenu sur les pulls
+     multi-Go à fort BDP/pertes ; `CONFIG_TCP_CONG_BBR=m` vérifié sur le
+     kernel f44, **autoload** de `tcp_bbr` par l'écriture sysctl vérifié dans
+     `net/ipv4/tcp_cong.c` (`request_module`), ordre
+     `After=systemd-modules-load.service` vérifié dans systemd — donc pas de
+     `modules-load.d` redondant. `fq_codel` (défaut systemd) conservé : le
+     pacing TCP interne (noyau ≥ 4.13) a levé l'exigence de `fq`.
+2. **`os/rootfs/usr/lib/systemd/zram-generator.conf.d/50-vibeos.conf`** —
+   `compression-algorithm = zstd` **en drop-in** : la fusion par option est
+   documentée par le man upstream (`zram-generator.conf(5)`), le
+   `zram-size = min(ram, 8192)` de Fedora est conservé, et le fichier vendor
+   `zram-generator.conf` de la base n'est **jamais** écrasé (le piège du
+   COPY-clobber, précédent kdeglobals du Containerfile). zstd ≈ 3,7:1 contre
+   ≈ 2,7:1 pour le lzo-rle par défaut du kernel f44 : sur 16 Go, la capacité
+   effective prime.
+
+**Ce qui est délibérément ABSENT** (cargo cult vérifié inutile sur f44) :
+`vm.max_map_count` (déjà 1048576 depuis F39, systemd `10-map-count.conf`),
+`fs.file-max` (déjà `LONG_MAX` depuis systemd 240), `net.core.default_qdisc`
+(le `fq_codel` de systemd convient à BBR).
+
+**Preuve d'application** : invariant n°18 du selfcheck (`kernel-tuning`) —
+sonde read-only sur deux sentinelles (`vm.page-cluster=0` prouve que
+systemd-sysctl a appliqué le fichier ; `tcp_congestion_control=bbr` prouve
+l'autoload du module, l'hypothèse la plus risquée). Fichier absent (image
+antérieure) = SKIP, jamais FAIL. La **validation sur cible reste
+machine-gated** : aucune de ces valeurs n'a encore été mesurée sur la machine
+de référence (docs/BOOT-VALIDATION.md).
+
+### Alternatives considérées
+
+- **Ne rien faire avant la Phase 7+** : cohérent mais perdant — le réglage de
+  tunables est orthogonal à la compilation d'un noyau custom, réversible par
+  retrait d'un fichier, et le bénéfice (bureau qui ne fige pas pendant un
+  pull, agents qui n'épuisent pas inotify) est immédiat.
+- **`tuned` / profils dynamiques** : un démon de plus dans l'image, contraire
+  à la doctrine outils-passifs (ADR-020), et redondant avec
+  power-profiles-daemon déjà présent (héritage Kinoite).
+- **Paramètres de cmdline kernel** : rejeté — la cmdline appartient au
+  chantier UKI (Phase 4) ; rien ici ne doit y préjuger.
+- **zstd via remplacement du fichier vendor zram** : rejeté — COPY-clobber
+  d'un fichier appartenant à un RPM de la base (`rpm -Va` le signalerait),
+  exactement ce que la garde kdeglobals du Containerfile existe pour empêcher.
+
+### Conséquences
+
+- Le comportement mémoire/IO/réseau de l'image est **réglé pour sa charge
+  déclarée** (IA locale + agents), documenté valeur par valeur, réversible et
+  surchargeable par l'admin sans toucher `/usr`.
+- Résiduel accepté : **BBRv1** peut être agressif envers cubic sur des liens
+  saturés à pertes (poste client — impact assumé) ; `swappiness=180` est
+  **conditionné** à l'absence de swap disque (garde-fou écrit dans le
+  fichier) ; les valeurs sont **sourcées mais non mesurées sur cible** — la
+  mesure est un critère de la validation de boot (machine-gated), et tout
+  ajustement ultérieur passera par un diff d'une ligne dans le même fichier.
+- Le selfcheck passe de 17 à 18 invariants (`kernel-tuning`).
+
+---
+
+## ADR-026 — `agent.activity` (T0) : le citoyen relit ses propres actes — *décidé & livré (session Fable 5, symbiose IA-citoyenne)*
+
+**Statut** : **DÉCIDÉ & livré**. Deuxième brique de l'idéation « IA citoyenne »
+après ADR-023 : là où `policy.capabilities` donne la **carte statique** des droits
+et `agent.thinking` la **biographie des pensées**, il manquait la **biographie des
+actes**. (ADR-024 reste réservée par `os.propose` ; on continue à 026.)
+
+### Contexte
+
+Un citoyen se souvient de ce qu'il a fait. Aujourd'hui l'agent ne le peut pas :
+`agents.list` dérive un **roster par pid** de la trace d'audit mais **exclut
+délibérément le pid appelant** (« le HUD ne se liste pas »), et la trace elle-même
+est root-only + sur la denylist intégrée — un agent ne peut donc **pas** relire
+sa propre séquence d'appels gouvernés. Conséquence concrète : un agent qui reprend
+une session ne sait pas ce qu'il vient de tenter, et surtout **ne revoit pas ses
+refus** (`deny`/`require_approval`) — précisément l'information qui lui apprend, par
+l'expérience, où sont les frontières que `policy.capabilities` ne décrit qu'en
+théorie.
+
+### Décision
+
+Un outil **`agent.activity` (T0, lecture seule)** qui rend les **propres appels
+récents de l'appelant**, du plus récent au plus ancien, dérivés de la trace
+d'audit : par ligne `{ ts_unix, when, tool, target, decision, outcome, pid }`.
+Arguments optionnels `window_seconds` (défaut 3600, max 3600) et `limit`
+(défaut/max 200) ; sortie bornée avec `total_in_window`/`truncated`.
+
+**Ce qui rend ça sûr, par conception :**
+- **Confiné par uid, comme `agents.list`** : filtré sur le `caller_uid`
+  (SO_PEERCRED, infalsifiable) ; un appelant sans uid identifié voit **rien**
+  (fail-closed). Jamais l'activité d'un autre utilisateur.
+- **Aucune fuite NOUVELLE** : `agents.list` expose déjà, pour l'uid appelant, les
+  mêmes champs sous-jacents (outil, cible non-secrète, tier) dérivés de la même
+  trace ; `agent.activity` n'ajoute que la **vue chronologique de SES propres
+  pids** — que `agents.list` excluait. La trace d'audit reste root-only et sur la
+  denylist (`fs.read` ne la lit pas). Même raisonnement qu'ADR-023.
+- **Inclut les refus, par design** : un `deny`/`require_approval` que l'agent a
+  provoqué est de l'information sur **ses** frontières, pas une frontière en soi —
+  la montrer ne débloque rien (l'enforcement reste à l'exécution).
+- **Anti-DoS** : passe par le pipeline normal (rate-limiter par uid d'abord, appel
+  audité) ; fenêtre = queue d'audit bornée (réutilise le cache incrémental
+  append-only), nombre de lignes plafonné.
+
+### Alternatives considérées
+
+- **Lever l'exclusion du self dans `agents.list`** : rejeté — `agents.list` est un
+  *roster* (agrégé par pid, pour le HUD) ; y mêler la vue chronologique du self
+  brouillerait deux usages distincts et changerait un contrat déjà consommé par le
+  client HUD.
+- **Laisser l'agent lire la trace d'audit** : exclu — la trace est root-only,
+  chaînée, sur la denylist ; l'ouvrir en lecture rouvrirait la surface que tout le
+  modèle protège. `agent.activity` rend une **vue dérivée, confinée, bornée**, pas
+  le fichier.
+- **Ne rien faire** : le citoyen reste amnésique de ses actes ; il redécouvre ses
+  refus par tâtonnement à chaque reprise — le coût exact qu'ADR-023 voulait supprimer.
+
+### Conséquences
+
+- Le citoyen dispose des **trois vues de soi** : ce qu'il *peut* faire
+  (`policy.capabilities`), ce qu'il *pense* (`agent.thinking`), ce qu'il *a fait*
+  (`agent.activity`) — sans élargir d'un iota sa surface de pouvoir.
+- Fondation pour la suite : la vue des refus est aussi ce sur quoi une future
+  boucle d'apprentissage (ou la **teinte de session**) s'appuiera pour proposer un
+  ajustement à l'humain.
+- La surface d'outils passe de 18 à 19 (T0). Règle de politique : ajouté à la règle
+  `agent-observability` (T0 allow, confiné par uid) ; le test d'intégration qui
+  charge la vraie politique le vérifie.
+
+---
+
+## ADR-027 — Mode autonome / ouvert : une clé humaine hors-bande, un noyau irréductible — *décidé & livré (fondation ; sur-couches à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** Le *mécanisme* du mode ouvert est livré et testé ; les capacités qu'il porte (auto-planification par crons/battements de cœur, usage d'applications, auto-modification de l'image) sont conçues ci-dessous mais restent des incréments suivants. Demande de Micka : *« un mode autonome de l'IA dans l'OS avec un panneau affichant danger — l'IA prend des décisions seule, peut s'ajouter des crons/battements de cœur, modifier tout l'OS, un mode ouvert 100 % autorisé qui déverrouille les accès pour qu'elle s'auto-améliore, télécharge/ouvre/utilise des apps comme un humain. »*
+
+### Contexte
+
+Tout VibeOS repose sur l'inverse : default-deny, plancher d'approbation humaine T2/T3, un agent qui ne peut **jamais** approuver sa propre escalade (invariant n°1, `docs/ARCHITECTURE.md` §8). Le mode ouvert est la **relaxation délibérée et bornée** de ce plancher — « l'IA agit seule sur le système sans demander à chaque geste » — sans jeter ce qui rend la relaxation *réversible et traçable*. Deux réalités cadrent d'emblée ce qui est possible :
+
+- **La racine est immuable** (bootc/OSTree, `/usr` en lecture seule). « Modifier tout l'OS » à chaud est **physiquement impossible** ; l'auto-modification réelle est le chemin `os.propose` → analyse au build → **nouvelle image** signée → reboot atomique (ADR-024, en attente de ratification). Le mode ouvert ne change pas cette physique ; il est la *fondation gouvernée* sur laquelle ce chemin s'assoira.
+- **L'auto-déverrouillage briserait tout.** Un mode que l'IA active elle-même = une IA qui entre dans son propre god-mode. C'est le seul principe sans lequel la sécurité de l'OS n'a plus aucun sens.
+
+### Décision
+
+Un **mode d'exploitation** à deux états, matérialisé par un enregistrement root-only (`/var/lib/vibeos/mode.json`, sur la denylist d'ÉCRITURE intégrée — `fs.write` ne peut jamais le forger) :
+
+- **`governed`** (défaut) : le plancher T2/T3 exige un grant humain à usage unique (inchangé).
+- **`open`** : un `RequireApproval` (T2/T3) est **auto-satisfait** — l'agent installe des paquets, redémarre des services, écrit des fichiers, déploie, lance des outils, **sans approbation par action**. C'est ce qui transforme « un assistant qui doit demander » en « un opérateur autonome », pour une fenêtre bornée.
+
+**Le noyau irréductible — ce que le mode ouvert ne fait PAS, par construction, pour qu'« ouvert » ne devienne jamais « aller sans retour » :**
+
+1. **Le déverrouillage est une action HUMAINE hors-bande.** Seul `vibectl mode open` (root, présent physiquement) écrit l'enregistrement `open` ; c'est le **même `require_root`** que `vibectl approve`, car c'est bien une approbation en bloc du plancher. L'agent peut *demander* le mode, jamais se l'accorder.
+2. **L'audit reste actif.** Chaque appel est audité ; les appels en mode ouvert portent l'issue distincte **`started_open_mode`/`ok_open_mode`** (jamais confondus avec une approbation humaine `ok_approved(by_uid=N)` ni un `ok` ordinaire). L'autonomie n'est pas l'absence de traces.
+3. **Le kill-switch reste à l'humain.** `vibectl mode governed` revient au défaut **immédiatement**, et le mode **auto-expire** après sa fenêtre bornée (vérifié à chaque évaluation — pas de tâche de fond, aucun moyen de « rester coincé »). Plafond dur : `OPEN_MAX_SECS = 24 h` (une durée aberrante est *clampée*, pas honorée).
+4. **Le mode ouvert ne lève que le PLANCHER de tier.** Un `deny` explicite, le default-deny absolu (outil inconnu) et la **denylist intégrée** (journal d'audit, store d'approbation, CE fichier de mode, `policy.d/`, identifiants) sont décidés **AVANT** le tier et restent en vigueur. Le mode ouvert auto-accorde l'approbation ; il ne dissout pas les gardes qui préservent la trace, le kill-switch et les secrets — sinon l'agent pourrait effacer ses traces ou verrouiller l'opérateur dehors, exactement l'irréversibilité que ce design interdit.
+
+**Panneau danger (livré, côté données) :** `os.status` (T0) porte un bloc `mode { mode, danger, remaining_secs, set_by_uid, reason }` — le HUD le sonde déjà, donc « MODE AUTONOME / OUVERT ACTIF » s'affiche en direct sans nouvel outil ; le selfcheck ajoute l'invariant `operating-mode` (open = PASS mais signalé fort). Le bandeau visuel Plasma/Quickshell est la couche de présentation (incrément suivant, comme le dialogue d'approbation).
+
+**Fail-safe :** l'état puissant exige un enregistrement `open` valide et non expiré. Fichier absent, illisible, malformé, autre valeur, ou expiré ⇒ `governed`. Le défaut sûr gagne dans **tous** les cas incertains.
+
+### Sur-couches conçues ici, livrées ensuite (chacune s'assoit sur ce mode + son audit)
+
+- **Auto-planification (crons / battements de cœur)** : un outil gouverné laissant l'agent, *en mode ouvert*, poser une unité `systemd` timer/`cron` **sous un namespace réservé** (`vibeos-agent-*`), bornée, auditée, et **révoquée au retour en `governed`** (sinon un timer survivrait au kill-switch — la trappe à éviter absolument). T2 minimum.
+- **Auto-amélioration (modifier l'OS)** : `os.propose` (ADR-024) → analyse d'image au build → nouvelle image signée. Le mode ouvert auto-approuve la *proposition*, jamais l'application directe sur la racine immuable.
+- **Usage d'applications comme un humain** : télécharger/ouvrir/piloter des apps — bâti sur le substrat navigateur gouverné (`browser.*`, ADR-022) et une future automatisation du bureau (Wayland), chaque action tiérée et auditée.
+
+### Alternatives considérées
+
+- **« 100 % déverrouiller, denylist comprise »** : rejeté — laisser l'agent réécrire le journal d'audit et le fichier de mode, c'est lui donner de quoi effacer ses traces et neutraliser le kill-switch : « mode ouvert » deviendrait « machine perdue sans retour ». Le noyau irréductible est ce qui garde le mode *réversible*.
+- **Auto-déverrouillage par l'IA** : rejeté — viole l'invariant n°1 (pas d'auto-escalade). Une action humaine unique suffit ; ensuite l'IA est autonome pour toute la fenêtre.
+- **Pas de plafond / pas d'expiration** : rejeté — un mode puissant sans borne temporelle finit par rester allumé par oubli. Fenêtre bornée + auto-expiration + kill-switch.
+
+### Conséquences
+
+- L'IA **peut** fonctionner en autonomie réelle (T2/T3 sans demander) quand l'humain tourne la clé — ce qui était demandé — tout en gardant l'audit, le kill-switch et le panneau danger que l'humain a demandés *aussi*.
+- Le selfcheck passe de 18 à 19 invariants (`operating-mode`). Aucun nouvel **outil** MCP (la surface reste 19) : le mode change *comment* un `RequireApproval` se résout, il n'ajoute pas d'outil ; `os.status` gagne un champ.
+- Résiduel assumé : le bandeau visuel, l'auto-planification révocable, l'usage d'apps et l'auto-modification via `os.propose` sont conçus ici mais **non encore livrés** ; l'effet réel du mode sur cible reste **machine-gated** (aucune ISO bootée).
+
+---
+
+## ADR-028 — Compréhension de l'humain & anticipation : un modèle DÉRIVÉ, transparent, possédé par l'utilisateur — *décidé & livré (fondation ; sur-couches à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** L'outil `user.model` (T0) est livré et testé ; l'apprentissage plus riche (signal opt-in, embeddings locaux) est conçu ici, à venir. Demande de Micka : *« l'agent apprend à comprendre l'utilisation, comment il travaille, ce qu'il fait ; il analyse l'humain de fond en comble pour mieux le servir ; il prédit/anticipe les actions de l'humain — une vraie symbiose machine / IA / humain. »*
+
+### Contexte
+
+C'est le prolongement direct de l'idéation « symbiose IA-citoyenne » (ADR-023, agent.thinking, ADR-026) : après *ce que l'agent peut faire*, *pense* et *a fait*, vient *ce que la machine comprend de l'humain*. Deux tensions cadrent la conception :
+
+- **Vie privée.** « Analyser l'humain de fond en comble » touche au plus sensible. Or l'invariant du projet est que **la mémoire appartient à l'utilisateur et à personne d'autre**, et que l'OS est *security-first*. Un modèle de l'humain ne peut donc être ni caché, ni exfiltré, ni fondé sur une surveillance nouvelle.
+- **Honnêteté.** « Prédire/anticiper » ne doit pas survendre : pas de prédicteur entraîné boîte-noire présenté comme de la voyance.
+
+### Décision
+
+Un outil **`user.model` (T0, lecture seule)** qui rend un **modèle DÉRIVÉ et TRANSPARENT** de « comment vous travaillez », **confiné à l'uid appelant** (SO_PEERCRED, comme `agents.list`/`agent.activity` ; appelant non identifié ⇒ rien, fail-closed). Il est **folded** à partir de données **que VibeOS détient déjà sous gouvernance**, jamais d'une capture nouvelle :
+
+- **`preferences`** : le fold de la mémoire `user/` (préférences explicites).
+- **`patterns`** : vos outils/cibles récurrents, dérivés de la **trace d'audit confinée à votre uid** (fréquence + récence + cible dominante).
+- **`friction`** : les actions qui ont dû être approuvées ou ont été refusées — candidates à pré-arranger (l'inverse des patterns : un signal, de sens opposé).
+- **`rhythm`** : histogramme d'activité par **heure UTC** (buckets grossiers, respectueux de la vie privée) + heures les plus actives.
+- **`observed`** : les notes de journal typées récentes que l'agent a écrites sur vous (`observation`/`decision`/`preference`), plafonnées, **clés seulement** (pas de dump de payload).
+- **`anticipations`** : vos prochaines actions gouvernées les plus probables, classées par une **heuristique déterministe fréquence×récence**, **chacune avec sa raison** (« fait N fois, vu il y a Xs ») — jamais un score opaque.
+
+**Ce qui rend ça sûr et honnête, par conception :**
+- **Aucune fuite NOUVELLE** : les mêmes données sous-jacentes sont déjà accessibles à l'agent pour son propre uid via `memory.query` + `agent.activity` ; `user.model` ne fait que les **agréger** (même raisonnement qu'ADR-023/ADR-026). La trace d'audit reste root-only et sur la denylist.
+- **Aucune surveillance nouvelle** : le modèle ne lit **jamais** les frappes clavier ni l'historique shell brut de l'humain (non captés, et hors éthique du projet). La symbiose est bâtie sur du signal **gouverné et transparent**, pas sur de l'espionnage.
+- **Local, possédé, effaçable** : le store est `/var/lib/vibeos/memory/` (« appartient à son utilisateur »). Chaque champ est inspectable ; rien de caché. Cœur de dérivation **pur** (`derive_user_model`) et déterministe — testable et auditable.
+- **Anticipation ≠ prédiction entraînée** : le champ le dit lui-même (`note`), et chaque anticipation porte sa raison.
+
+### Alternatives considérées
+
+- **Capturer les frappes / l'historique shell de l'humain** : rejeté — surveillance nouvelle, contraire au *security-first* et à « la mémoire appartient à l'utilisateur » ; et un shell natif échappe de toute façon à `vibed` (invariant n°1). La symbiose se construit sur du signal gouverné.
+- **Un prédicteur entraîné (ML) côté image** : rejeté pour la fondation — opaque, non déterministe, non testable simplement, et il survendrait « anticiper ». L'heuristique explicable vient d'abord ; l'apprentissage local (embeddings via ollama, `knowledge/embeddings/` déjà réservé) est une sur-couche opt-in (Phase 3).
+- **Profil caché optimisé pour l'agent seul** : rejeté — la transparence pour l'humain est non négociable ici ; « l'IA vous comprend » uniquement via ce que vous pouvez lire.
+
+### Conséquences
+
+- L'agent **planifie mieux** (moins de tâtonnement, il connaît vos préférences, vos patterns et vos frictions) et peut **anticiper** vos prochaines actions gouvernées — sans élargir d'un iota sa surface de pouvoir ni introduire de surveillance.
+- La surface d'outils passe de 19 à **20** (T0). Règle de politique `user-model` (T0 allow, confiné uid) ; le test d'intégration qui charge la vraie politique le vérifie.
+- Fondation pour la suite : signal **opt-in** plus riche (préférences observées dans les sessions Claude Code), **embeddings locaux** pour la similarité de tâches, et branchement du modèle sur le **mode ouvert** (ADR-027) et `os.propose` (ADR-024) pour une IA qui propose *à bon escient*. Toute capture nouvelle sera **opt-in et transparente**.
+- Résiduel assumé : l'anticipation est heuristique (pas un prédicteur) ; le modèle ne voit que le gouverné (pas le shell natif) ; l'effet réel sur cible reste **machine-gated**.
+
+## ADR-029 — Genesis vivant : le citoyen IA choisit son caractère à la naissance — *décidé & livré (naissance déterministe ; boucle vivante à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** `memory/genesis.sh` fait **naître un caractère** (`personality.toml`) au premier boot, imprime un **éveil** sur la console, et l'expose en lecture (scope `personality` de `memory.query`). La **boucle d'adaptation vivante** et la **cérémonie graphique** du HUD sont conçues ici, à venir. Demande de Micka : *« Améliore Genesis, plus futuriste, une vraie IA qu'on voit naître ; avec les interactions sa personnalité se personnalise ; elle choisit elle-même sa personnalité à chaque installation, en fonction de l'humain, pour une vraie symbiose. »*
+
+### Contexte
+
+Genesis (le premier boot, [MEMORY.md §4.1](MEMORY.md)) écrivait jusqu'ici le **corps** de la machine (`identity.toml`, `hardware.json`) et le squelette mémoire. Il manquait **l'âme** : VibeOS présente l'IA comme un *citoyen* de l'OS (ADR-023, ADR-026), or un citoyen a un caractère. Trois tensions cadrent la conception :
+
+- **Unicité authentique.** « Elle choisit sa personnalité à chaque installation » doit être **réel**, pas un tirage cosmétique identique partout — mais aussi **reproductible et testable**, pas un chaos aléatoire non déterministe (le projet interdit `Math.random`/horloge dans le code déterministe ; ici, en bash, même exigence morale).
+- **Hors-ligne.** Genesis tourne au premier boot, potentiellement sans réseau. Le caractère ne peut dépendre d'aucun appel distant.
+- **Honnêteté.** « En fonction de l'humain » — or à la naissance, `user/` est **vide** (« la machine ne sait encore rien de vous »). On ne peut pas prétendre que le caractère est déjà façonné par un humain que l'IA n'a jamais vu. Et « qu'on voit naître » ne doit pas survendre une cérémonie graphique qui n'existe pas sans ISO bootée.
+
+### Décision
+
+Un fichier **`personality.toml`** (schema 1), **écrit une seule fois par Genesis**, jamais par `memory.append`, lisible via `memory.query` scope **`personality`** — un caractère **inspectable et transparent**, comme tout le reste de la mémoire.
+
+1. **Naissance déterministe (livré).** Le caractère est **dérivé** d'une **ancre stable** (`machine_id`, repli `hostname`) par un hachage **FNV-1a en bash pur** (aucun outil externe, hors-ligne, reproductible). Il porte : un `name` (vivier de noms neutres), un `archetype` (l'axe de trait dominant), six **axes de trait** 0..100 (`curiosity`, `caution` — plancher 50, un citoyen n'est jamais imprudent —, `initiative`, `warmth`, `concision`, `playfulness`), un `tone`, des `[values]` civiques héritées de la charte, et une table `[adaptation]`. Propriétés : **une installation = un caractère unique** (les `machine_id` diffèrent) ; **même machine = même caractère à chaque boot**, mode **amnésique** compris (l'âme est constante, seule la mémoire apprise est effacée).
+
+2. **L'éveil visible (livré).** Genesis imprime sur la console (stderr, comme `log()`) un **bloc futuriste** révélant le citoyen : cadre, nom, archétype, ton, **jauges** de traits, et un manifeste de naissance (« Je nais sur cette machine. Je ne sais rien de vous — encore. Apprenons-nous. »). Purement cosmétique et **gardé** (`birth_ceremony || true`) : il ne peut jamais faire échouer Genesis. Couleur seulement sur un vrai terminal (`-t 2`, `NO_COLOR` absent, `TERM ≠ dumb`).
+
+3. **Naissance → symbiose (contrat livré, boucle à venir).** `[traits]` est un tempérament **de naissance**. La table `[adaptation]` **déclare** quel trait se réajuste à partir de quel champ du signal `user.model` (ADR-028) : `concision ← rhythm+preferences`, `warmth ← friction`, `initiative ← patterns`. C'est le **contrat d'évolution** — comment le caractère se **plie vers l'humain** (« il évolue vers vous ; il ne vous imite pas »). La **boucle de réécriture vivante** (un agent qui replie `user.model` dans le caractère au fil des interactions) est une **sur-couche (Phase 3)**.
+
+**Ce qui rend ça sûr et honnête, par conception :**
+- **Déterministe et testable** : cœur de dérivation pur (même ancre ⇒ même caractère), vérifié par le smoke test Genesis en CI (naissance, plancher de `caution`, déterminisme birth-mis-à-part).
+- **Anti-empoisonnement** : toute valeur de chaîne passe par `toml_escape` (invariant de sécurité déjà en place — `personality.toml` est servi en **texte brut** aux agents, jamais parsé, donc une valeur portant un saut de ligne forgerait des faits ; l'échappeur ferme la porte).
+- **Honnête sur le gating** : la naissance et l'éveil console sont **livrés** ; la cérémonie **graphique** du HUD et la **boucle d'adaptation** sont **machine-gated / Phase 3** et présentées comme telles. On ne prétend pas que l'IA est « déjà » façonnée par l'humain à un instant où elle ne le connaît pas.
+
+### Alternatives considérées
+
+- **Tirer le caractère au hasard (horloge/`$RANDOM`)** : rejeté — non reproductible, non testable, et le caractère changerait à chaque rejeu Genesis après une coupure (deux âmes pour une machine). L'ancre stable donne l'unicité **sans** le chaos.
+- **Interroger l'humain à la naissance pour fixer le caractère** (brancher `agent/genesis_interview.py`) : c'est une **piste distincte et complémentaire** (Phase 3, cf. survol du reste-à-faire) — elle fonde le profil **de l'humain** (`user/`), pas l'âme **de la machine**. Les deux coexistent : la machine naît avec un tempérament, puis apprend l'humain. Ne pas coupler les deux évite de bloquer la naissance sur un TTY.
+- **Un caractère caché, optimisé pour l'agent seul** : rejeté — même principe qu'ADR-028, la transparence pour l'humain est non négociable : « l'IA a un caractère » seulement via ce que vous pouvez lire (`personality.toml`).
+- **Faire modifier tout l'OS à la naissance pour « se personnaliser »** : hors sujet et impossible (racine immuable) — la personnalisation vit dans la mémoire possédée par l'utilisateur, pas dans l'image.
+
+### Conséquences
+
+- Genesis fait naître un **citoyen avec un caractère**, unique par installation, visible dès le premier boot. La surface d'outils **ne bouge pas** (c'est un **scope** de `memory.query`, pas un nouvel outil) : les scopes mémoire passent de 6 à **7** (`personality`).
+- Le HUD et les agents peuvent lire « qui es-tu ? » en un appel (`memory.query` scope `personality`) — fondation pour un HUD qui **incarne** le caractère (ton, accent visuel) et pour la **cérémonie graphique** de naissance (Phase 3, dès qu'une ISO boote).
+- Fondation pour la **symbiose vivante** : la table `[adaptation]` donne le contrat que la future boucle repliera depuis `user.model` (ADR-028) ; le caractère se **plie vers l'humain** sans jamais l'imiter servilement, et sans surveillance nouvelle (il ne consomme que du signal déjà gouverné).
+- Résiduel assumé : la boucle d'adaptation vivante et la cérémonie graphique sont **Phase 3 / machine-gated** ; à la naissance le caractère est un **tempérament**, pas encore un miroir de l'humain (honnête par construction).
+
+---
+
+## ADR-030 — Gestion des tokens & mémoire structurée : compter la consommation, la borner par mode, classer les souvenirs — *décidé & livré (comptage + modes + budget ; classement câblé — lexical ; vecteurs à venir)*
+
+**Statut** : **DÉCIDÉ & livré (fondation).** Le superviseur (`vibectl agent run`) **compte** désormais les tokens réellement consommés (à partir des blocs `usage` du flux `stream-json`), les **borne** par un budget de tokens et par des **modes de consommation** (`frugale`/`équilibrée`/`performance`), et **journalise** la consommation + l'efficacité du cache dans l'événement `autonomous_session` de fin. Côté mémoire, un **classeur de rappel** (`tools/recall.rs`) — récence + importance + pertinence, à la *memory stream* des *Generative Agents* — est **livré, testé et désormais CÂBLÉ** dans `memory.query` (mode `rank: true`, opt-in, scopes `journal`/`knowledge` — voir MEMORY.md §9) ; son moteur **vectoriel** (cosinus de la couche `embeddings`, ADR-028) reste inerte tant que la production des vecteurs n'existe pas. Référence chiffrée : [docs/TOKENS.md](TOKENS.md). Demande de Micka : *« Trouve les meilleures façons de gérer les tokens — combien on consomme selon différents modes — et améliore la mémoire de l'IA sur l'OS : une vraie mémoire bien structurée. »*
+
+### Contexte
+
+Deux manques jumeaux, tous deux au cœur d'un « citoyen IA » qui vit **longtemps** sur la machine :
+
+- **Aucun comptage de tokens.** Le superviseur (ADR-012/013) bornait une session par le **temps** (horloge monotone) et le **nombre d'appels d'outils**, jamais par les **tokens**. Or c'est le token qui coûte — à l'humain (facture) comme au contexte. Le superviseur **tape déjà** chaque ligne `stream-json` (pour capter le raisonnement) : les blocs `usage` y passent, ignorés. « Combien on consomme » n'était pas mesuré, donc pas gérable.
+- **Une mémoire sans classement.** `memory.query` ([MEMORY.md §9](MEMORY.md)) ne sait faire qu'un **filtre lexical sous-chaîne**. Une mémoire qui grossit (journal quotidien, faits) se dégrade ainsi : tout remonter noie le signal, filtrer par sous-chaîne rate le souvenir pertinent mal nommé. Il manquait la brique que toute la littérature agentique partage — un **score de rappel** combinant récence, importance et pertinence.
+
+Trois exigences cadrent la conception, cohérentes avec le reste du projet :
+
+- **Honnêteté sur la mesure.** Le schéma `stream-json` n'est **pas contractuel** (ADR-012) ; un comptage de tokens en dérive hérite du même caveat — c'est un contrôle de **coût**, jamais une frontière de **sécurité** (celle-ci reste le temps mural + l'audit + le rate-limit).
+- **Pas de prix en dur qui périment.** « Combien ça coûte » en dollars change ; le **compte** de tokens, lui, est exact. On journalise le coût **autoritaire** que le CLI rapporte (`total_cost_usd`) quand il existe, et pour le reste on n'exprime le levier du cache qu'en **équivalents-token d'entrée** via les multiplicateurs **structurels** documentés par Anthropic (lecture cache ≈ 0,10× ; écriture cache ≈ 1,25×), pas en devise.
+- **Déterministe et pur pour la mémoire.** Le classeur doit être reproductible et testable hors-ligne (même contrat que `propose.rs`/`embeddings.rs`) : aucune E/S, aucun modèle, aucun réseau dans le cœur de score.
+
+### Décision
+
+**A. Comptage des tokens (pur + câblé).** `supervisor::extract_usage` extrait les quatre compteurs (`input`, `output`, `cache_creation`, `cache_read`) du bloc `usage` **par tour assistant** — chaque tour = un appel d'API, donc les **sommer** donne la consommation réelle du run. Un `TokenLedger` accumule et **dérive les métriques qui rendent la dépense actionnable** : `total_tokens`, `cache_hit_ratio` (fraction de l'entrée servie par le cache — **le** levier), `input_equiv_tokens` (dépense d'entrée en équivalents-token, multiplicateurs structurels) et `cache_savings_tokens` (ce que le cache a économisé). `extract_final_cost` capte le coût **autoritaire** en USD du CLI (`total_cost_usd`, événement `result`, cumulatif : le dernier gagne). Le tout est **câblé** dans le fil lecteur de `agent_run` (accumulation par atomiques partagés) et **résumé** dans l'événement `autonomous_session`/`end`.
+
+**B. Budget de tokens + modes de consommation (câblé).** `Budget` gagne un `max_tokens` optionnel (défaut `None` = illimité, comme le temps et les appels) enforced dans la boucle de poll — un run qui dépasse est tué avec la raison `token_budget`. `ConsumptionMode` (`Frugale`/`Équilibrée`/`Performance`) mappe une **intention humaine** à un `Budget` complet (temps + appels + tokens) et à une **guidance** cache/contexte (docs/TOKENS.md) ; `vibectl agent run --mode frugale` suffit à obtenir un run **borné et sûr** au lieu du défaut illimité, et `--budget`/`--calls`/`--tokens` explicites **surchargent** l'axe correspondant du préréglage.
+
+**C. Classeur de rappel mémoire (pur ; moteur lexical câblé).** `tools/recall.rs` implémente le score *memory stream* (Park et al. 2023) : `score = w_récence·récence + w_importance·importance + w_pertinence·pertinence`. **Récence** = décroissance exponentielle par demi-vie `[0,1]` (horodatage futur clampé, jamais de score > 1). **Importance** = saillance dérivée du **type** d'événement journal (`decision` > `preference` > `observation` > `tool_call`…), **jamais** d'un champ auto-déclaré libre par l'agent (THREAT-MODEL §1 : `source`/`data` non fiables). **Pertinence** = deux moteurs de même échelle `[0,1]` : **lexical** (Jaccard des jetons, hors-ligne, dispo tout de suite) et **vectoriel** (cosinus de l'index `embeddings`, replié `[-1,1]→[0,1]`) — ce qui fait de `recall.rs` le **premier consommateur réel** de la couche `embeddings` restée inerte depuis ADR-028. Tri **stable** (score décroissant puis `id`). C'est la **brique de classement** de `memory.query` : livrée d'abord **pure et testée** (comme `propose.rs`), **puis câblée** dans le mode `rank: true` (opt-in, scopes `journal`/`knowledge`, défaut inchangé). Seul le moteur **vectoriel** reste inerte tant que la production des vecteurs (ollama local) n'existe pas.
+
+**Ce qui rend ça sûr et honnête, par conception :**
+- **Le temps mural reste le plafond dur.** Le budget de tokens est *best-effort* (schéma `stream-json` non contractuel) : un CLI qui sous-rapporte l'`usage` est sous-compté, donc cette échéance peut ne pas se déclencher — l'échéance **temps** (horloge monotone) borne le runtime quoi qu'il arrive. Le comptage borne le **coût/la verbosité**, pas l'enveloppe de sécurité (chaque appel d'outil passe l'audit, le rate-limit et l'approbation indépendamment).
+- **Pas de devise périssable dans le code.** On journalise le coût **que le CLI calcule** (prix toujours à jour), et sinon un relatif **structurel** (équivalents-token), pas une table de prix codée en dur qui mentirait dès le prochain changement tarifaire.
+- **Le classeur ne surprivilégie jamais l'auto-déclaré.** L'importance vient du **type** posé par `vibed`, pas du `source`/`fact` que l'agent (insider non fiable) inscrit : un fait mensonger ne peut pas s'auto-hisser en tête du rappel.
+
+### Alternatives considérées
+
+- **Coder une table de prix (USD/token par modèle) dans `vibed`** : rejeté — elle périme au premier changement tarifaire et afficherait un coût **faux** présenté comme vrai. Le compte de tokens est exact ; le coût autoritaire vient du CLI ; le relatif structurel (cache) ne dépend d'aucun prix.
+- **Sommer l'`usage` de l'événement `result` en plus des tours assistant** : rejeté — `result` porte un `usage` (dernier tour, cumulatif, ou absent selon la version) ; l'additionner **double-compterait**. On ne somme que les tours assistant (un appel d'API chacun) et on ne prend du `result` que le **coût**.
+- **Faire du budget de tokens un plancher de sécurité** : rejeté — le schéma n'est pas contractuel ; en faire une frontière de sécurité serait un faux sentiment de sûreté. Il borne le coût ; la sécurité reste temps + audit + rate-limit + approbation.
+- **Remplacer d'emblée le filtre lexical par le classement** : rejeté — changer le comportement de lecture par défaut est risqué. On a livré la brique **pure et testée** (comme `propose.rs`/`embeddings.rs`), **puis** câblé le classement de façon **additive** (mode `rank: true` opt-in, le chemin par défaut restant intact). La production des vecteurs (ollama local, ADR-028) et le branchement du moteur vectoriel restent les incréments suivants.
+- **Un modèle de résumé/consolidation LLM à chaque session** : hors périmètre ici — la consolidation journal→`knowledge` (MEMORY.md §4.2/§7) reste une tâche `vibed` future ; ce qu'on pose est la **mesure** (tokens) et le **classement** (rappel), fondations dont la consolidation aura besoin.
+
+### Conséquences
+
+- `vibectl agent run` devient **conscient du coût** : chaque session autonome journalise `input`/`output`/`cache_creation`/`cache_read`, le total, le ratio de cache, les équivalents-token et le coût USD autoritaire — « combien on a consommé » est enfin **mesuré**, et bornable (`--tokens`, `--mode`).
+- La **surface d'outils MCP ne bouge pas** : tout est côté superviseur (CLI opérateur) et couche pure. Aucun nouvel outil gouverné, donc aucune nouvelle ligne au catalogue ni au modèle de menace.
+- La mémoire gagne sa **brique de classement** — récence + importance + pertinence, déterministe et testée — prête à faire de `memory.query` un vrai rappel plutôt qu'un `grep`, et à donner enfin un **consommateur** à l'index `embeddings`.
+- Câblage **livré** : `memory.query` mode `rank: true` (opt-in, `journal`/`knowledge`) classe les événements par le score de rappel (moteur lexical) ; et la **consolidation** du savoir (`consolidate.rs`, dédup `(subject, fact)` last-write-wins) est livrée, exposée par `vibectl memory knowledge` et `memory.query fold:true` (scope `knowledge`) — sans jamais élever la confiance (THREAT-MODEL §9). Résiduel assumé : la **production des vecteurs** (ollama local) + le moteur **vectoriel**, la **synthèse sémantique** journal→`knowledge` (dériver de nouveaux faits) et une politique de poids/rétention sont **à venir** ; ce qui est livré est mesuré, borné, additif et testé — honnête sur son gating.
 
 ## ADR-024 — `os.propose` : l'auto-modification comme flux de versions signées réversibles (la north star rendue mécanique) — *proposé (2026-07-20), à trancher*
 

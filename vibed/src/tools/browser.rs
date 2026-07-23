@@ -1,11 +1,15 @@
 //! `browser.*` — navigation web pilotée par l'IA, gouvernée (ADR-017 option C,
 //! ADR-022).
 //!
-//! **Pure et inerte** : cette couche mappe un verbe navigateur + ses arguments vers
-//! une [`BrowserAction`] validée, **agnostique du transport**. Rien ici ne lance
-//! `chromium`, ne parle CDP, ni n'atteint le réseau — le transport CDP
-//! (`run_browser` dans le helper) et le proxy CONNECT sont des incréments ultérieurs,
-//! revus séparément. La gouvernance est EN AMONT : `[rule.domains]` (déjà câblé via
+//! **Agnostique du transport** : cette couche mappe un verbe navigateur + ses arguments
+//! vers une [`BrowserAction`] validée ([`plan_action`]), parse un **batch** d'actions
+//! ([`parse_batch`]) et le **pilote** contre une [`CdpSession`] abstraite ([`run_batch`] :
+//! `attach_page` une fois, exécution en séquence, trois états, fail-closed, agrégat borné).
+//! Elle ne **lance** pas `chromium` (`browser_transport::spawn_chromium`), ne possède pas les
+//! fds/stdin-stdout du helper (le mode-entry `run_browser`, incrément suivant), et n'atteint
+//! pas le réseau — testée de bout en bout avec un `CdpChannel` factice, sans `chromium`. Le
+//! proxy CONNECT et le câblage dispatch sont des incréments ultérieurs. La gouvernance est
+//! EN AMONT dans `vibed` : `[rule.domains]` (déjà câblé via
 //! `derive_domain`/`CallContext.domain`) décide quel hôte `navigate` peut atteindre,
 //! et le plancher de tier (navigate/read/screenshot/click/fill = T1 ; submit = T2 —
 //! ADR-017 décision 2) s'applique avant qu'on arrive ici.
@@ -34,8 +38,9 @@
 // suivants ; jusque-là, cette couche pure n'est pas encore appelée.
 #![allow(dead_code)]
 
+use crate::cdp::{CdpChannel, CdpSession};
 use crate::policy::Tier;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Bornes anti-DoS sur les entrées agent (audit + surface CDP). Généreuses : un
 /// sélecteur CSS ou une valeur de formulaire légitimes restent loin dessous.
@@ -200,10 +205,1213 @@ fn validate_value(val: &str) -> Result<String, String> {
     Ok(val.to_string())
 }
 
+/// L'issue d'une action navigateur — **trois états** (ADR-022 addendum ratifié, Fable 5). Le type
+/// force `submit` à traiter explicitement `Indeterminate` : un POST parti sans réponse ne doit
+/// JAMAIS être `Failed` (sinon double-POST au retry). Les verbes non mutants
+/// (navigate/read/screenshot/click/fill — les click-submitters étant bloqués côté click) ne
+/// produisent que `Completed`/`Failed`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActionOutcome {
+    /// Réussie ; `Value` = résultat JSON **opaque** (contenu de page hostile).
+    Completed(Value),
+    /// Échouée AVANT tout effet distant observable (resolve raté, exception page, refus vibed).
+    Failed(String),
+    /// `submit` uniquement : le `callFunctionOn` du submit a échoué APRÈS émission (flux CDP cassé)
+    /// — le POST a PEUT-ÊTRE tiré. Ni `Completed` (pas de confirmation) ni `Failed` (retry =
+    /// double-POST) : l'appelant NE DOIT PAS ré-exécuter le batch.
+    Indeterminate(String),
+}
+
+#[cfg(test)]
+impl ActionOutcome {
+    /// Test helper : le `Value` d'un `Completed` (panique sinon). Nommé `unwrap` pour que les
+    /// tests existants (`run_action(...).unwrap()`) marchent tels quels après le passage à
+    /// `ActionOutcome`.
+    fn unwrap(self) -> Value {
+        match self {
+            ActionOutcome::Completed(v) => v,
+            other => panic!("attendu Completed, obtenu {other:?}"),
+        }
+    }
+    /// Test helper : le message d'un `Failed` (panique sinon).
+    fn unwrap_err(self) -> String {
+        match self {
+            ActionOutcome::Failed(e) => e,
+            other => panic!("attendu Failed, obtenu {other:?}"),
+        }
+    }
+}
+
+/// Exécute une [`BrowserAction`] et rend son issue à **trois états** ([`ActionOutcome`]). `submit`
+/// (T2, POST mutant) suit un chemin propre ([`run_submit`]) qui peut rendre `Indeterminate` ; les
+/// autres verbes délèguent à [`run_simple_action`] (mappé `Ok → Completed`, `Err → Failed`).
+/// Refuse d'emblée un `page` (sessionId) **vide** — jamais produit par `attach_page`, donne une
+/// erreur vibed claire plutôt qu'un refus chromium cryptique (Fable 5).
+pub(crate) fn run_action<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    action: &BrowserAction,
+    page: &str,
+) -> ActionOutcome {
+    if page.is_empty() {
+        return ActionOutcome::Failed(
+            "browser: run_action sans sessionId de page — refusé".to_string(),
+        );
+    }
+    // click/fill/submit : binding par-objet à TROIS états (effet distant possible — POST d'un
+    // submit, d'un `onclick`/`onchange`). navigate/read/screenshot : sans effet distant via
+    // binding → `Ok`/`Err` simple.
+    match action {
+        BrowserAction::Click { selector } => run_object_action(
+            session,
+            page,
+            "click",
+            selector,
+            CLICK_FN,
+            json!([]),
+            json!({ "clicked": true }),
+        ),
+        BrowserAction::Fill { selector, value } => run_object_action(
+            session,
+            page,
+            "fill",
+            selector,
+            FILL_FN,
+            json!([{ "value": value }]),
+            json!({ "filled": true }),
+        ),
+        BrowserAction::Submit { selector } => run_object_action(
+            session,
+            page,
+            "submit",
+            selector,
+            SUBMIT_FN,
+            json!([]),
+            json!({ "submitted": true }),
+        ),
+        _ => match run_simple_action(session, action, page) {
+            Ok(v) => ActionOutcome::Completed(v),
+            Err(e) => ActionOutcome::Failed(e),
+        },
+    }
+}
+
+/// Exécute un verbe navigateur **sans mutation distante** (navigate/read/screenshot/click/fill)
+/// contre une session CDP et renvoie un résultat JSON **opaque** (le contenu vient d'une page
+/// hostile). `submit` est routé vers [`run_submit`] par [`run_action`] et n'atteint jamais ici.
+///
+/// Verbes SANS sélecteur — `navigate`/`read`/`screenshot` : leurs commandes CDP ne portent
+/// aucune entrée agent interpolée (URL en paramètre, hôte déjà validé ; expressions
+/// `Runtime.evaluate` CONSTANTES). `click`/`fill` : **binding CDP par-objet** ([`resolve_object`]
+/// → [`call_on_object`]) — le sélecteur est un **paramètre** de `DOM.querySelector`, le nœud est
+/// lié en `this` d'une fonction **constante**, la valeur d'un `fill` est un **argument** ;
+/// **jamais** d'interpolation d'entrée agent dans une source `evaluate` (invariant ADR-022 qui
+/// garde `browser.evaluate` exclu). `submit` (T2, POST mutant) reste différé : il exige le
+/// refactor à **trois états** (`indeterminate` pour un POST parti sans réponse).
+///
+/// Toutes les commandes de page portent le `sessionId` de la **page** attachée (`page`,
+/// produit par [`crate::browser_transport::attach_page`]) : sur `--remote-debugging-pipe`,
+/// le vrai chromium exige ce `sessionId` pour `Page.*`/`Runtime.*` (protocole plat) — sans
+/// lui il refuse tout. C'était le finding Fable 5 (le code utilisait `session_id: None`, la
+/// cible navigateur) ; il est résolu ici en threadant `page` dans chaque `session.call`.
+/// `page` vient de `vibed`/du transport (jamais de l'agent) et est du JSON opaque du pair —
+/// porté comme paramètre CDP, jamais interpolé.
+///
+/// **Invariant à ré-asserter au transport (Fable 5)** : `run_browser` — l'appelant unique —
+/// DOIT passer le `sessionId` de l'attach de SA propre session ; sinon l'audit attribuerait
+/// l'action à la mauvaise page. Non vérifiable ici (`page` est opaque du pair), d'où l'invariant.
+///
+/// Reste à porter par l'incrément live (Fable 5) : la **synchronisation sur le chargement**
+/// (`Page.loadEventFired` filtré sur le `frameId` renvoyé) doit atterrir AVANT le câblage
+/// live — sinon un `read` juste après un `navigate` peut capturer la page PRÉCÉDENTE
+/// (intégrité d'attribution ; le cas de la redirection hors-allowlist, lui, est bloqué à
+/// l'egress par le proxy, pas ici — bon découpage).
+fn run_simple_action<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    action: &BrowserAction,
+    page: &str,
+) -> Result<Value, String> {
+    match action {
+        BrowserAction::Navigate { host, url } => {
+            // Ré-assertion de cohérence (promesse de l'en-tête) : l'hôte que la
+            // gouvernance a vu (host, via host_of) DOIT être celui de l'URL exécutée.
+            // Tient par construction (plan_action est le seul constructeur), mais le
+            // type pub(crate) permettrait un Navigate incohérent d'un futur appelant,
+            // et l'audit attribuerait alors la nav au mauvais hôte (Fable 5).
+            if crate::domain::host_of(url).as_deref() != Some(host.as_str()) {
+                return Err("browser.navigate: incohérence hôte/URL — refusé".to_string());
+            }
+            // Page.enable (pour les events de chargement à venir) puis Page.navigate.
+            // `url` est un PARAMÈTRE CDP, jamais interpolé ; son hôte a déjà passé
+            // `[rule.domains]` en amont. (La synchronisation sur le chargement complet —
+            // attendre Page.loadEventFired — est un raffinement du prochain incrément.)
+            session.call("Page.enable", json!({}), Some(page))?;
+            let r = session.call("Page.navigate", json!({ "url": url }), Some(page))?;
+            // Une navigation refusée par le navigateur remonte dans `errorText` — c'est du
+            // texte du PAIR (hostile), repris dans une erreur vibed que l'audit affiche :
+            // assaini (Cc/Cf, borné) pour ne pas laisser un chromium spoofer la ligne d'audit.
+            if let Some(err) = r.get("errorText").and_then(Value::as_str) {
+                return Err(format!(
+                    "browser.navigate: navigation refusée : {}",
+                    crate::cdp::sanitize_peer_text(err)
+                ));
+            }
+            Ok(json!({ "navigated": url, "frameId": r.get("frameId") }))
+        }
+        BrowserAction::Read => {
+            // Expression CONSTANTE (aucune entrée agent) : aucune surface d'injection.
+            let r = session.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.documentElement.outerHTML",
+                    "returnByValue": true,
+                }),
+                Some(page),
+            )?;
+            // FAIL-CLOSED (Fable 5) : une page hostile peut faire LEVER l'expression
+            // (getters piégés sur documentElement/outerHTML) → CDP répond « succès »
+            // avec `exceptionDetails` et un `result` SANS `value`. Sans ce contrôle on
+            // renverrait Ok({html:""}) = CLOAKING : la page se présente vide à l'agent
+            // qui audite tout en s'affichant normalement à l'humain, et la décision
+            // suivante s'appuie sur une observation forgée.
+            if r.get("exceptionDetails").is_some() {
+                return Err(
+                    "browser.read: l'évaluation a levé une exception côté page — refusé"
+                        .to_string(),
+                );
+            }
+            let html = r
+                .get("result")
+                .and_then(|x| x.get("value"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "browser.read: résultat CDP sans chaîne 'value' — refusé".to_string()
+                })?;
+            // Contenu de page = ENTRÉE HOSTILE, renvoyé comme donnée opaque.
+            Ok(json!({ "html": html }))
+        }
+        BrowserAction::Screenshot => {
+            let r = session.call(
+                "Page.captureScreenshot",
+                json!({ "format": "png" }),
+                Some(page),
+            )?;
+            // Fail-closed : une donnée absente/vide/non-chaîne est une erreur, pas une
+            // capture « vide » silencieuse (Fable 5).
+            let data = r
+                .get("data")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    "browser.screenshot: réponse CDP sans données PNG — refusé".to_string()
+                })?;
+            Ok(json!({ "screenshot_png_base64": data }))
+        }
+        // click/fill/submit sont routés vers `run_object_action` par `run_action` (chemin à trois
+        // états) et n'atteignent JAMAIS ici. Refus DÉFENSIF plutôt qu'un `unreachable!`/panic (Fable
+        // 5) — un panic dans un daemon sécurité est pire qu'une erreur si un futur appelant interne
+        // les envoyait par erreur.
+        BrowserAction::Click { .. } | BrowserAction::Fill { .. } | BrowserAction::Submit { .. } => {
+            Err(
+                "browser: verbe d'interaction routé hors de run_simple_action — bug interne"
+                    .to_string(),
+            )
+        }
+    }
+}
+
+/// `click` : fonction CONSTANTE. Garde de TIER (Fable 5) — refuse un SUBMITTER de formulaire
+/// (`<button>` submit/défaut/**type invalide**, `<input type=submit|image>`, un DESCENDANT via
+/// `closest`, ou un `<label>` dont le contrôle est un submitter) : le POST mutant passe par
+/// `browser.submit` (T2). ⚠️ Une navigation par click (`<a href>`) n'est PAS gouvernée par
+/// `[rule.domains]` de `navigate` — c'est le PROXY egress qui la contrôle.
+///
+/// **Deux durcissements (Fable 5, BLOQUANT B2)** face à un site hostile :
+/// 1. On lit la **propriété IDL `type`** (état *normalisé* : `<button>` à type absent/invalide →
+///    `'submit'` par spec HTML), PAS `getAttribute('type')` (attribut brut) — sinon
+///    `<button type="foo">` (état Submit) échappait à la garde et se soumettait en T1.
+/// 2. Logique **deny-list** pour `<button>` : submitter SAUF `type` explicitement `reset`/`button`.
+/// 3. Un `<label>` transfère son activation à son **contrôle associé** (`this.control`) — on évalue
+///    la garde sur ce contrôle, sinon `closest('button,input')` rendait `null` (label ni l'un ni
+///    l'autre) et le submitter passait.
+const CLICK_FN: &str = "function() { let probe = this; \
+     if (this.tagName === 'LABEL' && this.control) probe = this.control; \
+     const b = probe.closest ? probe.closest('button, input') : null; \
+     if (b && b.form) { \
+     if ((b.tagName === 'BUTTON' && b.type !== 'reset' && b.type !== 'button') || \
+     (b.tagName === 'INPUT' && (b.type === 'submit' || b.type === 'image'))) \
+     throw new Error('submitter de formulaire — utilisez browser.submit (T2)'); } \
+     this.click(); }";
+
+/// `fill` : fonction CONSTANTE ; la valeur est `arguments[0]`, JAMAIS interpolée. Garde
+/// anti-cloaking (Fable 5) : une cible sans propriété `value` (contenteditable, générique) échoue
+/// au lieu de mentir `filled: true`.
+const FILL_FN: &str = "function(v) { if (!('value' in this)) \
+     throw new Error('cible sans propriété value — fill inapplicable'); \
+     this.focus(); this.value = v; \
+     this.dispatchEvent(new Event('input', { bubbles: true })); \
+     this.dispatchEvent(new Event('change', { bubbles: true })); }";
+
+/// `submit` : fonction CONSTANTE ; exige un `<form>` puis `this.submit()` (soumission DOM brute,
+/// sans donner la main à un `onsubmit` de page hostile — choix de gouvernance).
+const SUBMIT_FN: &str =
+    "function() { if (this.tagName !== 'FORM') throw new Error('cible pas un <form>'); \
+     this.submit(); }";
+
+/// Cœur commun de **click/fill/submit** : le **binding par-objet** (`resolve_object` → `callFunctionOn`
+/// avec le nœud lié en `this` d'une fonction CONSTANTE) ET la sémantique à **trois états** (Fable 5).
+/// Ces trois verbes peuvent avoir un **effet distant** (POST d'un submit, d'un `onclick`/`onchange`)
+/// — d'où la distinction :
+/// - `resolve_object` raté, ou `exceptionDetails` (la fonction a levé) → **`Failed`** (rien n'a été
+///   exécuté côté page) ;
+/// - `callFunctionOn` échoué **APRÈS émission** (flux CDP cassé ⇒ session **empoisonnée**) →
+///   **`Indeterminate`** : l'effet distant a PEUT-ÊTRE eu lieu → **NE PAS réessayer** (double-effet) ;
+/// - `callFunctionOn` en `Err` **sans** poison → erreur applicative CDP (commande rejetée AVANT
+///   exécution) → **`Failed`**.
+///
+/// **Invariant load-bearing (Fable 5)** : la classification `Failed` du bras applicatif n'est correcte
+/// que parce que `function_declaration` est **synchrone** et `awaitPromise: false` — Chrome sérialise
+/// alors le `result` AVANT toute destruction de contexte (navigation committée). Rendre la fonction
+/// `async` / `awaitPromise: true` ferait qu'une erreur « context destroyed » APRÈS un effet distant
+/// arriverait en `Cdp` (non empoisonné) → `Failed` → double-effet. **Ne pas changer sans reclasser.**
+///
+/// **`success_body` n'est PAS un effet confirmé (Fable 5)** : `clicked`/`filled`/`submitted: true`
+/// signifie « la fonction a été invoquée sans lever », PAS « le POST/effet réseau a abouti »
+/// (`HTMLFormElement.submit()` sur un form détaché est un no-op silencieux ; `tagName` est spoofable).
+/// L'aval NE DOIT PAS traiter ce booléen comme une confirmation de mutation.
+fn run_object_action<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    page: &str,
+    verb: &str,
+    selector: &str,
+    function_declaration: &str,
+    arguments: Value,
+    success_body: Value,
+) -> ActionOutcome {
+    // resolve : tout échec ici est AVANT toute exécution de la fonction → Failed (rien n'est parti).
+    let object_id = match resolve_object(session, page, selector) {
+        Ok(o) => o,
+        Err(e) => return ActionOutcome::Failed(format!("browser.{verb}: {e}")),
+    };
+    let r = session.call(
+        "Runtime.callFunctionOn",
+        json!({
+            "objectId": object_id,
+            "functionDeclaration": function_declaration,
+            "arguments": arguments,
+            "returnByValue": true,
+            "awaitPromise": false,
+        }),
+        Some(page),
+    );
+    match r {
+        Ok(resp) => {
+            if resp.get("exceptionDetails").is_some() {
+                ActionOutcome::Failed(format!("browser.{verb}: exception côté page — refusé"))
+            } else {
+                ActionOutcome::Completed(success_body)
+            }
+        }
+        Err(e) => {
+            let e = crate::cdp::sanitize_peer_text(&e);
+            if session.is_poisoned() {
+                ActionOutcome::Indeterminate(format!(
+                    "browser.{verb}: flux CDP cassé APRÈS émission — effet distant indéterminé, NE \
+                     PAS réessayer : {e}"
+                ))
+            } else {
+                ActionOutcome::Failed(format!("browser.{verb}: {e}"))
+            }
+        }
+    }
+}
+
+/// Résout `selector` en un `objectId` CDP **sans jamais interpoler** le sélecteur dans du JS :
+/// `DOM.getDocument` → `DOM.querySelector` (le sélecteur est un **paramètre**) → `DOM.resolveNode`.
+/// C'est le cœur du **binding par-objet** (ADR-022) qui garde `browser.evaluate` exclu : le nœud
+/// devient un `objectId` que [`call_on_object`] liera en `this` d'une fonction **constante**.
+/// Fail-closed : `nodeId == 0` (rien ne matche — `querySelector` renvoie 0, pas une erreur CDP),
+/// ou une réponse sans `nodeId`/`objectId`, est une erreur.
+fn resolve_object<C: CdpChannel>(
+    session: &mut CdpSession<C>,
+    page: &str,
+    selector: &str,
+) -> Result<String, String> {
+    let doc = session.call("DOM.getDocument", json!({ "depth": 0 }), Some(page))?;
+    let root = doc
+        .get("root")
+        .and_then(|r| r.get("nodeId"))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "browser: DOM.getDocument sans nodeId racine — refusé".to_string())?;
+    // Le sélecteur est un PARAMÈTRE de querySelector — jamais du JS interpolé.
+    let found = session.call(
+        "DOM.querySelector",
+        json!({ "nodeId": root, "selector": selector }),
+        Some(page),
+    )?;
+    let node_id = found
+        .get("nodeId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "browser: DOM.querySelector sans nodeId — refusé".to_string())?;
+    if node_id == 0 {
+        return Err("browser: aucun élément ne matche le sélecteur — refusé".to_string());
+    }
+    let resolved = session.call("DOM.resolveNode", json!({ "nodeId": node_id }), Some(page))?;
+    resolved
+        .get("object")
+        .and_then(|o| o.get("objectId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "browser: DOM.resolveNode sans objectId — refusé".to_string())
+}
+
+/// Cap DUR d'actions par batch (ADR-022 addendum ratifié, Fable 5) : la garantie « chromium
+/// jeté par appel » s'érode avec la longueur — un batch de 200 actions serait un `chromium`
+/// hostile vivant longtemps dans une unité approuvée **une fois**. On borne à un petit nombre.
+pub(crate) const MAX_BATCH_STEPS: usize = 16;
+
+/// Borne de l'**agrégat** remonté (ADR-022 addendum, Fable 5) : borner chaque résultat ne
+/// suffit pas ; 16 lectures bâtiraient un JSON que le cap du pipe tronquerait salement. On
+/// arrête le batch dès que le cumul dépasse ce seuil ET qu'il reste des étapes (voir `run_batch`).
+///
+/// **3 MiB, pas 4** : le pire cas légitime sérialisé vaut `MAX_BATCH_RESULT_BYTES` (agrégat des
+/// non-dernières étapes) + `MAX_STEP_RESULT_BYTES` (dernière étape, exemptée de l'agrégat) +
+/// l'enveloppe JSON. À 4+4 MiB ça atteignait 8 MiB PILE = `sandbox::STDOUT_CAP`, et l'enveloppe
+/// (non comptée par `json_size`, cf. `run_batch`) faisait DÉPASSER le cap du pipe → `spawn_transient`
+/// **tuait** le helper et renvoyait `Err` **rejouable** alors que TOUT le batch avait tourné →
+/// re-exécution → double-POST d'un `click`/`fill` intercalé (Fable 5, couture browser↔sandbox).
+/// L'assertion `const` ci-dessous **verrouille** l'invariant à la compilation.
+const MAX_BATCH_RESULT_BYTES: usize = 3 * 1024 * 1024;
+
+/// Borne **par étape** (Fable 5) : le cap d'agrégat seul est crevable par un **unique** body
+/// géant (une page hostile servant ~16 Mio d'outerHTML passe sous `MAX_FRAME` du codec). On
+/// borne donc chaque résultat AVANT de l'agréger — fail-closed : un body sur-taille devient une
+/// étape `failed`, l'agent ne reçoit pas de données hostiles partielles.
+const MAX_STEP_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Marge pour l'**enveloppe JSON** que `run_batch` ajoute autour des corps mais que `json_size`
+/// (qui ne mesure QUE les corps) ne compte pas : le wrapper `{"index":_,"status":_,"result":_}`
+/// par étape (≤ 16) plus l'objet top-level `{"batch":_,"attached":_,"steps":[_],"steps_total":_}`.
+/// L'overhead réel est ~1 KiB ; 64 KiB est délibérément large (marge sur la marge).
+const RESULT_ENVELOPE_MARGIN: usize = 64 * 1024;
+
+/// **Invariant inter-module verrouillé à la compilation** (couture browser↔sandbox, Fable 5) : le
+/// JSON complet que `run_browser` écrit sur stdout — corps agrégés (`MAX_BATCH_RESULT_BYTES` pour
+/// les non-dernières + `MAX_STEP_RESULT_BYTES` pour la dernière) PLUS l'enveloppe — DOIT tenir sous
+/// [`crate::sandbox::STDOUT_CAP`], sinon `spawn_transient` tue un helper qui a pourtant fini et
+/// vibed voit un échec rejouable (→ double-POST). Toute dérive future d'un de ces caps casse le
+/// build ici plutôt qu'en production.
+const _: () = assert!(
+    MAX_BATCH_RESULT_BYTES + MAX_STEP_RESULT_BYTES + RESULT_ENVELOPE_MARGIN
+        <= crate::sandbox::STDOUT_CAP,
+    "les caps de résultat browser + l'enveloppe doivent tenir sous sandbox::STDOUT_CAP \
+     (sinon un batch entièrement exécuté est refusé comme rejouable → double-POST)"
+);
+
+/// L'état d'une action dans un batch (ADR-022 addendum, Fable 5). Le type à **trois** variantes
+/// force le futur incrément `submit` à traiter explicitement `Indeterminate` — le mapping
+/// `Err → Failed` du choke point de `run_batch` ne peut pas produire un double-POST en silence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepStatus {
+    Completed,
+    Failed,
+    /// Une action à effet distant (`click`/`fill`/`submit`) dont la commande CDP a échoué APRÈS
+    /// avoir potentiellement été émise — la session est empoisonnée (`CdpSession::is_poisoned`),
+    /// donc le POST/effet a PEUT-ÊTRE eu lieu. **Jamais** `Failed` (sinon double-POST/double-effet
+    /// au retry). Produit par `run_object_action` quand `callFunctionOn` rend `Err` sur une session
+    /// empoisonnée ; l'appelant NE DOIT PAS ré-exécuter le batch.
+    Indeterminate,
+}
+
+impl StepStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            StepStatus::Completed => "completed",
+            StepStatus::Failed => "failed",
+            StepStatus::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+/// Un batch d'actions navigateur validées, exécuté par un **seul** `chromium` (modèle de
+/// session **batch éphémère**, ADR-022 addendum ratifié). Chaque action est déjà passée par
+/// [`plan_action`]. Les étapes `assert` déclaratives (vérif-avant-`submit`) sont un incrément
+/// ultérieur — non incluses ici pour ne pas porter un type inexécutable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrowserBatch {
+    pub steps: Vec<BrowserAction>,
+}
+
+/// Le tier d'une action déjà planifiée (miroir de [`verb_tier`] côté [`BrowserAction`]) : seul
+/// `submit` mute par une soumission de formulaire gouvernée T2 ; tout le reste est T1. Match
+/// **exhaustif** (Fable 5, F3) : un futur variant `BrowserAction` (download, evaluate…) casse le
+/// build ici plutôt que de tomber silencieusement en T1.
+fn action_tier(a: &BrowserAction) -> Tier {
+    match a {
+        BrowserAction::Submit { .. } => Tier::T2,
+        BrowserAction::Navigate { .. }
+        | BrowserAction::Read
+        | BrowserAction::Screenshot
+        | BrowserAction::Click { .. }
+        | BrowserAction::Fill { .. } => Tier::T1,
+    }
+}
+
+/// **Tier effectif d'un batch = le MAX des tiers de ses verbes** (ADR-022 : gouvernance
+/// par-capacité). Un batch purement lecture (`navigate`/`read`/`screenshot`/`click`/`fill`) reste
+/// T1 ; dès qu'il contient un `submit`, il passe T2 (approbation humaine). Un batch vide n'existe
+/// pas (refusé par [`parse_batch`]) ; défaut T1 par prudence.
+pub(crate) fn batch_tier(batch: &BrowserBatch) -> Tier {
+    batch
+        .steps
+        .iter()
+        .map(action_tier)
+        .max()
+        .unwrap_or(Tier::T1)
+}
+
+/// Les hosts (canoniques, via [`crate::domain::host_of`] dans [`plan_action`]) des étapes
+/// `navigate` d'un batch, **triés et dédupliqués**. Sert (a) au lint `[rule.domains]` par-host
+/// (défense en profondeur ; le proxy CONNECT reste le vrai gate par-requête) et (b) de **clé de
+/// grant d'approbation** (M4 : une approbation lie CES hosts, jamais un blanc-seing tous-domaines).
+pub(crate) fn batch_domains(batch: &BrowserBatch) -> Vec<String> {
+    let mut hosts: Vec<String> = batch
+        .steps
+        .iter()
+        .filter_map(|a| match a {
+            BrowserAction::Navigate { host, .. } => Some(host.clone()),
+            _ => None,
+        })
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// Exécution côté vibed-root de `browser.run`, APRÈS la gouvernance (tier effectif, lint
+/// `[rule.domains]`, approbation M4 — toutes faites en amont dans `mcp.rs`). Re-valide le batch
+/// (source de vérité unique [`parse_batch`], la même que le helper ré-exécute) et rend le **plan
+/// gouverné**.
+///
+/// ⚠️ **Substrat d'exécution à venir (on-target)** : le spawn du helper `browser` dans une unité
+/// transitoire durcie (classe `Browser`) nécessite encore (1) le **relais du proxy CONNECT** —
+/// l'I/O tunnel ; sans lui `chromium` n'a **aucun** egress (décision de forme process/netns « à
+/// trancher » d'ADR-022) — et (2) un **profil éphémère écrivable** fourni par la classe sandbox
+/// (`--user-data-dir`). Tant que ces deux briques manquent, on rend un statut EXPLICITE
+/// (`executed: false`) plutôt qu'un spawn qui échouerait à l'aveugle ou un faux succès.
+pub(crate) fn run_governed(args: &Value) -> Result<String, String> {
+    let batch = parse_batch(args)?;
+    let tier = batch_tier(&batch);
+    let domains = batch_domains(&batch);
+    Ok(json!({
+        "browser": "governed",
+        "executed": false,
+        "reason": "substrat d'exécution à venir : relais du proxy CONNECT (egress) + profil \
+                   éphémère écrivable de la classe sandbox Browser",
+        "plan": {
+            "steps_total": batch.steps.len(),
+            "tier": tier.as_str(),
+            "domains": domains,
+        },
+    })
+    .to_string())
+}
+
+/// Clés JSON autorisées pour un verbe donné, ou `None` si le verbe est inconnu (auquel cas on
+/// laisse [`plan_action`] produire l'erreur « verbe inconnu » claire, sans la masquer).
+fn allowed_step_keys(verb: &str) -> Option<&'static [&'static str]> {
+    Some(match verb {
+        "navigate" => &["verb", "url"],
+        "read" | "screenshot" => &["verb"],
+        "click" | "submit" => &["verb", "selector"],
+        "fill" => &["verb", "selector", "value"],
+        _ => return None,
+    })
+}
+
+/// Parse le **payload de contrôle** du batch (ce que `vibed` descend au helper sur stdin) :
+/// `{ "steps": [ { "verb": "navigate", "url": "…" }, … ] }`. **Fail-closed** : refuse un
+/// `steps` absent / non-tableau / **vide** / au-delà de [`MAX_BATCH_STEPS`], une étape sans
+/// `verb`, une **clé inconnue** (Fable 5 : sinon une étape `{"verb":"read","assert":…}` d'un
+/// futur incrément passerait comme un `Read` nu — la vérif que l'agent croit avoir demandée ne
+/// tournerait jamais, en silence), ou une étape mal formée (déléguée à [`plan_action`]). La
+/// gouvernance (tier = max, `[rule.domains]` par `navigate`, screening `fill`, approbation T2)
+/// est **en amont dans `vibed`**, avant l'envoi.
+pub(crate) fn parse_batch(payload: &Value) -> Result<BrowserBatch, String> {
+    let steps_json = payload
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "browser.batch: 'steps' manquant ou pas un tableau — refusé".to_string())?;
+    if steps_json.is_empty() {
+        return Err("browser.batch: batch vide — refusé".to_string());
+    }
+    if steps_json.len() > MAX_BATCH_STEPS {
+        return Err(format!(
+            "browser.batch: {} étapes > cap {MAX_BATCH_STEPS} — refusé (confinement)",
+            steps_json.len()
+        ));
+    }
+    let mut steps = Vec::with_capacity(steps_json.len());
+    for (i, s) in steps_json.iter().enumerate() {
+        let verb = s
+            .get("verb")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("browser.batch: étape {i} sans 'verb' — refusé"))?;
+        // Whitelist de clés (fail-closed) — SEULEMENT pour un verbe connu, pour ne pas masquer
+        // le « verbe inconnu » de plan_action ci-dessous.
+        if let Some(allowed) = allowed_step_keys(verb) {
+            if let Some(obj) = s.as_object() {
+                for k in obj.keys() {
+                    if !allowed.contains(&k.as_str()) {
+                        return Err(format!(
+                            "browser.batch: étape {i} ({verb}) : clé inconnue {k:?} — refusé"
+                        ));
+                    }
+                }
+            }
+        }
+        steps.push(plan_action(verb, s).map_err(|e| format!("browser.batch: étape {i}: {e}"))?);
+    }
+    // (Fable 5 F1, BLOQUANT) `submit` (POST mutant) DOIT être la DERNIÈRE étape (donc ≤1 par batch).
+    // Sinon un `submit` COMPLETED peut précéder une étape qui échoue → le batch devient "failed"
+    // (contractuellement REJOUABLE) alors que le POST a DÉJÀ tiré → double-POST, déclenchable par
+    // une page de confirmation hostile qui lève à la lecture (`read` fail-closed → step Failed).
+    // Terminal ⇒ un `submit` completed est toujours le dernier ⇒ batch "completed" (jamais rejoué) ;
+    // un `submit` failed/indeterminate en dernier ⇒ aucun submit antérieur n'a tiré ⇒ "failed"
+    // redevient idempotent et "indeterminate" porte seul le drapeau NE-PAS-RÉESSAYER.
+    if let Some(pos) = steps
+        .iter()
+        .position(|s| matches!(s, BrowserAction::Submit { .. }))
+    {
+        if pos != steps.len() - 1 {
+            return Err(
+                "browser.batch: 'submit' doit être la DERNIÈRE étape du batch (≤1 par batch, \
+                 anti double-POST) — refusé"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(BrowserBatch { steps })
+}
+
+/// Taille sérialisée (octets) d'un `Value`, pour les bornes. Un `Value` déjà construit se
+/// sérialise toujours (clés String, ni NaN ni Inf) ; en cas d'échec improbable on renvoie
+/// `usize::MAX` — **fail-closed** (un body non sérialisable trébuche sur le cap par-étape).
+fn json_size(v: &Value) -> usize {
+    serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX)
+}
+
+/// Exécute un [`BrowserBatch`] contre une `CdpSession` (un `chromium`, une page) et rend un
+/// résultat JSON **agrégé** et **opaque** (le contenu `result` vient de pages hostiles). Modèle
+/// **batch éphémère** (ADR-022 addendum ratifié) :
+/// - **`attach_page` UNE fois** → le `sessionId` de page threadé dans chaque [`run_action`] ;
+/// - exécution **en séquence**, continuité au sein du batch (le `read` voit ce que le `navigate`
+///   précédent a chargé — c'est TOUT l'intérêt du batch vs process-par-verbe) ;
+/// - **trois états par action** ([`StepStatus`]) : `completed`, `failed`, et `indeterminate`
+///   réservé au futur `submit` mutant (les verbes actuels sont sans mutation distante) ;
+/// - **fail-closed** : une action non `completed` **arrête** le batch (les suivantes ne tirent
+///   pas — l'agent avait planifié en supposant le succès des précédentes) ;
+/// - **borne par étape** : un `result` sur-taille ([`MAX_STEP_RESULT_BYTES`]) devient `failed` ;
+/// - **borne d'agrégat** : `truncated` **seulement s'il reste des étapes non tirées** (Fable 5 :
+///   un batch entièrement complété ne doit JAMAIS rendre `truncated`, ça inviterait un
+///   ré-exécution). Le cap du pipe côté `vibed` reste le garde-fou dur ultime.
+///
+/// **Consomme** la session (par valeur, Fable 5) : un batch = une session = un `chromium` jetable
+/// ; on ne peut pas ré-exécuter un batch sur la même session (contrat d'`attach_page`). Ne panique
+/// jamais : rend toujours un JSON décrivant l'état réel (même un `attach` raté). `steps_total`
+/// rend le résultat **auto-porteur** (l'audit distingue « 2/2 complété » de « arrêté à 2/5 »).
+pub(crate) fn run_batch<C: CdpChannel>(mut session: CdpSession<C>, batch: &BrowserBatch) -> Value {
+    let total = batch.steps.len();
+    // Défense EN PROFONDEUR (Fable 5) — l'invariant « submit TERMINAL » (anti double-POST) vit dans
+    // `parse_batch`, mais `BrowserBatch.steps` est `pub(crate)` : on le RÉ-ASSERTE ici, exactement
+    // comme `run_simple_action` ré-asserte la cohérence hôte/URL d'un `Navigate`. Sans ça, un futur
+    // constructeur de batch (câblage transport, refactor) qui contournerait `parse_batch` ferait
+    // s'évaporer la garantie en silence. Un `submit` non-terminal ⇒ batch failed SANS rien exécuter
+    // (aucun POST tiré), avant même d'attacher/spawner.
+    if let Some(pos) = batch
+        .steps
+        .iter()
+        .position(|s| matches!(s, BrowserAction::Submit { .. }))
+    {
+        if pos != total - 1 {
+            return json!({
+                "batch": "failed", "attached": false,
+                "error": "browser.batch: 'submit' non-terminal — refusé (anti double-POST ; \
+                          invariant de parse_batch ré-asserté)",
+                "steps": [], "steps_total": total,
+            });
+        }
+    }
+    let page = match crate::browser_transport::attach_page(&mut session) {
+        Ok(p) => p,
+        Err(e) => {
+            return json!({
+                "batch": "failed", "attached": false, "error": e,
+                "steps": [], "steps_total": total,
+            });
+        }
+    };
+
+    let mut results = Vec::with_capacity(total);
+    let mut agg_bytes = 0usize;
+    let mut batch_status = "completed";
+    // Une interaction (`click`/`fill`/`submit`) qui a COMPLÉTÉ a pu émettre un POST/effet distant
+    // (onclick→fetch, onchange→autosave). Dès lors, AUCUN statut rejouable ne doit plus sortir :
+    // sinon un `read` ultérieur que la page hostile fait échouer rendrait le batch `failed`
+    // (rejouable) → l'appelant rejoue → **double-POST** (Fable 5, BLOQUANT). La règle « submit
+    // terminal » ne protège que `submit` ; ce drapeau couvre `click`/`fill` mutants en milieu de
+    // batch, ainsi que le chemin `truncated`.
+    let mut mutated = false;
+
+    for (i, action) in batch.steps.iter().enumerate() {
+        let (status, body, size) = match run_action(&mut session, action, &page) {
+            ActionOutcome::Completed(v) => {
+                let n = json_size(&v);
+                if n > MAX_STEP_RESULT_BYTES {
+                    // Borne par étape (Fable 5) : on ne pousse PAS le body hostile sur-taille.
+                    let e = json!({ "error": format!(
+                        "browser.batch: résultat d'étape trop grand ({n} octets > cap \
+                         {MAX_STEP_RESULT_BYTES}) — refusé"
+                    ) });
+                    let en = json_size(&e);
+                    (StepStatus::Failed, e, en)
+                } else {
+                    (StepStatus::Completed, v, n)
+                }
+            }
+            ActionOutcome::Failed(e) => {
+                let b = json!({ "error": e });
+                let n = json_size(&b);
+                (StepStatus::Failed, b, n)
+            }
+            // `submit` dont le POST est parti sans réponse : Indeterminate → le batch s'ARRÊTE
+            // (fail-closed comme Failed) mais l'appelant NE DOIT PAS ré-exécuter (double-POST).
+            ActionOutcome::Indeterminate(e) => {
+                let b = json!({ "error": e });
+                let n = json_size(&b);
+                (StepStatus::Indeterminate, b, n)
+            }
+        };
+        agg_bytes += size;
+        results.push(json!({ "index": i, "status": status.as_str(), "result": body }));
+
+        // Une interaction mutante qui a COMPLÉTÉ : le POST/effet distant a PEUT-ÊTRE eu lieu. (Un
+        // `Failed` sur ces verbes = échec AVANT émission — non mutant ; un `Indeterminate` arrête
+        // déjà le batch en non-rejouable.)
+        if status == StepStatus::Completed
+            && matches!(
+                action,
+                BrowserAction::Click { .. }
+                    | BrowserAction::Fill { .. }
+                    | BrowserAction::Submit { .. }
+            )
+        {
+            mutated = true;
+        }
+
+        // Fail-closed : la première action non `completed` arrête le batch. Si une mutation a pu
+        // partir, un `Failed` (rejouable) est reclassé `Indeterminate` (ne-pas-réessayer) —
+        // `Indeterminate` l'est déjà.
+        if status != StepStatus::Completed {
+            batch_status = if mutated && status == StepStatus::Failed {
+                StepStatus::Indeterminate.as_str()
+            } else {
+                status.as_str()
+            };
+            break;
+        }
+        // Borne d'agrégat — `truncated` UNIQUEMENT s'il reste des étapes (Fable 5, F1). Si une
+        // mutation a pu partir, `truncated` (que l'appelant rejouerait pour récupérer la suite)
+        // devient `indeterminate` : rejouer re-tirerait l'effet.
+        if agg_bytes > MAX_BATCH_RESULT_BYTES && i + 1 < total {
+            batch_status = if mutated {
+                StepStatus::Indeterminate.as_str()
+            } else {
+                "truncated"
+            };
+            break;
+        }
+    }
+
+    json!({ "batch": batch_status, "attached": true, "steps": results, "steps_total": total })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Faux pair CDP en mémoire (un `recv` vide = EOF). Restitue les réponses
+    /// pré-chargées une par morceau — donc arrivant APRÈS l'émission de chaque commande
+    /// (sinon la purge-avant-émission de `CdpSession` les prendrait pour des pré-stages).
+    struct FakeCdp {
+        sent: Vec<Vec<u8>>,
+        inbox: std::collections::VecDeque<Vec<u8>>,
+    }
+    impl FakeCdp {
+        fn new(chunks: Vec<Vec<u8>>) -> Self {
+            Self {
+                sent: Vec::new(),
+                inbox: chunks.into(),
+            }
+        }
+    }
+    impl CdpChannel for FakeCdp {
+        fn send(&mut self, b: &[u8]) -> std::io::Result<()> {
+            self.sent.push(b.to_vec());
+            Ok(())
+        }
+        fn recv(&mut self) -> std::io::Result<Vec<u8>> {
+            Ok(self.inbox.pop_front().unwrap_or_default())
+        }
+    }
+    fn cdp_frame(v: Value) -> Vec<u8> {
+        let mut b = serde_json::to_vec(&v).unwrap();
+        b.push(0);
+        b
+    }
+
+    #[test]
+    fn navigate_issues_enable_then_navigate_with_the_url_as_a_param() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {}})), // Page.enable
+            cdp_frame(json!({"id": 2, "result": {"frameId": "F1"}})), // Page.navigate
+        ]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Navigate {
+                host: "github.com".into(),
+                url: "https://github.com/x".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap();
+        assert_eq!(out["navigated"], "https://github.com/x");
+        assert_eq!(out["frameId"], "F1");
+        // Les deux commandes CIBLENT LA PAGE (sessionId threadé) : sans lui le vrai chromium
+        // refuserait toute commande Page.* (finding Fable 5). URL en PARAMÈTRE, jamais du JS.
+        let sent = s.into_channel().sent;
+        let enable: Value = serde_json::from_slice(&sent[0][..sent[0].len() - 1]).unwrap();
+        assert_eq!(enable["method"], "Page.enable");
+        assert_eq!(enable["sessionId"], "PAGE-SID");
+        let nav: Value = serde_json::from_slice(&sent[1][..sent[1].len() - 1]).unwrap();
+        assert_eq!(nav["method"], "Page.navigate");
+        assert_eq!(nav["params"]["url"], "https://github.com/x");
+        assert_eq!(nav["sessionId"], "PAGE-SID");
+    }
+
+    #[test]
+    fn navigate_surfaces_a_browser_error_text() {
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {}})),
+            cdp_frame(json!({"id": 2, "result": {"errorText": "net::ERR_NAME_NOT_RESOLVED"}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Navigate {
+                host: "x".into(),
+                url: "https://x".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(err.contains("ERR_NAME_NOT_RESOLVED"), "{err}");
+    }
+
+    #[test]
+    fn navigate_sanitizes_a_hostile_error_text() {
+        // `errorText` vient du PAIR (hostile) : un chromium malveillant y glisse des ctrl/bidi ;
+        // l'erreur vibed (affichée à l'audit) doit être assainie (Fable 5).
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {}})),
+            cdp_frame(json!({"id": 2, "result": {"errorText": "bad\u{1b}[2K\u{202e}spoof"}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Navigate {
+                host: "x".into(),
+                url: "https://x".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(!err.contains('\u{1b}'), "ESC doit être retiré : {err:?}");
+        assert!(!err.contains('\u{202e}'), "RTL override doit être retiré");
+        assert!(err.contains("navigation refusée"));
+    }
+
+    #[test]
+    fn read_evaluates_a_constant_expression_and_returns_html() {
+        let chan = FakeCdp::new(vec![cdp_frame(
+            json!({"id": 1, "result": {"result": {"value": "<html>hi</html>"}}}),
+        )]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(&mut s, &BrowserAction::Read, "PAGE-SID").unwrap();
+        assert_eq!(out["html"], "<html>hi</html>");
+        // L'expression est CONSTANTE : aucune entrée agent, aucune surface d'injection.
+        // La commande cible la PAGE (sessionId threadé).
+        let sent = s.into_channel().sent;
+        let ev: Value = serde_json::from_slice(&sent[0][..sent[0].len() - 1]).unwrap();
+        assert_eq!(ev["method"], "Runtime.evaluate");
+        assert_eq!(
+            ev["params"]["expression"],
+            "document.documentElement.outerHTML"
+        );
+        assert_eq!(ev["sessionId"], "PAGE-SID");
+    }
+
+    #[test]
+    fn screenshot_returns_base64_png() {
+        let chan = FakeCdp::new(vec![cdp_frame(
+            json!({"id": 1, "result": {"data": "aGVsbG8="}}),
+        )]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(&mut s, &BrowserAction::Screenshot, "PAGE-SID").unwrap();
+        assert_eq!(out["screenshot_png_base64"], "aGVsbG8=");
+        // Golden : la capture cible la PAGE (sessionId threadé) — verrouillé comme les
+        // autres trames pour qu'une régression future ne repasse pas ce site en None.
+        let sent = s.into_channel().sent;
+        let shot: Value = serde_json::from_slice(&sent[0][..sent[0].len() - 1]).unwrap();
+        assert_eq!(shot["method"], "Page.captureScreenshot");
+        assert_eq!(shot["sessionId"], "PAGE-SID");
+    }
+
+    /// Les 4 réponses CDP qui satisfont le binding par-objet : getDocument → querySelector →
+    /// resolveNode → callFunctionOn. `qs_node` = nodeId renvoyé par querySelector (0 = rien).
+    fn cdp_object_binding(qs_node: i64, object_id: &str, call_result: Value) -> Vec<Vec<u8>> {
+        vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": qs_node}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": object_id}}})),
+            cdp_frame(json!({"id": 4, "result": call_result})),
+        ]
+    }
+
+    #[test]
+    fn click_binds_by_object_selector_as_param_and_constant_function() {
+        let chan = FakeCdp::new(cdp_object_binding(42, "OBJ1", json!({"result": {}})));
+        let mut s = CdpSession::new(chan);
+        // Sélecteur DISTINCTIF (un token qui n'apparaît pas dans la fonction constante) pour que
+        // le test de non-fuite ne collisionne pas avec les mots de la garde submitter.
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#zzUniqSel777".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap();
+        assert_eq!(out["clicked"], true);
+        let sent = s.into_channel().sent;
+        // querySelector porte le sélecteur en PARAMÈTRE (jamais du JS).
+        let qs: Value = serde_json::from_slice(&sent[1][..sent[1].len() - 1]).unwrap();
+        assert_eq!(qs["method"], "DOM.querySelector");
+        assert_eq!(qs["params"]["selector"], "#zzUniqSel777");
+        assert_eq!(qs["sessionId"], "PAGE-SID");
+        // callFunctionOn : fonction CONSTANTE (this.click()) qui NE contient PAS le sélecteur ;
+        // objectId = celui résolu.
+        let call: Value = serde_json::from_slice(&sent[3][..sent[3].len() - 1]).unwrap();
+        assert_eq!(call["method"], "Runtime.callFunctionOn");
+        assert_eq!(call["params"]["objectId"], "OBJ1");
+        let f = call["params"]["functionDeclaration"].as_str().unwrap();
+        assert!(f.contains("this.click()"));
+        assert!(
+            !f.contains("zzUniqSel777"),
+            "le sélecteur ne doit JAMAIS entrer dans la source de la fonction : {f}"
+        );
+        // Garde de submitter présente (Fable 5 F1) — régression si retirée.
+        assert!(
+            f.contains("browser.submit"),
+            "la garde anti-submitter T2 doit être dans la fonction : {f}"
+        );
+    }
+
+    #[test]
+    fn click_guard_uses_idl_type_and_covers_invalid_button_and_label() {
+        // (Fable 5, BLOQUANT B2) La garde submitter DOIT lire la propriété IDL `b.type` (état
+        // normalisé : un <button> à type absent/invalide → 'submit') et NON `getAttribute('type')`
+        // (attribut brut) — sinon `<button type="foo">` (état Submit) se soumet en T1, contournant
+        // la porte T2. Deny-list pour <button> (submitter sauf 'reset'/'button'), et un <label>
+        // transfère l'activation à son contrôle (`this.control`). Les tests n'exécutent pas le JS ;
+        // on verrouille la constante au niveau chaîne (comme les autres invariants de CLICK_FN).
+        let f = CLICK_FN;
+        assert!(
+            f.contains("b.type"),
+            "doit lire la propriété IDL `type` : {f}"
+        );
+        assert!(
+            !f.contains("getAttribute"),
+            "ne doit PLUS lire l'attribut brut getAttribute (contournable par type invalide) : {f}"
+        );
+        assert!(
+            f.contains("'reset'") && f.contains("'button'"),
+            "deny-list <button> (submitter sauf reset/button explicites) : {f}"
+        );
+        assert!(
+            f.contains("LABEL") && f.contains("this.control"),
+            "doit couvrir le <label> et son contrôle associé : {f}"
+        );
+    }
+
+    #[test]
+    fn fill_passes_the_value_as_argument_never_in_the_function_source() {
+        let chan = FakeCdp::new(cdp_object_binding(7, "OBJ2", json!({"result": {}})));
+        let mut s = CdpSession::new(chan);
+        // Une valeur qui, INTERPOLÉE, s'échapperait vers du JS arbitraire — elle DOIT rester un
+        // argument opaque, c'est ce qui garde browser.evaluate exclu même sur entrée hostile.
+        let evil = "\"; fetch('//evil'); //";
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Fill {
+                selector: "#q".into(),
+                value: evil.into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap();
+        assert_eq!(out["filled"], true);
+        let sent = s.into_channel().sent;
+        let call: Value = serde_json::from_slice(&sent[3][..sent[3].len() - 1]).unwrap();
+        assert_eq!(call["method"], "Runtime.callFunctionOn");
+        // La valeur hostile est dans arguments[0], PAS dans la source de la fonction.
+        assert_eq!(call["params"]["arguments"][0]["value"], evil);
+        let f = call["params"]["functionDeclaration"].as_str().unwrap();
+        assert!(
+            !f.contains("fetch"),
+            "la valeur hostile ne doit JAMAIS entrer dans la source : {f}"
+        );
+        assert!(f.contains("this.value = v"));
+    }
+
+    #[test]
+    fn click_fails_closed_when_the_selector_matches_nothing() {
+        // querySelector renvoie nodeId 0 (rien ne matche) — pas une erreur CDP, mais fail-closed.
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 0}})),
+        ]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#none".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(err.contains("aucun élément ne matche"), "{err}");
+    }
+
+    #[test]
+    fn click_fails_closed_on_a_page_side_exception() {
+        let chan = FakeCdp::new(cdp_object_binding(
+            5,
+            "O",
+            json!({"result": {}, "exceptionDetails": {"text": "boom"}}),
+        ));
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#x".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(err.contains("exception"), "{err}");
+    }
+
+    #[test]
+    fn submit_completes_on_a_form_with_a_constant_function() {
+        let chan = FakeCdp::new(cdp_object_binding(5, "F", json!({"result": {}})));
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "form#login".into(),
+            },
+            "PAGE-SID",
+        );
+        assert_eq!(out, ActionOutcome::Completed(json!({"submitted": true})));
+        // Fonction CONSTANTE : exige un <form> et appelle this.submit() ; le sélecteur n'y entre pas.
+        let sent = s.into_channel().sent;
+        let call: Value = serde_json::from_slice(&sent[3][..sent[3].len() - 1]).unwrap();
+        let f = call["params"]["functionDeclaration"].as_str().unwrap();
+        assert!(f.contains("this.submit()"));
+        assert!(f.contains("'FORM'"));
+        assert!(
+            !f.contains("login"),
+            "le sélecteur ne doit JAMAIS entrer dans la source : {f}"
+        );
+        // (Fable 5 F2) Verrou golden : `awaitPromise: false` — invariant load-bearing de la
+        // classification Failed/Indeterminate (fonction synchrone, résultat sérialisé AVANT toute
+        // destruction de contexte). Le passer à true casserait l'anti-double-POST.
+        assert_eq!(call["params"]["awaitPromise"], false);
+    }
+
+    #[test]
+    fn click_is_indeterminate_on_a_protocol_break_after_dispatch() {
+        // (Fable 5 F6) Un click peut muter (onclick → fetch POST). Comme submit, un callFunctionOn
+        // ÉMIS puis flux cassé (poison) → Indeterminate (effet distant indéterminé, ne pas
+        // réessayer) — l'unification via run_object_action ferme le trou onclick-POST.
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 5}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "O"}}})),
+            // pas de réponse au callFunctionOn (id 4) → poison après émission.
+        ]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Click {
+                selector: "#buy".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Indeterminate(_)),
+            "attendu Indeterminate : {out:?}"
+        );
+    }
+
+    #[test]
+    fn submit_fails_on_a_page_exception_not_a_form() {
+        // callFunctionOn répond avec exceptionDetails (cible pas un <form>) → Failed (rien soumis).
+        let chan = FakeCdp::new(cdp_object_binding(
+            5,
+            "F",
+            json!({"result": {}, "exceptionDetails": {"text": "not a form"}}),
+        ));
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "#x".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Failed(_)),
+            "attendu Failed : {out:?}"
+        );
+    }
+
+    #[test]
+    fn submit_is_indeterminate_on_a_protocol_break_after_dispatch() {
+        // getDocument/querySelector/resolveNode OK, mais le callFunctionOn du submit est ÉMIS puis
+        // le flux se casse (pas de réponse → EOF → session empoisonnée) → Indeterminate : le POST
+        // a PEUT-ÊTRE tiré, ne PAS réessayer. JAMAIS Failed (ce serait le double-POST, Fable 5).
+        let chan = FakeCdp::new(vec![
+            cdp_frame(json!({"id": 1, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 2, "result": {"nodeId": 5}})),
+            cdp_frame(json!({"id": 3, "result": {"object": {"objectId": "F"}}})),
+            // Pas de réponse au callFunctionOn (id 4) → EOF après émission.
+        ]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "form".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Indeterminate(_)),
+            "attendu Indeterminate : {out:?}"
+        );
+    }
+
+    #[test]
+    fn submit_fails_when_resolve_fails_before_any_submission() {
+        // Aucune réponse : getDocument échoue → resolve échoue → Failed (l'échec est AVANT le
+        // callFunctionOn du submit, donc rien n'est parti), JAMAIS Indeterminate — même si la
+        // session est empoisonnée par l'erreur protocole du getDocument.
+        let chan = FakeCdp::new(vec![]);
+        let mut s = CdpSession::new(chan);
+        let out = run_action(
+            &mut s,
+            &BrowserAction::Submit {
+                selector: "form".into(),
+            },
+            "PAGE-SID",
+        );
+        assert!(
+            matches!(out, ActionOutcome::Failed(_)),
+            "attendu Failed : {out:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_page_session_id_is_refused_before_any_command() {
+        // Garde-fou : un sessionId de page vide (jamais produit par attach_page) est refusé
+        // en tête, avec une erreur vibed claire, avant toute émission CDP (Fable 5).
+        let chan = FakeCdp::new(vec![]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(&mut s, &BrowserAction::Read, "").unwrap_err();
+        assert!(err.contains("sans sessionId de page"), "{err}");
+        assert!(
+            s.into_channel().sent.is_empty(),
+            "aucune commande ne doit partir sans sessionId de page"
+        );
+    }
+
+    #[test]
+    fn read_fails_closed_on_a_page_side_exception_no_cloaking() {
+        // Page hostile : Runtime.evaluate répond « succès » avec exceptionDetails et sans
+        // value → on doit refuser, PAS renvoyer un html vide (cloaking).
+        let chan = FakeCdp::new(vec![cdp_frame(json!({
+            "id": 1,
+            "result": {"result": {"type": "object"}, "exceptionDetails": {"text": "Uncaught"}}
+        }))]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(&mut s, &BrowserAction::Read, "PAGE-SID")
+            .unwrap_err()
+            .contains("exception"));
+    }
+
+    #[test]
+    fn read_fails_closed_when_the_value_is_missing_or_not_a_string() {
+        let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {"result": {}}}))]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(&mut s, &BrowserAction::Read, "PAGE-SID")
+            .unwrap_err()
+            .contains("sans chaîne 'value'"));
+    }
+
+    #[test]
+    fn screenshot_fails_closed_on_missing_data() {
+        let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {}}))]);
+        let mut s = CdpSession::new(chan);
+        assert!(run_action(&mut s, &BrowserAction::Screenshot, "PAGE-SID")
+            .unwrap_err()
+            .contains("sans données PNG"));
+    }
+
+    #[test]
+    fn navigate_refuses_a_host_url_mismatch() {
+        // Un Navigate incohérent (host ne correspond pas à l'URL) est refusé avant tout
+        // appel CDP — l'audit ne peut pas être trompé sur l'hôte réellement atteint.
+        let chan = FakeCdp::new(vec![]);
+        let mut s = CdpSession::new(chan);
+        let err = run_action(
+            &mut s,
+            &BrowserAction::Navigate {
+                host: "github.com".into(),
+                url: "https://evil.example/x".into(),
+            },
+            "PAGE-SID",
+        )
+        .unwrap_err();
+        assert!(err.contains("incohérence hôte/URL"), "{err}");
+        // Preuve DIRECTE : aucune trame n'a été émise avant le refus (pas seulement
+        // « inbox vide ⇒ ç'aurait échoué autrement »).
+        assert!(
+            s.into_channel().sent.is_empty(),
+            "aucune commande CDP ne doit partir avant le refus host/URL"
+        );
+    }
 
     #[test]
     fn the_surface_matches_adr_017_decision_2() {
@@ -215,6 +1423,71 @@ mod tests {
         // browser.evaluate n'est PAS dans la surface — exclu par construction.
         assert_eq!(verb_tier("evaluate"), None);
         assert_eq!(verb_tier("download"), None);
+    }
+
+    #[test]
+    fn batch_tier_is_the_max_of_verbs_and_domains_are_navigate_hosts() {
+        // Batch purement lecture → T1 ; domaines = hosts navigate triés + dédupliqués.
+        let ro = BrowserBatch {
+            steps: vec![
+                BrowserAction::Navigate {
+                    host: "b.com".into(),
+                    url: "https://b.com/".into(),
+                },
+                BrowserAction::Read,
+                BrowserAction::Navigate {
+                    host: "a.com".into(),
+                    url: "https://a.com/x".into(),
+                },
+                BrowserAction::Navigate {
+                    host: "a.com".into(),
+                    url: "https://a.com/y".into(),
+                },
+            ],
+        };
+        assert_eq!(batch_tier(&ro), Tier::T1);
+        assert_eq!(
+            batch_domains(&ro),
+            vec!["a.com".to_string(), "b.com".to_string()]
+        );
+
+        // Un `submit` escalade TOUT le batch à T2 (approbation humaine).
+        let rw = BrowserBatch {
+            steps: vec![
+                BrowserAction::Navigate {
+                    host: "a.com".into(),
+                    url: "https://a.com/".into(),
+                },
+                BrowserAction::Fill {
+                    selector: "#q".into(),
+                    value: "x".into(),
+                },
+                BrowserAction::Submit {
+                    selector: "form".into(),
+                },
+            ],
+        };
+        assert_eq!(batch_tier(&rw), Tier::T2);
+        assert_eq!(batch_domains(&rw), vec!["a.com".to_string()]);
+    }
+
+    #[test]
+    fn run_governed_revalidates_and_reports_the_plan_without_executing() {
+        let out = run_governed(&json!({
+            "steps": [
+                {"verb": "navigate", "url": "https://github.com/x"},
+                {"verb": "submit", "selector": "form"}
+            ]
+        }))
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        // Jamais un faux succès : le substrat d'exécution manque encore.
+        assert_eq!(v["executed"], false);
+        assert_eq!(v["plan"]["steps_total"], 2);
+        assert_eq!(v["plan"]["tier"], "T2"); // le submit escalade
+        assert_eq!(v["plan"]["domains"], json!(["github.com"]));
+        // Batch invalide → Err (fail-closed, jamais un plan bidon).
+        assert!(run_governed(&json!({"steps": []})).is_err());
     }
 
     #[test]
@@ -359,5 +1632,359 @@ mod tests {
             .unwrap_err()
             .contains("verbe inconnu"));
         assert!(plan_action("execute", &json!({})).is_err());
+    }
+
+    // ----- batch : parse_batch + run_batch (modèle de session batch, ADR-022 addendum) -----
+
+    #[test]
+    fn parse_batch_accepts_a_sequence_and_maps_each_step() {
+        let b = parse_batch(&json!({
+            "steps": [
+                { "verb": "navigate", "url": "https://github.com/x" },
+                { "verb": "read" },
+                { "verb": "screenshot" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(b.steps.len(), 3);
+        assert_eq!(
+            b.steps[0],
+            BrowserAction::Navigate {
+                host: "github.com".to_string(),
+                url: "https://github.com/x".to_string(),
+            }
+        );
+        assert_eq!(b.steps[1], BrowserAction::Read);
+        assert_eq!(b.steps[2], BrowserAction::Screenshot);
+    }
+
+    #[test]
+    fn parse_batch_is_fail_closed() {
+        // 'steps' absent / pas un tableau / vide.
+        assert!(parse_batch(&json!({})).unwrap_err().contains("manquant"));
+        assert!(parse_batch(&json!({"steps": "x"}))
+            .unwrap_err()
+            .contains("manquant"));
+        assert!(parse_batch(&json!({"steps": []}))
+            .unwrap_err()
+            .contains("vide"));
+        // Au-delà du cap.
+        let many: Vec<Value> = (0..MAX_BATCH_STEPS + 1)
+            .map(|_| json!({"verb": "read"}))
+            .collect();
+        assert!(parse_batch(&json!({ "steps": many }))
+            .unwrap_err()
+            .contains("cap"));
+        // Étape sans 'verb'.
+        assert!(parse_batch(&json!({"steps": [{"url": "https://x"}]}))
+            .unwrap_err()
+            .contains("sans 'verb'"));
+        // Verbe inconnu / args invalides → délégué à plan_action.
+        assert!(parse_batch(&json!({"steps": [{"verb": "evaluate"}]}))
+            .unwrap_err()
+            .contains("verbe inconnu"));
+        assert!(
+            parse_batch(&json!({"steps": [{"verb": "navigate", "url": "file:///x"}]})).is_err()
+        );
+    }
+
+    /// Fabrique un `FakeCdp` dont les 2 premières réponses satisfont `attach_page`
+    /// (createTarget id1 → targetId, attachToTarget id2 → sessionId), suivies de `rest`.
+    fn cdp_with_attach(rest: Vec<Vec<u8>>) -> FakeCdp {
+        let mut chunks = vec![
+            cdp_frame(json!({"id": 1, "result": {"targetId": "T1"}})),
+            cdp_frame(json!({"id": 2, "result": {"sessionId": "S1"}})),
+        ];
+        chunks.extend(rest);
+        FakeCdp::new(chunks)
+    }
+
+    #[test]
+    fn run_batch_attaches_once_then_runs_steps_in_sequence() {
+        // navigate (Page.enable id3, Page.navigate id4) puis read (Runtime.evaluate id5).
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {}})),
+            cdp_frame(json!({"id": 4, "result": {"frameId": "F1"}})),
+            cdp_frame(json!({"id": 5, "result": {"result": {"value": "<html>hi</html>"}}})),
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Navigate {
+                    host: "github.com".to_string(),
+                    url: "https://github.com/x".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "completed");
+        assert_eq!(out["attached"], true);
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["status"], "completed");
+        assert_eq!(steps[0]["result"]["navigated"], "https://github.com/x");
+        assert_eq!(steps[1]["status"], "completed");
+        assert_eq!(steps[1]["result"]["html"], "<html>hi</html>");
+    }
+
+    #[test]
+    fn run_batch_is_fail_closed_and_stops_on_the_first_non_completed_step() {
+        // read (Runtime.evaluate id3) réussit ; click échoue à son resolve (querySelector id5 →
+        // nodeId 0, rien ne matche → Failed) → le batch s'arrête, le 3e read ne tire PAS. (click
+        // et non submit : submit doit être terminal, mais on teste ici l'arrêt sur étape faillible
+        // AU MILIEU.)
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"result": {"value": "<html>a</html>"}}})), // read
+            cdp_frame(json!({"id": 4, "result": {"root": {"nodeId": 1}}})), // click getDocument
+            cdp_frame(json!({"id": 5, "result": {"nodeId": 0}})),           // querySelector → 0
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Read,
+                BrowserAction::Click {
+                    selector: "#none".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "failed");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2, "le 3e read ne doit PAS tirer (fail-closed)");
+        assert_eq!(steps[0]["status"], "completed");
+        assert_eq!(steps[1]["status"], "failed");
+        assert!(steps[1]["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("browser.click"));
+    }
+
+    #[test]
+    fn run_batch_surfaces_an_indeterminate_interaction_and_stops() {
+        // click dont le callFunctionOn est ÉMIS puis le flux se casse (poison après émission) →
+        // step INDETERMINATE → le batch s'arrête, statut "indeterminate" : l'appelant ne DOIT PAS
+        // ré-exécuter (double-effet). Le read suivant ne tire pas. (click, non-terminal, illustre
+        // le chemin indeterminate d'une INTERACTION au milieu d'un batch.)
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"root": {"nodeId": 1}}})), // getDocument
+            cdp_frame(json!({"id": 4, "result": {"nodeId": 5}})),           // querySelector
+            cdp_frame(json!({"id": 5, "result": {"object": {"objectId": "O"}}})), // resolveNode
+                                                                            // pas de réponse au callFunctionOn (id 6) → poison après émission
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Click {
+                    selector: "#buy".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "indeterminate");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(
+            steps.len(),
+            1,
+            "le read après une interaction indéterminée ne tire pas"
+        );
+        assert_eq!(steps[0]["status"], "indeterminate");
+    }
+
+    #[test]
+    fn run_batch_reclassifies_a_post_mutation_failure_as_indeterminate() {
+        // (Fable 5, BLOQUANT anti-double-POST) Un `click` qui COMPLÈTE (son POST onclick a
+        // PEUT-ÊTRE été émis) PUIS une étape faillible : le batch ne doit JAMAIS ressortir
+        // `failed` (rejouable) — sinon l'appelant rejoue et re-tire le POST. Il doit être
+        // `indeterminate` (ne-pas-réessayer). click1 complète (getDocument/querySelector/
+        // resolveNode/callFunctionOn OK, ids 3-6) ; click2 échoue à son resolve (querySelector →
+        // 0, AVANT toute émission → `Failed` en soi, ids 7-8).
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 4, "result": {"nodeId": 5}})),
+            cdp_frame(json!({"id": 5, "result": {"object": {"objectId": "O"}}})),
+            cdp_frame(json!({"id": 6, "result": {"result": {}}})),
+            cdp_frame(json!({"id": 7, "result": {"root": {"nodeId": 1}}})),
+            cdp_frame(json!({"id": 8, "result": {"nodeId": 0}})),
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Click {
+                    selector: "#a".to_string(),
+                },
+                BrowserAction::Click {
+                    selector: "#none".to_string(),
+                },
+            ],
+        };
+        let out = run_batch(s, &batch);
+        // Le VERDICT du batch est `indeterminate` (ne-pas-rejouer), PAS `failed` — bien que
+        // l'étape 2 ait échoué AVANT émission : l'étape 1 a pu muter.
+        assert_eq!(out["batch"], "indeterminate");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0]["status"], "completed");
+        // L'étape faillible garde son statut PROPRE `failed` ; seul le verdict du batch est relevé.
+        assert_eq!(steps[1]["status"], "failed");
+    }
+
+    #[test]
+    fn run_batch_defensively_refuses_a_non_terminal_submit_without_executing() {
+        // Défense en profondeur (Fable 5) : même si un batch avec `submit` non-terminal est
+        // construit directement (contournant parse_batch), run_batch le REFUSE avant d'attacher/
+        // exécuter — aucun POST tiré. FakeCdp vide : si run_batch exécutait quoi que ce soit, il
+        // échouerait autrement.
+        let chan = FakeCdp::new(vec![]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Submit {
+                    selector: "form".to_string(),
+                },
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "failed");
+        assert_eq!(out["attached"], false);
+        assert_eq!(out["steps"].as_array().unwrap().len(), 0);
+        assert!(out["error"].as_str().unwrap().contains("non-terminal"));
+    }
+
+    #[test]
+    fn run_batch_reports_a_failed_attach_without_panicking() {
+        // createTarget id1 répond sans targetId → attach_page échoue → batch failed, attached=false.
+        let chan = FakeCdp::new(vec![cdp_frame(json!({"id": 1, "result": {}}))]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![BrowserAction::Read],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "failed");
+        assert_eq!(out["attached"], false);
+        assert_eq!(out["steps"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn run_batch_caps_a_single_oversized_step_result_as_failed() {
+        // (F2) Un SEUL read renvoyant un HTML > cap PAR ÉTAPE devient `failed` (le body hostile
+        // n'est pas poussé), pas `completed` — la borne par-étape empêche un unique body géant
+        // de crever le budget.
+        let big = "x".repeat(MAX_STEP_RESULT_BYTES + 1);
+        let chan = cdp_with_attach(vec![cdp_frame(
+            json!({"id": 3, "result": {"result": {"value": big}}}),
+        )]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![BrowserAction::Read],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "failed");
+        let steps = out["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["status"], "failed");
+        assert!(steps[0]["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("trop grand"));
+    }
+
+    #[test]
+    fn run_batch_does_not_mark_truncated_when_the_last_step_completes() {
+        // (F1) Deux reads sous le cap PAR ÉTAPE mais dont le cumul dépasse le cap d'agrégat AU
+        // DERNIER step : le batch est `completed` (tout a tourné), JAMAIS `truncated` — sinon un
+        // consommateur rationnel re-exécuterait un batch déjà entièrement fait (double-exécution).
+        let half = "x".repeat(MAX_BATCH_RESULT_BYTES / 2 + 100_000); // 2 × > cap d'agrégat
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"result": {"value": half.clone()}}})),
+            cdp_frame(json!({"id": 4, "result": {"result": {"value": half}}})),
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![BrowserAction::Read, BrowserAction::Read],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(
+            out["batch"], "completed",
+            "un batch entièrement complété n'est jamais truncated"
+        );
+        assert_eq!(out["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(out["steps_total"], 2);
+    }
+
+    #[test]
+    fn run_batch_truncates_only_when_steps_remain_after_the_aggregate_cap() {
+        // Trois reads : après 2, le cumul dépasse le cap d'agrégat ET il reste un step →
+        // `truncated`, le 3e ne tire pas.
+        let half = "x".repeat(MAX_BATCH_RESULT_BYTES / 2 + 100_000);
+        let chan = cdp_with_attach(vec![
+            cdp_frame(json!({"id": 3, "result": {"result": {"value": half.clone()}}})),
+            cdp_frame(json!({"id": 4, "result": {"result": {"value": half}}})),
+        ]);
+        let s = CdpSession::new(chan);
+        let batch = BrowserBatch {
+            steps: vec![
+                BrowserAction::Read,
+                BrowserAction::Read,
+                BrowserAction::Read,
+            ],
+        };
+        let out = run_batch(s, &batch);
+        assert_eq!(out["batch"], "truncated");
+        assert_eq!(
+            out["steps"].as_array().unwrap().len(),
+            2,
+            "le 3e read ne tire pas"
+        );
+        assert_eq!(out["steps_total"], 3);
+    }
+
+    #[test]
+    fn parse_batch_rejects_unknown_keys_the_assert_trap() {
+        // (F5) Une clé inconnue (ex un futur `assert` sur un `read`) est refusée fail-closed —
+        // sinon l'étape passerait comme un `Read` nu et la vérif ne tournerait jamais, en silence.
+        assert!(
+            parse_batch(&json!({"steps": [{"verb": "read", "assert": {"x": 1}}]}))
+                .unwrap_err()
+                .contains("clé inconnue")
+        );
+        assert!(parse_batch(
+            &json!({"steps": [{"verb": "navigate", "url": "https://x", "extra": 1}]})
+        )
+        .unwrap_err()
+        .contains("clé inconnue"));
+        // Contrôle négatif : les clés légitimes par verbe passent.
+        assert!(parse_batch(
+            &json!({"steps": [{"verb": "fill", "selector": "#q", "value": "hi"}]})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn parse_batch_requires_submit_to_be_the_last_step() {
+        // (F1, BLOQUANT) submit non-terminal → refusé (anti double-POST par batch).
+        assert!(parse_batch(&json!({"steps": [
+            {"verb": "submit", "selector": "form"}, {"verb": "read"}
+        ]}))
+        .unwrap_err()
+        .contains("DERNIÈRE étape"));
+        // Deux submits → refusé (le 1er n'est pas le dernier).
+        assert!(parse_batch(&json!({"steps": [
+            {"verb": "submit", "selector": "a"}, {"verb": "submit", "selector": "b"}
+        ]}))
+        .unwrap_err()
+        .contains("DERNIÈRE étape"));
+        // submit EN DERNIER (le flux prévu navigate→fill→submit) → OK.
+        assert!(parse_batch(&json!({"steps": [
+            {"verb": "navigate", "url": "https://x.com"},
+            {"verb": "fill", "selector": "#q", "value": "hi"},
+            {"verb": "submit", "selector": "form"}
+        ]}))
+        .is_ok());
+        // submit seul (dernier ET premier) → OK.
+        assert!(parse_batch(&json!({"steps": [{"verb": "submit", "selector": "form"}]})).is_ok());
     }
 }

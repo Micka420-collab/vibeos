@@ -101,8 +101,11 @@ pub fn host_of(url: &str) -> Option<String> {
     Some(host)
 }
 
-/// Is this a syntactically valid, already-normalized ASCII host?
-fn is_valid_host(host: &str) -> bool {
+/// Is this a syntactically valid, already-normalized ASCII host? Source de vérité UNIQUE de la
+/// forme canonique d'un host : `host_of` s'en sert pour valider une URL, et le proxy CONNECT
+/// (`crate::proxy`) DOIT s'en servir aussi, sinon deux parseurs valident différemment le même
+/// domaine sur un couple de gardes egress (Fable 5). Suppose un host déjà en minuscules.
+pub(crate) fn is_valid_host(host: &str) -> bool {
     if host.is_empty() || host.len() > MAX_HOST_LEN {
         return false;
     }

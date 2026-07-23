@@ -5,10 +5,17 @@
 //! one family, with its own tests.
 
 pub(crate) mod browser;
+pub(crate) mod consolidate;
 pub(crate) mod deploy;
+pub(crate) mod embed;
+pub(crate) mod embeddings;
 pub(crate) mod fs;
 pub(crate) mod log;
 pub(crate) mod memory;
+pub(crate) mod policy_tool;
+pub(crate) mod propose;
+pub(crate) mod recall;
 pub(crate) mod sandbox_tool;
 pub(crate) mod sectools;
 pub(crate) mod svc;
+pub(crate) mod user_model;

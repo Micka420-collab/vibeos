@@ -65,6 +65,7 @@ c'est le mécanisme, pas un cas particulier.
 /var/lib/vibeos/memory/          # racine, root:root 0700 — v0.1 : répertoire en clair (LUKS ou tmpfs : Phase 3)
 ├── identity.toml                # identité de la machine — écrit UNE fois par Genesis
 ├── hardware.json                # profil matériel — écrit par Genesis
+├── personality.toml             # caractère du citoyen IA, choisi à la naissance — écrit par Genesis
 ├── user/                        # profil de l'humain
 │   ├── README.md                # placeholder posé par Genesis
 │   ├── profile.toml             # (rempli au fil de l'eau) identité déclarée
@@ -90,6 +91,7 @@ c'est le mécanisme, pas un cas particulier.
 |---|---|---|---|---|
 | `identity.toml` | TOML | Genesis uniquement | `memory.query` (T0) | **interdite** |
 | `hardware.json` | JSON | Genesis uniquement | `memory.query` (T0) | **interdite** |
+| `personality.toml` | TOML | Genesis uniquement | `memory.query` (T0, scope `personality`) | **interdite** |
 | `user/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `user`) |
 | `projects/updates.jsonl` | JSONL | `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only ; scope `projects`) |
 | `journal/*.jsonl` | JSONL | Genesis puis `vibed` | `memory.query` (T0) | ✅ `memory.append` (T1, append-only) |
@@ -223,7 +225,56 @@ Faits durables extraits du journal : `facts.jsonl` avec
 `{ "id", "ts", "subject", "fact", "confidence", "source" }`. Le répertoire
 `embeddings/` est réservé à un index vectoriel local (embeddings calculés par
 ollama, jamais envoyés dans le cloud) pour la recherche sémantique de
-`memory.query` — hors périmètre v0.1.
+`memory.query`.
+
+**Sous-système d'embedding (couches pures livrées ; production différée).** Trois
+couches pures et testées composent la recherche vectorielle, prêtes à activer dès
+que l'appel ollama sera câblé (Phase 3, machine bootée — jamais dans le cloud) :
+`tools/embed.rs` **produit** les vecteurs (contrat requête/réponse fail-closed
+vers ollama `/api/embed`), `tools/embeddings.rs` **stocke** l'index et calcule le
+cosinus, `tools/recall.rs` **classe** avec le cosinus quand les vecteurs existent
+(repli lexical sinon). La **seule** pièce différée est l'appel HTTP local
+lui-même (et le choix du contenu à embarquer) — d'ici là ces couches ne sont pas
+appelées à l'exécution.
+
+**Consolidation (livré — [ADR-030](DECISIONS.md)).** `facts.jsonl` est
+**append-only** : un même fait ré-affirmé s'y accumule en autant de lignes. La
+**vue consolidée** (`vibed/src/tools/consolidate.rs`, pur/testé) **déduplique par
+`(subject, fact)`**, dernière écriture gagnant (le `ts` le plus récent), et rend
+une vue stable et ordonnée — l'analogue « savoir » du fold `user`/`projects`.
+Exposée à l'opérateur par `vibectl memory knowledge` et aux agents par
+`memory.query fold:true` (scope `knowledge`). **Invariant §9, non négociable** :
+la consolidation **compacte, elle ne juge pas** — elle n'élève **jamais** la
+confiance d'un fait (ni par nombre d'assertions, ni par `source` — tous deux non
+fiables) ; la confiance rendue est celle stockée par l'entrée gagnante. La
+synthèse sémantique (dérivation de nouveaux faits à partir du journal) resterait
+une tâche `vibed` future, et devrait honorer le même invariant.
+
+**Classement de rappel (livré et câblé — lexical ; vecteurs à venir — [ADR-030](DECISIONS.md)).**
+Une mémoire qui grossit sans classement se dégrade : tout remonter noie le
+signal, filtrer par sous-chaîne rate le souvenir pertinent mal nommé.
+`vibed/src/tools/recall.rs` implémente — **pur, déterministe, testé** — le
+**score de rappel** que `memory.query` applique en mode `rank`, d'après le
+modèle *memory stream* des *Generative Agents* (Park et al. 2023) :
+
+```text
+score = w_récence · récence + w_importance · importance + w_pertinence · pertinence
+```
+
+- **récence** : décroissance exponentielle par demi-vie, `[0, 1]` ;
+- **importance** : saillance dérivée du **type** d'événement journal (§3.5) —
+  `decision` > `preference` > `observation` > `tool_call`… — **jamais** d'un
+  champ auto-déclaré par l'agent (§9 : `source`/`data`/`fact` sont NON FIABLES) ;
+- **pertinence** : deux moteurs de même échelle `[0, 1]`, **lexical** (Jaccard
+  des jetons, hors-ligne, immédiat) et **vectoriel** (cosinus de
+  `knowledge/embeddings/`, replié `[-1,1]→[0,1]`) — `recall.rs` est le **premier
+  consommateur réel** de la couche `embeddings`.
+
+Ce classement est **livré ET câblé** : `memory.query` en mode `rank: true`
+(opt-in, scopes `journal`/`knowledge`, §9) l'applique aux événements. Le moteur
+**lexical** de pertinence est donc actif ; restent à venir la **production des
+vecteurs** (ollama local) et le branchement du moteur **vectoriel** (le cosinus
+de `embeddings/`, déjà présent dans `recall.rs` mais inerte).
 
 ### 3.7 Permissions et confinement
 
@@ -233,6 +284,63 @@ ollama, jamais envoyés dans le cloud) pour la recherche sémantique de
   (systemd hardening, seccomp, landlock) n'ont **aucune vue** sur ce chemin.
 - Conséquence : le seul chemin d'accès pour un agent est le socket MCP
   `/run/vibed/mcp.sock`, donc le moteur de politiques et l'audit (§9).
+
+### 3.8 `personality.toml` (schema 1)
+
+Le **caractère du citoyen IA**, choisi par la machine **à sa naissance**. C'est
+le pendant « âme » de `identity.toml` (le pendant « corps » étant
+`hardware.json`) : écrit **une seule fois** par Genesis, jamais par
+`memory.append`, lisible via `memory.query` (scope `personality`). Voir
+[ADR-029](DECISIONS.md).
+
+```toml
+schema = 1
+name = "Lumen"                 # nom choisi dans un vivier de noms neutres
+archetype = "sentinelle"       # l'axe de trait dominant, valeur en français
+tone = "concis et direct"      # comment il s'exprime, dérivé des axes de tête
+birth = "2026-07-21T13:49:41+00:00"  # même instant que identity.birth
+seed = "2067ece4"              # empreinte FNV-1a de l'ancre (traçabilité)
+
+[traits]                       # six axes 0..100, dérivés du seed
+curiosity = 62
+caution = 78                   # plancher 50 — un citoyen VibeOS n'est jamais imprudent
+initiative = 40
+warmth = 55
+concision = 70
+playfulness = 33
+
+[values]                       # valeurs civiques héritées, non tirées au sort
+principles = ["la sécurité d'abord", "la transparence", "la mémoire appartient à l'humain"]
+
+[adaptation]                   # comment le caractère se plie à l'humain (symbiose)
+source = "user.model"          # signal ADR-028
+concision = "rhythm+preferences"
+warmth = "friction"
+initiative = "patterns"
+note = "Caractère de naissance. Il évolue vers vous ; il ne vous imite pas."
+```
+
+**Déterminisme et unicité.** Le caractère est **dérivé de façon déterministe**
+d'une **ancre stable** — `machine_id` (repli `hostname`) — par une fonction de
+hachage FNV-1a **en bash pur** (aucun outil externe, hors-ligne, reproductible).
+Conséquences voulues :
+
+- **une installation = un caractère unique** (les `machine_id` diffèrent) : « à
+  chaque installation l'IA choisit sa personnalité » est réel, pas du théâtre ;
+- **même machine = même caractère à chaque boot**, y compris en **mode
+  amnésique** — la mémoire est effacée à chaque démarrage, le tempérament de
+  naissance ne l'est pas (`machine_id` vit dans `/etc`, hors du tmpfs). L'âme est
+  constante ; seul ce qu'elle apprend est effacé.
+
+**Naissance puis symbiose.** `[traits]` est un tempérament **de naissance** ; la
+table `[adaptation]` déclare le **contrat d'évolution** — quels traits se
+réajustent à partir de quel champ du signal `user.model` ([ADR-028](DECISIONS.md)).
+La **boucle de réécriture vivante** (un agent qui replie `user.model` dans
+`personality.toml`) est une **sur-couche (Phase 3)** ; ce qui est **livré** est
+la naissance déterministe, le schéma, le contrat d'adaptation et l'exposition en
+lecture. L'« éveil » visible (le bloc futuriste imprimé sur la console de
+premier boot par `genesis.sh`) accompagne la naissance ; la cérémonie graphique
+riche dans le HUD reste **machine-gated** (pas d'ISO bootée).
 
 ---
 
@@ -266,14 +374,32 @@ Séquence exacte exécutée par `/usr/libexec/vibeos/genesis.sh`
    `birth = date -Is`, `mode` (persistent par défaut, amnesic si la variable
    d'environnement `VIBEOS_MEMORY_MODE=amnesic` est injectée — par le generator
    amnésique livré, cf. §5).
-6. Pose des `README.md` placeholders dans les cinq sous-répertoires.
-7. Premier événement du journal : `type: "genesis"` dans le fichier du jour.
-8. **En dernier** : écriture de `.initialized` (contenu : horodatage de naissance).
+6. Écriture de `personality.toml` : le **caractère du citoyen IA** dérivé de
+   façon déterministe de `machine_id` (§3.8, [ADR-029](DECISIONS.md)) — nom,
+   archétype, six axes de trait, ton, contrat d'`[adaptation]`.
+7. Pose des `README.md` placeholders dans les cinq sous-répertoires.
+8. Premier événement du journal : `type: "genesis"` (portant le caractère né :
+   nom/archétype/seed) dans le fichier du jour.
+8bis. **L'interview de naissance** (opt-in) : `genesis-interview.sh`, appelé
+   best-effort entre l'éveil et la sentinelle. Sans TTY sur stdin et sans
+   `VIBEOS_INTERVIEW=1`, c'est un no-op silencieux — un premier boot sans
+   surveillance n'est **jamais** bloqué. Opt-in : 4 questions (nom d'usage,
+   langue, domaine, style de collaboration) écrites en append-only dans
+   `user/updates.jsonl` (`profile.name`, `profile.lang`, `profile.domain`,
+   `preferences.collaboration`, source `genesis-interview`), échappées JSON
+   (anti-empoisonnement), idempotent (un rejeu ne double-écrit pas). Réponses
+   injectables par `VIBEOS_INTERVIEW_*` (testable en CI sans TTY).
+9. **L'éveil** : un bloc futuriste imprimé sur la console (stderr) révélant le
+   citoyen qui vient de naître — purement cosmétique, gardé pour ne jamais
+   pouvoir faire échouer Genesis.
+10. **En dernier** : écriture de `.initialized` (contenu : horodatage de naissance).
 
-L'ordre 8-en-dernier rend Genesis **crash-safe** : une interruption à n'importe
-quelle étape laisse `.initialized` absent, donc la séquence se rejoue intégralement
-au boot suivant. Toutes les écritures des étapes 3–7 sont des créations/écrasements
-idempotents.
+L'ordre « sentinelle-en-dernier » rend Genesis **crash-safe** : une interruption
+à n'importe quelle étape laisse `.initialized` absent, donc la séquence se rejoue
+intégralement au boot suivant. Toutes les écritures des étapes 3–8 sont des
+créations/écrasements idempotents (le caractère, dérivé d'une ancre stable, se
+réécrit à l'identique) — sauf l'ajout au journal (étape 8), append-only, donc
+**gardé** (voir le script) pour ne jamais estampiller une seconde naissance.
 
 Périmètre strict de `genesis.sh` : il crée des répertoires et des fichiers, rien
 d'autre. **Ni `cryptsetup`, ni `mkfs`, ni montage, ni option de ligne de
@@ -386,12 +512,18 @@ aujourd'hui** : `vibed` n'applique encore aucune logique de rétention.
 humaine obligatoire, et laisse elle-même un événement `purge` dans le journal
 (on n'efface pas le fait d'avoir effacé).
 
-**Oubli total (factory reset)** : en v0.1, suppression du répertoire mémoire
-(dont `.initialized`) ; à partir de la Phase 3, destruction des en-têtes LUKS
-(`cryptsetup erase` + ré-initialisation du volume) — un effacement cryptographique,
-pas une simple suppression. Dans les deux cas la machine redevient vierge : au boot
-suivant, Genesis rejoue et une nouvelle `birth` est écrite. L'OS immuable est
-inchangé.
+**Oubli total (factory reset)** : ✅ livré — `vibectl memory reset --yes`
+(root-only ; sans `--yes`, la commande **refuse** et liste ce qui serait
+détruit). Elle supprime `.initialized`, les fichiers de naissance
+(`identity.toml`, `hardware.json`, `personality.toml`) et le **contenu** des
+sous-répertoires (`user/`, `projects/`, `journal/`, `knowledge/`,
+`reasoning/`) — sans toucher la racine ni les sous-répertoires (point de
+montage préservé, layout prêt pour le rejeu), ni les fichiers inconnus (elle ne
+détruit que ce qu'elle connaît). À partir de la Phase 3, s'y ajoutera la
+destruction des en-têtes LUKS (`cryptsetup erase` + ré-initialisation du
+volume) — un effacement cryptographique, pas une simple suppression. Dans les
+deux cas la machine redevient vierge : au boot suivant, Genesis rejoue et une
+nouvelle `birth` est écrite. L'OS immuable est inchangé.
 
 ---
 
@@ -422,14 +554,15 @@ Transport : socket UNIX `/run/vibed/mcp.sock`, JSON-RPC 2.0 (serveur MCP de
 `memory.query` (arguments `query`, `scope`, `limit`, `fold`) et `memory.append`
 (scopes `journal`, `knowledge`, `user`, `projects` — tous append-only) sont
 **implémentés, testés et exposés** par le démon `vibed`. La **vue courante**
-(fold last-write-wins des scopes `user`/`projects`) est matérialisée pour
-l'opérateur par `vibectl memory profile`/`projects` **et pour les agents** par
-`memory.query` avec `fold: true` (T0, un seul appel) — les deux **livrés**.
-Reste une **cible ultérieure** : la recherche sémantique par embeddings.
+(fold last-write-wins des scopes `user`/`projects`, et **consolidation
+dédupliquée** du scope `knowledge` — ADR-030) est matérialisée pour
+l'opérateur par `vibectl memory profile`/`projects`/`knowledge` **et pour les
+agents** par `memory.query` avec `fold: true` (T0, un seul appel) — tous
+**livrés**. Reste une **cible ultérieure** : la recherche sémantique par embeddings.
 
 | Outil | Tier | Approbation par défaut | Rôle | Statut |
 |---|---|---|---|---|
-| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** ; `fold:true` sur `user`/`projects` = vue consolidée | ✅ **livré** (scope/limit + extraits + fold) |
+| `memory.query` | **T0** (observe) | automatique | lecture seule (`query` + `scope`/`limit`), chaque match rendu **avec un extrait de contenu borné** ; `fold:true` sur `user`/`projects`/`knowledge` = vue consolidée ; `rank:true` sur `journal`/`knowledge` = classement de rappel | ✅ **livré** (scope/limit + extraits + fold + rank) |
 | `memory.append` | **T1** (modify-user) | automatique (révocable par policy) | écriture strictement additive | ✅ **livré** pour `journal`, `knowledge`, `user`, `projects` (tous append-only) |
 
 Points durs :
@@ -452,11 +585,13 @@ Points durs :
   contenu **auto-déclaré par l'agent**, lui-même un *insider non fiable*
   (THREAT-MODEL §1) : un agent peut inscrire `source: "genesis.sh"` ou un
   `fact` mensonger. `source` est une **étiquette de commodité**, jamais une
-  preuve de provenance ni d'autorité. Toute lecture — et en particulier une
-  future **consolidation/synthèse `knowledge`** (dédup, agrégation, calcul de
-  confiance) — doit traiter ces champs comme des assertions non vérifiées :
-  ne jamais élever la confiance d'un fait sur la seule foi de son `source`, ne
-  jamais accorder un privilège d'après lui. La seule identité fiable est l'uid
+  preuve de provenance ni d'autorité. Toute lecture — et en particulier la
+  **consolidation `knowledge`** (§3.6, livrée : dédup last-write-wins) — doit
+  traiter ces champs comme des assertions non vérifiées :
+  ne jamais élever la confiance d'un fait sur la seule foi de son `source` (ni
+  du nombre d'assertions), ne
+  jamais accorder un privilège d'après lui. C'est **exactement** l'invariant que
+  `consolidate.rs` respecte : il compacte, il ne juge pas. La seule identité fiable est l'uid
   `SO_PEERCRED` du journal d'audit. Corollaire : la mémoire n'est pas un
   coffre-fort — **aucun secret** ne doit y être écrit.
 - Chaque appel — accepté ou refusé — est audité et produira, à terme, un événement
@@ -478,18 +613,37 @@ Points durs :
 }
 ```
 
-Trois arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
-sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` | `user` |
-`projects` | `journal` | `knowledge` (restreint la marche à une entrée du
-layout §3 ; un scope inconnu est une erreur explicite) et `limit` (entier ≥ 1,
-plafond de résultats — la réponse porte un drapeau `truncated`). Chaque match
+Quatre arguments, tous optionnels : `query` (filtrage lexical — sous-chaîne
+sur le nom relatif et le contenu), `scope` ∈ `identity` | `hardware` |
+`personality` | `user` | `projects` | `journal` | `knowledge` (restreint la
+marche à une entrée du layout §3 ; un scope inconnu est une erreur explicite),
+`limit` (entier ≥ 1,
+plafond de résultats — la réponse porte un drapeau `truncated`) et `rank`
+(booléen, ci-dessous). Chaque match du mode par défaut
 est rendu `{ "file": <chemin relatif>, "snippet": <extrait de contenu borné,
 ≤ 1024 caractères>, "snippet_truncated": <bool> }` : l'agent **lit la mémoire
 en un seul appel**, sans enchaîner un `fs.read` sur le chemin absolu — la lecture
 est le rôle de `memory.query`, conformément à cette spec. La marche reste bornée
 en dur (200 fichiers, 64 KiB scannés par fichier, extrait ≤ 1024 caractères).
 
-**Cible ultérieure** : la recherche sémantique via `knowledge/embeddings/`.
+**`rank: true` (✅ livré, opt-in — scopes `journal`/`knowledge`).** Au lieu de
+rendre des **fichiers** dans l'ordre du parcours (dépendant du système de
+fichiers), le mode `rank` classe les **événements** par le **score de rappel**
+(récence + importance + pertinence, [`recall.rs`](../vibed/src/tools/recall.rs) §3.6,
+[ADR-030](DECISIONS.md)) — `limit` garde alors les **plus pertinents**, pas les
+premiers rencontrés. Chaque match rend `{ "file", "line", "ts", "type", "score",
+"snippet", "snippet_truncated" }` ; la réponse porte `"ranked": true` et
+`"scanned_events"`. **Additif** : `rank` vaut `false` par défaut et le chemin
+par défaut est inchangé (même précédent que `fold`). L'importance vient du
+**type** d'événement (journal) ou de la **confidence** stockée (knowledge),
+**jamais** d'un champ auto-déclaré (§ points durs : `source`/`data`/`fact` non
+fiables). Bornes respectées : `MAX_MEMORY_FILES` (parcours), 64 KiB/fichier
+(lecture), et un plafond dur d'événements classés par appel.
+
+**Cible ultérieure** : la pertinence **vectorielle** (cosinus de
+`knowledge/embeddings/`, moteur déjà présent dans `recall.rs` mais **inerte**
+tant que la production des vecteurs — ollama local — n'existe pas). Le moteur
+**lexical** du classement, lui, est **livré et câblé** (`rank`).
 
 ### `memory.append` (T1 — ✅ livré pour `journal` et `knowledge`)
 

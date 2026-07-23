@@ -94,6 +94,7 @@ Limite honnête de la v0.1 : l'initrd généré localement et la cmdline ne sont
 - **SELinux enforcing** : politique ciblée héritée de Fedora. Le module dédié `vibed_t` confinant le démon et ses sous-processus d'exécution d'outils est une cible **Phase 4**. Aucun mode permissif, y compris en développement.
 - **Wayland / KDE Plasma 6** : session graphique par défaut (héritage Kinoite). X11 non installé. Les dialogues d'approbation humaine (voir §4) s'afficheront (Phase 4, jalon ROADMAP du flux d'approbation) via une intégration Plasma (portail/notification) parlant à `vibed` par le socket MCP côté privilégié.
 - **Espace utilisateur applicatif** : Flatpak pour les applications graphiques, `toolbox`/conteneurs pour le développement — la racine reste intacte.
+- **Réglage noyau pour charges IA** ([ADR-025](DECISIONS.md)) : l'image livre `/usr/lib/sysctl.d/50-vibeos-ai.conf` (jeu zram cohérent — `page-cluster`/`swappiness`/watermarks —, writeback borné en octets, `inotify` élargi pour les agents observateurs, TCP BBR pour les pulls multi-Go) et un drop-in zram `compression-algorithm = zstd` (fusion par option, le dimensionnement Fedora est conservé). Le noyau reste le noyau **générique Fedora** (config dédiée : Phase 7+) et la cmdline n'est pas touchée (UKI : Phase 4). L'application effective est prouvée au boot par l'invariant `kernel-tuning` du selfcheck (18ᵉ check, [BOOT-VALIDATION.md](BOOT-VALIDATION.md)).
 
 ---
 
@@ -199,7 +200,7 @@ L'OS est livré **vierge** : l'image ne contient aucune mémoire. La mémoire de
   ConditionPathExists=!/var/lib/vibeos/memory/.initialized
   ```
 
-  Il exécute `/usr/libexec/vibeos/genesis.sh` (source du dépôt : [memory/genesis.sh](../memory/genesis.sh)) : création de l'arborescence mémoire (`identity.toml`, `hardware.json`, squelette `user/`, `projects/`, `journal/`, `knowledge/`), premier événement de journal, puis marqueur `.initialized` en dernier (crash-safe). **`genesis.sh` ne fait ni `cryptsetup`, ni `mkfs`, ni aucun montage**, et n'accepte aucun flag : le mode est lu depuis la variable d'environnement `VIBEOS_MEMORY_MODE` (`persistent` par défaut).
+  Il exécute `/usr/libexec/vibeos/genesis.sh` (source du dépôt : [memory/genesis.sh](../memory/genesis.sh)) : création de l'arborescence mémoire (`identity.toml`, `hardware.json`, `personality.toml`, squelette `user/`, `projects/`, `journal/`, `knowledge/`), premier événement de journal, puis marqueur `.initialized` en dernier (crash-safe). Le **caractère du citoyen IA** (`personality.toml`) est choisi à la naissance, dérivé de façon déterministe de `machine_id` — unique par installation, stable à chaque boot ([ADR-029](DECISIONS.md), [MEMORY.md §3.8](MEMORY.md)). **`genesis.sh` ne fait ni `cryptsetup`, ni `mkfs`, ni aucun montage**, et n'accepte aucun flag : le mode est lu depuis la variable d'environnement `VIBEOS_MEMORY_MODE` (`persistent` par défaut).
 - **Mode amnésique** (style Tails — **Phase 3, non livré en v0.1**) : activable par option kernel `vibeos.amnesic=1`, lue par un *generator* systemd (Phase 3) qui montera un **tmpfs** sur `/var/lib/vibeos/memory` et injectera `VIBEOS_MEMORY_MODE=amnesic` dans l'environnement de Genesis. La mémoire sera reconstruite **à chaque boot** et perdue à l'extinction, sans écriture disque.
 - **Administration** : CLI `vibectl` (futur — statut : planifié, voir [../ROADMAP.md](../ROADMAP.md)).
 

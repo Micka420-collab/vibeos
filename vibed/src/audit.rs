@@ -124,6 +124,31 @@ impl AuditLog {
         outcome: &str,
         caller: Caller,
     ) -> io::Result<()> {
+        self.record_with_digest(
+            tool,
+            &fnv1a_64_hex(args.to_string().as_bytes()),
+            target,
+            decision,
+            outcome,
+            caller,
+        )
+    }
+
+    /// Same as [`AuditLog::record`], with the arguments digest already
+    /// computed. The two records of one tool call (`started` + final outcome)
+    /// always carried the same digest — same arguments — yet each `record`
+    /// re-serialized the full argument tree (up to ~1 MiB for `fs.write`) to
+    /// recompute it. The dispatch path computes the digest once per call and
+    /// shares it between both records through this entry point.
+    pub fn record_with_digest(
+        &self,
+        tool: &str,
+        args_digest: &str,
+        target: Option<&str>,
+        decision: &str,
+        outcome: &str,
+        caller: Caller,
+    ) -> io::Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
@@ -147,7 +172,7 @@ impl AuditLog {
             "ts_unix_ms": ts_unix_ms,
             "tool": tool,
             "target": target,
-            "args_fnv1a64": fnv1a_64_hex(args.to_string().as_bytes()),
+            "args_fnv1a64": args_digest,
             "decision": decision,
             "outcome": outcome,
             "caller_uid": caller.uid,
@@ -379,7 +404,9 @@ pub fn verify_chain(dir: &Path) -> io::Result<ChainVerification> {
 /// digest of the (secret-bearing) arguments — its job is to let two records be
 /// correlated without ever storing the arguments, NOT to secure the log. The
 /// log's integrity comes from the SHA-256 hash chain above.
-fn fnv1a_64_hex(bytes: &[u8]) -> String {
+/// `pub(crate)` so the dispatch path (`mcp::try_audit`) can compute it once
+/// per call and feed [`AuditLog::record_with_digest`].
+pub(crate) fn fnv1a_64_hex(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &byte in bytes {
         hash ^= u64::from(byte);
@@ -679,6 +706,49 @@ mod tests {
         let v = verify_chain(&dir).expect("verify");
         assert!(!v.ok, "deleting a record must break the chain");
         assert_eq!(v.broken_at, Some(2));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_and_record_with_digest_write_the_same_digest_field() {
+        let dir = temp_test_dir("digest-parity");
+        let log = AuditLog::new(dir.clone());
+        let args = json!({"name": "htop"});
+        let digest = fnv1a_64_hex(args.to_string().as_bytes());
+
+        // One record through each entry point, same arguments.
+        log.record(
+            "pkg.install",
+            &args,
+            Some("htop"),
+            "allow",
+            "ok",
+            Caller::default(),
+        )
+        .expect("record");
+        log.record_with_digest(
+            "pkg.install",
+            &digest,
+            Some("htop"),
+            "allow",
+            "ok",
+            Caller::default(),
+        )
+        .expect("record_with_digest");
+
+        let content = fs::read_to_string(sole_daily_file(&dir)).unwrap();
+        let lines: Vec<Value> = content
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0]["args_fnv1a64"], lines[1]["args_fnv1a64"],
+            "both entry points must produce the identical correlation digest"
+        );
+        assert_eq!(lines[0]["args_fnv1a64"], Value::String(digest));
+        // The chain still verifies across both entry points.
+        assert!(verify_chain(&dir).unwrap().ok);
         let _ = fs::remove_dir_all(&dir);
     }
 

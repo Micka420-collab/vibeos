@@ -21,6 +21,11 @@ import { ClaudeAcpAgent, runAcp } from "@agentclientprotocol/claude-agent-acp";
 import { checkPolicy, DEFAULT_SOCKET } from "./policy-client.js";
 import { applyGovernanceGate, type GateableAgent } from "./patch.js";
 
+// Layer 3 (§9bis) display mappers — reasoning, tier verdict, session journal.
+// Exported for the editor-side surface; their rendering inside Zed is
+// validated on-machine (Tier B, machine-gated).
+export { mapThinking, mapTierVerdict, mapSessionJournal } from "./insight.js";
+
 const SOCKET = process.env.VIBED_MCP_SOCKET ?? DEFAULT_SOCKET;
 
 applyGovernanceGate(ClaudeAcpAgent as unknown as GateableAgent, (tool, target) =>

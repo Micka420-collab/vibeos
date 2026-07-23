@@ -5,7 +5,9 @@
 # the invariants only a real boot can prove: vibed.service up, the MCP socket
 # present with the right ownership/mode, the policy loaded fail-closed, the
 # built-in denylist live, the audit chain intact, Genesis done, the immutable
-# root read-only. Every probe is READ-ONLY (no restart, no write, no approval):
+# root read-only, the shipped AI kernel tuning in effect, and the current
+# operating mode (governed vs open, ADR-027).
+# Every probe is READ-ONLY (no restart, no write, no approval):
 # the single T2 check is a `policy.check` dry-run, never a real mutation.
 #
 # It is version-TOLERANT: capabilities absent from an older image (vibectl,
@@ -127,6 +129,27 @@ if [ -e "$MEMORY_DIR/.initialized" ]; then
     row PASS "genesis-done" "$MEMORY_DIR/.initialized present (first-boot Genesis ran)"
 else
     missing "genesis-done" "$MEMORY_DIR/.initialized absent (Genesis did not complete)"
+fi
+
+# ADR-029: once Genesis ran, the AI citizen has a BORN character. Verify the
+# soul file exists and carries a schema + name. Three graded outcomes:
+#   * Genesis not run yet            -> SKIP (genesis-done already flags this)
+#   * personality.toml ABSENT        -> SKIP, NOT fail: a box first-booted under
+#     a pre-ADR-029 image stamped .initialized without it, and Genesis is
+#     one-shot (it won't re-run to back-generate). A healthy upgraded machine
+#     must not flip the whole selfcheck red.
+#   * present but schema/name missing -> FAIL: genuine corruption.
+persona="$MEMORY_DIR/personality.toml"
+if [ ! -e "$MEMORY_DIR/.initialized" ]; then
+    row SKIP "ai-personality" "Genesis not run yet — no character born"
+elif [ ! -e "$persona" ]; then
+    row SKIP "ai-personality" "no personality.toml — image predates ADR-029 (character not back-generated; Genesis is one-shot)"
+elif grep -q '^schema = ' "$persona" && grep -q '^name = "' "$persona"; then
+    ai_name="$(sed -n 's/^name = "\(.*\)"$/\1/p' "$persona" | head -n1)"
+    ai_arch="$(sed -n 's/^archetype = "\(.*\)"$/\1/p' "$persona" | head -n1)"
+    row PASS "ai-personality" "citizen born: ${ai_name:-?} (${ai_arch:-?}) — ADR-029"
+else
+    missing "ai-personality" "$persona present but malformed (schema/name missing)"
 fi
 
 if have systemctl; then
@@ -252,6 +275,52 @@ if have vibectl; then
     fi
 else
     row SKIP "audit-chain" "vibectl not installed; verify the chain manually (docs/VALIDATION.md)"
+fi
+
+# ============================ KERNEL TUNING =================================
+# ADR-025: AI-workload kernel tuning shipped as image content in
+# /usr/lib/sysctl.d/50-vibeos-ai.conf. Version-tolerant: an image without the
+# file SKIPs (the capability does not exist there), never FAILs. Read-only
+# probe on two sentinels: vm.page-cluster proves systemd-sysctl applied the
+# file, tcp_congestion_control proves the tcp_bbr module AUTOLOADED from the
+# sysctl write (the riskiest assumption of the file — see its header).
+SYSCTL_AI_CONF="/usr/lib/sysctl.d/50-vibeos-ai.conf"
+if [ ! -f "$SYSCTL_AI_CONF" ]; then
+    row SKIP "kernel-tuning" "$SYSCTL_AI_CONF not shipped (older image)"
+elif ! have sysctl; then
+    row SKIP "kernel-tuning" "sysctl unavailable — cannot probe live tunables"
+else
+    pc="$(sysctl -n vm.page-cluster 2>/dev/null)"
+    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+    if [ "$pc" = "0" ] && [ "$cc" = "bbr" ]; then
+        row PASS "kernel-tuning" "AI sysctl in effect (vm.page-cluster=0, tcp_bbr autoloaded)"
+    else
+        row FAIL "kernel-tuning" "shipped $SYSCTL_AI_CONF not in effect (page-cluster=${pc:-?}, tcp=${cc:-?})"
+    fi
+fi
+
+# ============================ OPERATING MODE ================================
+# ADR-027: report the operating mode (governed default vs human-unlocked OPEN
+# mode). This is the boot/CLI face of the DANGER PANEL. Open mode is a
+# LEGITIMATE state, not a failure — so BOTH governed and open are PASS (the exit
+# code must not flip just because autonomy is on), but open is surfaced LOUDLY
+# so a `--json` reader or a human scanning the table cannot miss it. Read-only:
+# it never sets the mode (the unlock is `vibectl mode open`, root, out-of-band).
+if have vibectl && have jq; then
+    mode_json="$(vibectl mode status 2>/dev/null)"
+    mode_val="$(printf '%s' "$mode_json" | jq -r '.mode // empty' 2>/dev/null)"
+    case "$mode_val" in
+        governed)
+            row PASS "operating-mode" "governed (default; T2/T3 require human approval)" ;;
+        open)
+            rem="$(printf '%s' "$mode_json" | jq -r '.remaining_secs // "?"' 2>/dev/null)"
+            row PASS "operating-mode" \
+                "⚠ OPEN/AUTONOMOUS MODE ACTIVE (ADR-027) — T2/T3 auto-granted, ${rem}s left; revert with 'vibectl mode governed'" ;;
+        *)
+            row SKIP "operating-mode" "could not read mode ('vibectl mode status'); older image?" ;;
+    esac
+else
+    row SKIP "operating-mode" "vibectl/jq unavailable — cannot read the operating mode"
 fi
 
 # ============================ REPORT ========================================
