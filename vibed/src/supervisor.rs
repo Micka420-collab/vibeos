@@ -34,28 +34,40 @@ pub fn parse_duration(s: &str) -> Option<u64> {
     if s.is_empty() {
         return None;
     }
-    // Bare integer -> seconds.
-    if let Ok(n) = s.parse::<u64>() {
-        return (n > 0).then_some(n);
+    // Bare integer -> seconds. Restrict the fast path to pure ASCII digits so a
+    // signed literal ("+8", "-8") — which u64::from_str otherwise accepts the
+    // '+' form of — is rejected rather than silently read as a budget.
+    if s.bytes().all(|b| b.is_ascii_digit()) {
+        return s.parse::<u64>().ok().filter(|&n| n > 0);
     }
     let mut total: u64 = 0;
     let mut num: u64 = 0;
     let mut saw_digit = false;
     let mut saw_unit = false;
+    // Rank of the last unit seen (h=3, m=2, s=1). Units must appear at most once
+    // and in strictly descending order, so a typo-doubled or reordered flag
+    // ("8h8h", "30m8h") is REJECTED rather than silently summed to a
+    // longer-than-intended budget for an unattended run — matching the strict
+    // intent already stated for "8h30".
+    let mut last_rank: Option<u8> = None;
     for c in s.chars() {
         if let Some(d) = c.to_digit(10) {
             num = num.checked_mul(10)?.checked_add(d as u64)?;
             saw_digit = true;
         } else {
-            let mult = match c {
-                'h' | 'H' => 3600,
-                'm' | 'M' => 60,
-                's' | 'S' => 1,
+            let (mult, rank) = match c {
+                'h' | 'H' => (3600u64, 3u8),
+                'm' | 'M' => (60, 2),
+                's' | 'S' => (1, 1),
                 _ => return None,
             };
             if !saw_digit {
                 return None; // a unit with no preceding number
             }
+            if last_rank.is_some_and(|prev| rank >= prev) {
+                return None; // duplicate or out-of-order unit
+            }
+            last_rank = Some(rank);
             total = total.checked_add(num.checked_mul(mult)?)?;
             num = 0;
             saw_digit = false;
@@ -449,6 +461,19 @@ mod tests {
             None,
             "trailing unitless digits rejected"
         );
+        // Duplicate or out-of-order units are a typo, not a sum: reject them so an
+        // unattended run never gets a longer-than-intended budget by accident.
+        assert_eq!(parse_duration("8h8h"), None, "duplicate unit rejected");
+        assert_eq!(parse_duration("30m8h"), None, "out-of-order units rejected");
+        assert_eq!(parse_duration("1s1h"), None, "ascending units rejected");
+        assert_eq!(
+            parse_duration("8h30m45s"),
+            Some(28800 + 1800 + 45),
+            "descending units still parse"
+        );
+        // A signed bare integer is not a valid budget (u64 parse would accept +8).
+        assert_eq!(parse_duration("+8"), None, "leading + rejected");
+        assert_eq!(parse_duration("-8"), None, "leading - rejected");
     }
 
     #[test]
