@@ -379,11 +379,29 @@ impl PolicyEngine {
                 })
             }
         };
-        let mut paths: Vec<_> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
-            .collect();
+        // Fail-CLOSED enumeration: a per-entry read error must abort the load,
+        // not be silently dropped. `.flatten()` on `ReadDir` (an iterator of
+        // `io::Result<DirEntry>`) discards every `Err`, so a `10-deny.toml` whose
+        // directory entry errors transiently (concurrent replace on restart, an
+        // overlay/NFS hiccup) would vanish and a broader `20-allow.toml` would
+        // then govern — the exact fail-OPEN this module's contract forbids ("any
+        // unreadable or invalid *.toml is a fatal error"). Propagate instead.
+        // The extension match is case-INSENSITIVE so a `.TOML`/`.Toml` drop-in is
+        // never silently skipped (another silent fail-open under first-match-wins).
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|err| PolicyError::Io {
+                path: dir.to_path_buf(),
+                err,
+            })?;
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+            {
+                paths.push(path);
+            }
+        }
         paths.sort();
 
         let mut rules: Vec<Rule> = Vec::new();
@@ -1420,6 +1438,27 @@ mod tests {
         let result = PolicyEngine::load_dir(&dir);
         assert!(result.is_err(), "duplicate rule ids must abort the load");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_dir_matches_toml_extension_case_insensitively() {
+        let dir = std::env::temp_dir().join(format!("vibed-policy-ext-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        // An uppercase-extension drop-in must NOT be silently skipped: under
+        // first-match-wins, a skipped deny rule is a fail-open.
+        fs::write(
+            dir.join("10-deny.TOML"),
+            "[[rule]]\nid = \"deny-pkg\"\ntools = [\"pkg.install\"]\ntier = \"T2\"\naction = \"deny\"\n",
+        )
+        .expect("write .TOML file");
+        let engine = PolicyEngine::load_dir(&dir).expect("loads a .TOML drop-in");
+        assert_eq!(
+            engine.rule_count(),
+            1,
+            "an uppercase .TOML drop-in must be loaded, not skipped"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
