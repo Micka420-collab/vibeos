@@ -1,0 +1,35 @@
+# VibeOS — NVIDIA display kernel arguments (x86_64 only)
+# =============================================================================
+# Target (image build): /usr/lib/bootc/kargs.d/10-vibeos-nvidia.toml
+# Source: os/rootfs/usr/lib/bootc/kargs.d/10-vibeos-nvidia.toml (COPY-ed into
+# the image by the os track — this is the CANONICAL bootc mechanism for kernel
+# arguments: `bootc install` applies them at install time and they persist
+# across every `bootc upgrade`, independent of the install method — ISO,
+# bootc-image-builder or `bootc install to-disk`). The kickstart bootloader
+# line (installer/vibeos.ks) carries the SAME args for the Anaconda ISO path,
+# which does not consult kargs.d; keep the two in sync.
+#
+# WHY (the first-boot black screen on the reference PC — Ryzen 7 3700X + RTX
+# 3070 Ti, docs/HARDWARE.md):
+#   * The Ryzen 3700X has NO integrated GPU, so the RTX 3070 Ti is the ONLY
+#     display path — there is no fallback framebuffer if the NVIDIA driver
+#     fails to come up. A driver that does not initialise = a black screen,
+#     not a degraded one.
+#   * VibeOS is Wayland-only (Plasma 6). The Wayland session needs kernel mode
+#     setting on the NVIDIA GPU: `nvidia-drm.modeset=1` enables the DRM/KMS
+#     path the compositor renders through. Without it, SDDM/Plasma Wayland has
+#     no usable DRM device and the greeter never draws — the exact "c'est tout
+#     noir" symptom.
+#   * `nouveau` (the in-tree open driver) must be kept off the card so the
+#     proprietary `nvidia` driver owns it cleanly: rd.driver.blacklist stops it
+#     loading from the initramfs, modprobe.blacklist stops it from the real
+#     root. Two args because they act at two different stages.
+#
+# SECURE BOOT: the akmod-nvidia kernel module shipped in this image is NOT yet
+# signed by a VibeOS MOK key (MOK signing is Phase 4 — docs/HARDWARE.md,
+# ROADMAP.md). With Secure Boot ENABLED the unsigned module is refused by the
+# kernel and the screen stays black regardless of these args. Until Phase 4:
+# disable Secure Boot in UEFI for the reference machine. These kargs fix the
+# Wayland/KMS half of the problem; the signing half is firmware-side.
+kargs = ["rd.driver.blacklist=nouveau", "modprobe.blacklist=nouveau", "nvidia-drm.modeset=1"]
+match-architectures = ["x86_64"]

@@ -1,0 +1,41 @@
+# VibeOS — operating-system identity (freedesktop os-release)
+# =============================================================================
+# Target (image build): /usr/lib/os-release  (— /etc/os-release is a symlink to
+# ../usr/lib/os-release in the Fedora base, so overriding this ONE file rebrands
+# every reader: the GRUB / systemd-boot BLS menu title, the SDDM greeter, login
+# banners, `fastfetch`/`neofetch`, GNOME/KDE "About", and anything parsing
+# /etc/os-release.) Source: os/rootfs/usr/lib/os-release (COPY-ed by the os track).
+#
+# HONESTY / rebrand cost: this replaces fedora-release-common's own
+# /usr/lib/os-release, so `rpm -Va` reports this path as modified — the SAME
+# accepted cost every Fedora remix (Bazzite, Bluefin, …) pays to own its
+# identity. Nothing else about the immutable/verifiable image changes.
+#
+# COMPATIBILITY is deliberately preserved: ID_LIKE=fedora, VERSION_ID=44 and
+# PLATFORM_ID=platform:f44 keep dnf, rpm-ostree, bootc, DNF modularity and
+# third-party "am-I-on-Fedora" scripts working exactly as before. VibeOS is a
+# Fedora derivative and says so — it just stops PRESENTING as Fedora.
+NAME="VibeOS"
+PRETTY_NAME="VibeOS 0.1.0-dev (Genesis)"
+ID=vibeos
+ID_LIKE="fedora"
+VERSION="0.1.0-dev (Genesis)"
+VERSION_ID=44
+VERSION_CODENAME="genesis"
+VARIANT="Genesis"
+VARIANT_ID=genesis
+PLATFORM_ID="platform:f44"
+CPE_NAME="cpe:/o:vibeos:vibeos:44"
+DEFAULT_HOSTNAME="vibeos"
+# 24-bit ANSI = accent Mauve #cba6f7 (DESIGN-SYSTEM §12) — colours the distro
+# name in `fastfetch` and systemd status output. Pure black is never used (§14).
+ANSI_COLOR="0;38;2;203;166;247"
+# Freedesktop icon name; VibeOS ships /usr/share/pixmaps/vibeos-logo.svg so KDE
+# "About this System" and GNOME "About" resolve it instead of a Fedora logo.
+LOGO=vibeos-logo
+VENDOR_NAME="VibeOS"
+VENDOR_URL="https://github.com/Micka420-collab/vibeos"
+HOME_URL="https://github.com/Micka420-collab/vibeos"
+DOCUMENTATION_URL="https://github.com/Micka420-collab/vibeos/tree/main/docs"
+SUPPORT_URL="https://github.com/Micka420-collab/vibeos/issues"
+BUG_REPORT_URL="https://github.com/Micka420-collab/vibeos/issues"

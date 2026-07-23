@@ -9,7 +9,12 @@
 #                              ceinture de sécurité)
 #   * vibeos-genesis.service   ConditionPathExists=!/var/lib/vibeos/memory/.initialized
 #   * vibeos-agents-group.service  idempotent (oneshot à chaque boot)
+#   * vibeos-identity.service  best-effort (oneshot à chaque boot) : publie
+#                              l'identité PUBLIQUE du citoyen IA sous
+#                              /run/vibeos/citizen.json pour le greeter SDDM.
+#                              N'échoue jamais la connexion (ordre seul).
 
 enable vibed.service
 enable vibeos-genesis.service
 enable vibeos-agents-group.service
+enable vibeos-identity.service

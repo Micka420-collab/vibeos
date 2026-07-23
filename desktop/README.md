@@ -2,7 +2,7 @@
 
 Ce dossier contient les **sources du bureau VibeOS** : thème, palette, et les briques d'habillage de KDE Plasma 6. La spécification complète de l'expérience (« pourquoi » et « comment ») est dans [docs/DESKTOP.md](../docs/DESKTOP.md) — ce README n'est que la carte du dossier.
 
-> **Statut** : chantier « Bureau » (voir [docs/ECOSYSTEM.md](../docs/ECOSYSTEM.md), plan d'action). Le **Global Theme est le défaut système** et le **HUD est installé et auto-démarré** (runtime Quickshell compilé dans l'image) ; la liaison vivante HUD ↔ `vibed` (données live) reste un livrable **Phase 2** ; les thèmes **SDDM** et **Plymouth** sont copiés dans l'image (sélectionnables, **non actifs par défaut**) — leur activation par défaut et le logo restent **Phase 5**.
+> **Statut** : chantier « Bureau » (voir [docs/ECOSYSTEM.md](../docs/ECOSYSTEM.md), plan d'action). Le **Global Theme est le défaut système** et le **HUD est installé et auto-démarré** (runtime Quickshell compilé dans l'image) ; la liaison vivante HUD ↔ `vibed` (données live) reste un livrable **Phase 2**. Les thèmes **SDDM** et **Plymouth** sont désormais **actifs par défaut** (2026-07-23, à la demande du mainteneur), et l'**identité OS** (os-release + logo VibeOS) remplace celle de Fedora. Restent en **Phase 5** : jeux d'icônes/curseurs VibeOS, atlas Kvantum complet, série de wallpapers complète et chartes de marque.
 
 ---
 
@@ -28,8 +28,8 @@ Trois règles d'exécution : **le terminal (Ghostty) est la scène principale** 
 | [`look-and-feel/`](look-and-feel/README.md) | Global Theme **`org.vibeos.dark`** (KPackage : `metadata.json`, `defaults`, `layout.js`) — copié dans l'image et **défaut système** via `/etc/xdg/kdeglobals` | ✅ livré (Phase 2) |
 | `kvantum/` | Thème de widgets **Kvantum `VibeOSDark`** (coins arrondis, verre sur le chrome flottant) — moteur installé, thème copié, sélection via `/etc/skel/.config/Kvantum/kvantum.kvconfig` | ✅ livré (Phase 2) — atlas SVG complet : Phase 5 |
 | [`wallpapers/`](wallpapers/README.md) | Trois paquets wallpaper originaux : « VibeOS » (**défaut** via le Global Theme), « Genesis », « Void » — copiés sous `/usr/share/wallpapers/` | ✅ livré (Phase 2) |
-| [`sddm/`](sddm/README.md) | Thème de connexion **original** VibeOS — copié dans l'image (`/usr/share/sddm/themes/vibeos/`), **non actif par défaut** (greeter Breeze) | copié · activation 🛣️ Phase 5 |
-| [`plymouth/`](plymouth/README.md) | Thème de boot **original** (l'existant adi1090x est rejeté — provenance d'assets floue) — copié dans l'image (`/usr/share/plymouth/themes/vibeos/`), **non actif par défaut** ; 3 PNG à générer (dégradation gracieuse) | copié · activation 🛣️ Phase 5 |
+| [`sddm/`](sddm/README.md) | Thème de connexion **original** VibeOS — **actif par défaut** (drop-in `/usr/lib/sddm/sddm.conf.d/10-vibeos.conf`) ; affiche le **citoyen IA** né au premier boot | ✅ **activé** (2026-07-23) |
+| [`plymouth/`](plymouth/README.md) | Thème de boot **original** (l'existant adi1090x est rejeté — provenance d'assets floue) — **actif par défaut** (posé + initramfs régénéré au build) ; dégradation gracieuse si les PNG manquent | ✅ **activé** (2026-07-23) |
 | *(reste de ce chantier)* preset Panel Colorizer, défauts `/etc/skel` bureau (raccourcis, activités) | voir [docs/DESKTOP.md](../docs/DESKTOP.md) §2.6 et §9 | 🛣️ Phase 2 |
 
 ---

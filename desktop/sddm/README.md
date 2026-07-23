@@ -2,7 +2,7 @@
 
 Ce dossier contient le **thème SDDM « VibeOS »** : l'écran de connexion (greeter) qui s'affiche entre le boot (Plymouth) et la session Plasma 6. Il matérialise, *avant même d'être connecté*, l'identité VibeOS — carte de verre sombre, aurore mauve→blue, anneau signature, horloge mono.
 
-> **Statut : copié dans l'image, non actif par défaut — activation 🛣️ Phase 5 (branding).** Le thème est **copié au build** sous `/usr/share/sddm/themes/vibeos/` (sélectionnable dans Réglages système ▸ Écran de connexion) ; le greeter **par défaut** reste **Breeze** (voir [docs/DESKTOP.md](../../docs/DESKTOP.md) §4). Il ne devient l'écran de connexion par défaut qu'une fois **activé en Phase 5** (voir plus bas). Rien ici ne modifie le greeter par défaut.
+> **Statut : ✅ ACTIVÉ (2026-07-23, à la demande du mainteneur) — c'est l'écran de connexion par défaut.** Le thème est copié au build sous `/usr/share/sddm/themes/vibeos/` **et** activé par le drop-in `/usr/lib/sddm/sddm.conf.d/10-vibeos.conf` (`[Theme] Current=vibeos`), livré par `os/rootfs/`. Il affiche en plus le **citoyen IA** né au premier boot (voir `Main.qml` → `loadCitizen()` et `os/rootfs/usr/lib/systemd/system/vibeos-identity.service`). Si le chargement du thème échouait, SDDM retombe sur son greeter intégré — la connexion ne devient jamais impossible.
 
 Référence de design : [docs/DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md) **§11.2 (Login)**. Palette : [desktop/theme/palette.md](../theme/palette.md).
 
@@ -47,12 +47,12 @@ La copie est effectuée par le **chantier os** (référencé ici en commentaire 
 
 ---
 
-## Activation (🛣️ Phase 5)
+## Activation (✅ posée le 2026-07-23)
 
-Le thème n'est pas activé tant que la Phase 5 ne pose pas la configuration SDDM correspondante. Sur un OS immuable, cela se fait **au build**, via un drop-in livré sous `/usr/lib/sddm/sddm.conf.d/` (ou `/etc/sddm.conf.d/`) :
+Sur un OS immuable l'activation se fait **au build**, via un drop-in livré sous `/usr/lib/sddm/sddm.conf.d/`. Ce fichier est désormais **présent dans le dépôt** (`os/rootfs/usr/lib/sddm/sddm.conf.d/10-vibeos.conf`, copié en `/` par la couche `os`) :
 
 ```ini
-# /usr/lib/sddm/sddm.conf.d/10-vibeos.conf   (posé au build — Phase 5)
+# /usr/lib/sddm/sddm.conf.d/10-vibeos.conf   (livré — actif)
 [Theme]
 Current=vibeos
 ```
@@ -68,11 +68,12 @@ sddm-greeter-qt6 --test-mode --theme .
 
 ## Honnêteté (invariant projet)
 
-- **Copié dans l'image, non actif par défaut.** Le thème est livré sous `/usr/share/sddm/themes/vibeos/` (sélectionnable), mais le greeter par défaut reste Breeze tant que la Phase 5 ne pose pas le drop-in SDDM d'activation (ci-dessus).
+- **Actif par défaut, avec repli sûr.** Le thème est livré sous `/usr/share/sddm/themes/vibeos/` **et** activé par le drop-in ci-dessus. Si son chargement échouait, SDDM retombe sur son greeter intégré — la connexion ne devient jamais impossible.
 - **Police `Inter` = aspirationnelle.** `Main.qml` demande `font-sans` = Inter ; tant qu'Inter n'est pas packagé dans l'image, fontconfig substitue **Noto Sans** (§3.1). La pile ne « casse » jamais.
 - **Pas de vrai flou.** Un greeter ne doit **jamais** échouer à se charger : seuls les modules Qt6 toujours présents sont importés (`QtQuick`, `QtQuick.Controls.Basic`, `QtQuick.Layouts`). Le « verre » est donc honnêtement **approché** — remplissage translucide sur notre propre aurore (pas des fenêtres vives) + arête spéculaire ; l'élévation est simulée par des sous-couches translucides. Un vrai flou d'arrière-plan exigerait `QtQuick.Effects` / le compositeur, dépendances écartées ici par robustesse.
 - **Tokens en dur = choix documenté.** SDDM n'a pas de singleton de thème à importer : chaque hex de `Main.qml` renvoie à un token de [DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md §12), synchronisé à la main.
 - **Rouge = erreur seulement** (§10.3) : la ligne d'erreur d'échec de connexion est en Red ; c'est le seul rouge de l'écran. Mauve n'y est jamais un danger.
+- **Citoyen IA = best-effort, sans secret.** `loadCitizen()` lit `/run/vibeos/citizen.json` (publié par `vibeos-identity.service`) par un `XMLHttpRequest` synchrone gardé par try/catch : marqueur absent, illisible ou lecture `file://` restreinte ⇒ le greeter retombe sur l'identité « VibeOS » simple, la connexion n'est **jamais** affectée. Seuls les champs **publics** du citoyen (nom, archétype, ton) transitent par ce marbre `0644` sur tmpfs ; la mémoire de la machine (`/var/lib/vibeos/memory`, `0700`) n'en sort pas. Si le nom ne s'affiche pas alors que le fichier existe, la lecture `file://` du moteur QML peut nécessiter `QML_XHR_ALLOW_FILE_READ=1` dans l'environnement de SDDM (piste connue, non bloquante).
 
 ---
 

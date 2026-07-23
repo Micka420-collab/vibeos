@@ -2,7 +2,7 @@
 
 Ce dossier contient le **thème Plymouth « VibeOS »** : l'écran de boot affiché pendant le démarrage du noyau et de l'initramfs, avant le greeter SDDM. C'est **le premier accord de la partition** : minimal, mais déjà dans la tonalité VibeOS — fond Crust, cœur qui respire, spirale signature mauve→blue (la galaxie VibeOS).
 
-> **Statut : copié dans l'image, non actif par défaut — activation 🛣️ Phase 5 (branding).** Le thème est **copié au build** sous `/usr/share/plymouth/themes/vibeos/`, mais le boot utilise toujours le thème Plymouth par défaut de la distribution tant qu'il n'est pas **activé en Phase 5** (voir plus bas — étape spécifique à un OS immuable, régénération de l'initramfs). Les trois PNG (`mark`, `ring`, `wordmark`) sont **générés** par [`generate-assets.py`](generate-assets.py) (œuvre originale, reproductible) ; s'ils manquent, le splash retombe sur le simple fond dégradé (dégradation gracieuse réelle). Rien ici ne modifie le splash par défaut.
+> **Statut : ✅ ACTIVÉ (2026-07-23, à la demande du mainteneur) — c'est le splash de boot par défaut.** Le thème est copié au build sous `/usr/share/plymouth/themes/vibeos/` **et** posé en défaut par `os/Containerfile` (`plymouth-set-default-theme vibeos` **avec régénération de l'initramfs au build**, étape spécifique à un OS immuable — voir plus bas). Le splash Fedora par défaut est ainsi remplacé. Les trois PNG (`mark`, `ring`, `wordmark`) sont **générés** par [`generate-assets.py`](generate-assets.py) (œuvre originale, reproductible) ; s'ils manquent, le splash retombe sur le simple fond dégradé (dégradation gracieuse réelle).
 
 Référence de design : [docs/DESIGN-SYSTEM.md](../../docs/DESIGN-SYSTEM.md) **§11.1 (Boot)**. Palette : [desktop/theme/palette.md](../theme/palette.md).
 
@@ -40,7 +40,7 @@ Le script charge trois PNG depuis `ImageDir`, fond **transparent**, produits par
 | **`vibeos/wordmark.png`** | mot « VibeOS », 320 px de large | Text `#cdd6f4`, posé à 55 % d'opacité | Wordmark discret sous la marque. **Optionnel** : le script se garde si l'asset est absent. |
 
 > **Dégradation gracieuse** : si un PNG manque, `GetWidth()` vaut 0 et le sprite reste invisible — le splash retombe sur le simple fond dégradé au lieu de planter. La règle d'honnêteté, appliquée au boot.
-> **Rendu visuel non validé en réel** : les assets ont été prévisualisés hors-boot (compositing) mais le splash Plymouth **animé** n'a jamais été rendu sur une machine bootée (pas de boot ici — machine-gated). L'activation reste Phase 5.
+> **Rendu visuel non validé en réel** : les assets ont été prévisualisés hors-boot (compositing) mais le splash Plymouth **animé** n'a jamais été rendu sur une machine bootée (pas de boot ici — machine-gated). Le thème est désormais **activé** ; sa validation visuelle réelle se fait au prochain boot d'une image reconstruite (côté mainteneur).
 > **Puces LUKS** : les puces du mot de passe sont rendues en texte (`•`) via la police de l'initramfs. Un asset `bullet.png` dédié pourra les remplacer par des points nets si besoin (évolution mineure).
 
 ---
@@ -55,20 +55,23 @@ desktop/plymouth/vibeos/*   →   /usr/share/plymouth/themes/vibeos/*
 
 La copie est effectuée par le **chantier os** (référencé en commentaire d'en-tête de chaque fichier — on n'édite pas `os/Containerfile` depuis ce dossier).
 
-**Paquets requis — installés (2026-07-15)** : `plymouth-plugin-script` (le thème déclare `ModuleName=script` ; ce module vit dans ce sous-paquet, et le thème de boot par défaut de Fedora ne l'utilise pas, donc **rien d'autre ne le tire**) et `plymouth-plugin-label` (rendu de `Image.Text()` : invite LUKS, messages de boot). Ils étaient **documentés ici mais absents de l'image** : le thème copié n'aurait donc pas pu se rendre le jour où la Phase 5 l'active — Plymouth serait retombé sur le thème par défaut. Les installer **n'active rien** (l'activation reste `plymouth-set-default-theme` + régénération de l'initramfs, ci-dessous).
+**Paquets requis — installés (2026-07-15)** : `plymouth-plugin-script` (le thème déclare `ModuleName=script` ; ce module vit dans ce sous-paquet, et le thème de boot par défaut de Fedora ne l'utilise pas, donc **rien d'autre ne le tire**) et `plymouth-plugin-label` (rendu de `Image.Text()` : invite LUKS, messages de boot). Sans eux le thème n'aurait pas pu se rendre une fois activé — Plymouth serait retombé sur le thème par défaut. L'activation elle-même (`plymouth-set-default-theme` + régénération de l'initramfs) est désormais posée dans `os/Containerfile` (ci-dessous).
 
 ---
 
-## Activation (🛣️ Phase 5)
+## Activation (✅ posée le 2026-07-23 dans `os/Containerfile`)
 
-Sur un OS immuable, activer un thème Plymouth **implique de régénérer l'initramfs** (le thème y est embarqué), ce qui se fait **au build de l'image**, pas à l'exécution :
+Sur un OS immuable, activer un thème Plymouth **implique de régénérer l'initramfs** (le thème y est embarqué), ce qui se fait **au build de l'image**, pas à l'exécution. C'est désormais fait — section « 7ter. Boot identity » du `os/Containerfile` :
 
 ```sh
-# exécuté DANS le build de l'image (Phase 5), après copie des fichiers :
-plymouth-set-default-theme vibeos      # écrit le défaut sous /usr/…/plymouthd.defaults
-dracut --force --regenerate-all        # ré-embarque le thème dans l'initramfs
-# (l'agencement exact — plymouth-set-default-theme -R vs. étape dracut explicite —
-#  relève du chantier os ; ce dossier ne fait que fournir le thème.)
+# exécuté DANS le build de l'image, après copie des fichiers :
+plymouth-set-default-theme vibeos      # pose le thème par défaut
+# puis, par noyau, l'invocation bootc/OSTree éprouvée (BlueBuild/uBlue) :
+dracut --force --kver "$KVER" --add ostree --no-hostonly --reproducible \
+    /usr/lib/modules/$KVER/initramfs.img
+# Une VÉRIFICATION au build (lsinitrd) échoue le build si le thème VibeOS — ou
+# le module ostree, ou (amd64) les modules nvidia — manque de l'initramfs :
+# un initramfs cassé = build rouge, jamais une image livrée qui ne boote pas.
 ```
 
 Aperçu hors-image pendant le développement (poste de dev, non immuable) :
@@ -82,7 +85,7 @@ plymouthd --debug --tty=/dev/tty1 ; plymouth --show-splash   # puis plymouth qui
 
 ## Honnêteté (invariant projet)
 
-- **Copié dans l'image, non actif par défaut.** Le splash par défaut reste celui de la distribution tant que la Phase 5 n'active pas le thème (régénération initramfs au build) ; les trois PNG sont fournis (générés par `generate-assets.py`) et le script se dégrade proprement s'ils manquent.
+- **Actif par défaut, avec repli sûr.** Le thème est posé en défaut au build (régénération initramfs incluse, vérifiée) ; les trois PNG sont fournis (générés par `generate-assets.py`) et le script se dégrade proprement s'ils manquent (fond seul, jamais d'erreur).
 - **Œuvre originale.** Marque, anneau et mouvement sont dessinés pour VibeOS. Le pack adi1090x est **explicitement écarté** pour provenance d'assets floue ([docs/DESKTOP.md](../../docs/DESKTOP.md) §5.4) : aucun asset tiers non redistribuable n'entre ici.
 - **Cohérence de tonalité** : le Crust et le dégradé signature du splash sont **identiques** à ceux de l'écran SDDM (§11.2) et du HUD — boot → login → bureau racontent la même histoire.
 - **Dégradation gracieuse** : assets manquants ⇒ fond seul, jamais d'erreur.

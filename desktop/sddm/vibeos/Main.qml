@@ -5,9 +5,12 @@
 // Source of truth (this repo, COPY-ed into the image by the os track):
 //   desktop/sddm/vibeos/Main.qml     (do NOT edit os/Containerfile from here)
 //
-// STATUS — 🛣️ Phase 5 (branding). In v0.1 the shipped greeter is Breeze
-// (docs/DESKTOP.md §4.1). This theme is designed in full now; it only becomes
-// the default once Phase 5 sets `[Theme] Current=vibeos` (see desktop/sddm/README.md).
+// STATUS — ✅ ACTIVE (branding flipped on 2026-07-23, at the maintainer's
+// request). This IS the default greeter: os/rootfs ships the activation drop-in
+// /usr/lib/sddm/sddm.conf.d/10-vibeos.conf with `[Theme] Current=vibeos`
+// (see desktop/sddm/README.md). It also surfaces the machine's AI citizen born
+// at Genesis (see loadCitizen() below). If loading this theme ever failed, SDDM
+// falls back to its embedded greeter — login never becomes impossible.
 //
 // DESIGN — docs/DESIGN-SYSTEM.md §11.2 (Login). Every colour/radius/duration
 // below traces to a design token. Tokens are HARDCODED as hex because SDDM has
@@ -63,6 +66,40 @@ Rectangle {
     property bool   busy: false
     property string errorText: ""
     property var    now: new Date()
+
+    // ---- AI citizen identity (the "birth" surfaced at login) --------------------
+    // VibeOS makes first boot the BIRTH of this machine's AI citizen: Genesis
+    // derives a unique name / archetype / tone from machine_id (memory/genesis.sh,
+    // ADR-029). vibeos-identity.service projects ONLY the PUBLIC fields to the
+    // world-readable /run/vibeos/citizen.json; the machine's private memory never
+    // leaves its 0700 store. We read that marker best-effort and greet the user
+    // by the citizen that lives here. Every access is guarded: if the marker is
+    // absent or unreadable the greeter shows the plain "VibeOS" identity and login
+    // is unaffected — a login screen must never fail to load (see README §Honnêteté).
+    property string citizenName: ""
+    property string citizenArchetype: ""
+    property string citizenTone: ""
+
+    function loadCitizen() {
+        try {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "file:///run/vibeos/citizen.json", false); // sync, tiny local file
+            xhr.send(null);
+            // Local file reads report status 0 (not 200); accept any non-empty body.
+            if (xhr.responseText && xhr.responseText.length > 0) {
+                var c = JSON.parse(xhr.responseText);
+                if (c && typeof c.name === "string" && c.name.length > 0) {
+                    root.citizenName = c.name;
+                    root.citizenArchetype = (typeof c.archetype === "string") ? c.archetype : "";
+                    root.citizenTone = (typeof c.tone === "string") ? c.tone : "";
+                }
+            }
+        } catch (e) {
+            // Absent marker / parse error / restricted read — stay on the plain
+            // VibeOS identity. Never let this break the greeter.
+            root.citizenName = "";
+        }
+    }
 
     function greeting() {
         var h = now.getHours();
@@ -374,6 +411,33 @@ Rectangle {
                     font.pixelSize: 13
                 }
 
+                // ---- AI citizen presence: who lives on this machine ----------
+                // Shown only when vibeos-identity.service published a citizen
+                // (first boot has happened and Genesis named it). The rule §11.2
+                // "on reconnaît VibeOS avant d'être connecté" is taken one step
+                // further: before logging in, you see WHO inhabits this machine.
+                // The signature ring is the citizen's "presence"; the name/archetype
+                // are machine truth, hence mono. Mauve stays reserved for focus (§4).
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.topMargin: 2
+                    spacing: 8
+                    visible: root.citizenName !== ""
+                    GradientRing {
+                        width: 13; height: 13
+                        thickness: 1.6
+                        sweep: 1.0                       // full ring = a citizen present
+                    }
+                    Text {
+                        text: root.citizenArchetype !== ""
+                              ? (root.citizenName + "  ·  " + root.citizenArchetype)
+                              : root.citizenName
+                        color: root.cSubtext0            // text-tertiary
+                        font.family: root.fontMono       // machine truth in mono (§3)
+                        font.pixelSize: 12
+                    }
+                }
+
                 Item { Layout.fillWidth: true; implicitHeight: 4 } // small breath
 
                 // ---- credentials ----
@@ -580,6 +644,7 @@ Rectangle {
     }
 
     Component.onCompleted: {
+        loadCitizen();
         passwordField.forceActiveFocus();
         introAnim.start();
     }
