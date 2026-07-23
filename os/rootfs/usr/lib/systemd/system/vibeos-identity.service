@@ -1,0 +1,61 @@
+# vibeos-identity.service — publish the AI citizen's PUBLIC identity for login
+#
+# VibeOS makes first boot the BIRTH of the machine's AI citizen: Genesis
+# (vibeos-genesis.service) derives a unique name / archetype / tone / traits
+# from machine_id into the private, root-only memory store
+# (/var/lib/vibeos/memory/personality.toml, 0700). This oneshot projects ONLY
+# the citizen's PUBLIC identity to a world-readable runtime marker
+# (/run/vibeos/citizen.json) so the SDDM greeter — which runs unprivileged and
+# cannot read the memory store — can name the citizen at login. The machine's
+# actual memory never leaves the 0700 store. See publish-identity.sh and
+# desktop/sddm/README.md.
+#
+# Runs EVERY boot (the marker lives on tmpfs and must be re-created), unlike
+# Genesis which runs exactly once. It is best-effort: a failure only means the
+# greeter shows the plain "VibeOS" identity, never that login is blocked —
+# display-manager.service does NOT depend on it (ordering only, no Requires).
+
+[Unit]
+Description=VibeOS — publish the AI citizen public identity for the login greeter
+Documentation=https://github.com/Micka420-collab/vibeos
+# Personality is written by Genesis; wait for it, then run before the greeter.
+After=vibeos-genesis.service
+Before=display-manager.service
+# From Phase 3 the memory store is a late (LUKS or amnesic tmpfs) mount; wait
+# for it exactly as Genesis does, so we read the real personality.toml.
+RequiresMountsFor=/var/lib/vibeos/memory
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/vibeos/publish-identity.sh
+# Never let a slow/odd first boot wedge the greeter ordering.
+TimeoutStartSec=60
+# Publishing a world-readable public marker: 0644 file, 0755 dir.
+UMask=0022
+StandardOutput=journal
+StandardError=journal
+
+# --- Hardening ------------------------------------------------------------------
+# Mirrors vibeos-genesis.service: seccomp/capability hardening only, NO
+# mount-namespace options (ProtectSystem/PrivateTmp/…) — from Phase 3 the memory
+# volume is a late mount this unit must observe, and a private mount namespace
+# could hide it. Writing to /run/vibeos needs no special privilege.
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+RestrictNamespaces=yes
+CapabilityBoundingSet=~CAP_SYS_MODULE CAP_SYS_RAWIO CAP_SYS_BOOT CAP_SYS_TIME CAP_AUDIT_CONTROL CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

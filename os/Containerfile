@@ -679,6 +679,9 @@ RUN set -eu; \
     akmods --force --kernels "${KERNEL_VERSION}" --kmod nvidia; \
     find "/usr/lib/modules/${KERNEL_VERSION}" -name 'nvidia*.ko*' | grep -q . \
         || { echo "FATAL: NVIDIA kmod was not built/installed"; exit 1; }; \
+    mkdir -p /usr/lib/dracut/dracut.conf.d; \
+    printf 'add_drivers+=" nvidia nvidia_modeset nvidia_uvm nvidia_drm "\n' \
+        > /usr/lib/dracut/dracut.conf.d/99-vibeos-nvidia.conf; \
     dnf clean all
 
 # =============================================================================
@@ -842,10 +845,13 @@ COPY --chmod=0755 memory/genesis-interview.sh /usr/libexec/vibeos/genesis-interv
 #                       out-of-box default (Global Theme defaults: [Wallpaper]
 #                       Image=VibeOS), "VibeOSVerou" is the lock-screen default
 #                       (kscreenlockerrc), Genesis/Void stay in the picker
-#   * SDDM/Plymouth  -> present; switched on at branding (Phase 5). The Plymouth
-#                       theme's script/label modules ARE installed (layer 1g), so
-#                       "present" now means renderable — it used to mean "copied,
-#                       but its module was missing from the image".
+#   * SDDM/Plymouth  -> ACTIVE (2026-07-23, at the maintainer's request). The
+#                       SDDM greeter is switched on by the drop-in shipped in
+#                       os/rootfs (/usr/lib/sddm/sddm.conf.d/10-vibeos.conf); the
+#                       Plymouth theme is set default and baked into a regenerated
+#                       initramfs in section 7ter below. The Plymouth theme's
+#                       script/label modules are installed (layer 1g), so the
+#                       splash actually renders.
 COPY desktop/theme/vibeos-dark.colors /usr/share/color-schemes/VibeOSDark.colors
 COPY desktop/look-and-feel/org.vibeos.dark /usr/share/plasma/look-and-feel/org.vibeos.dark
 COPY desktop/wallpapers/VibeOS /usr/share/wallpapers/VibeOS
@@ -856,6 +862,11 @@ COPY desktop/sddm/vibeos /usr/share/sddm/themes/vibeos
 COPY desktop/plymouth/vibeos /usr/share/plymouth/themes/vibeos
 COPY desktop/kvantum/VibeOSDark /usr/share/Kvantum/VibeOSDark
 COPY desktop/quickshell /usr/share/vibeos/quickshell
+# Distro logo — referenced by /usr/lib/os-release (LOGO=vibeos-logo), so KDE
+# "About this System", GNOME "About" and other freedesktop readers resolve the
+# VibeOS mark (via /usr/share/pixmaps in the icon fallback path) instead of a
+# Fedora logo. SVG scales cleanly at any "About"-dialog size.
+COPY installer/branding/vibeos-logo.svg /usr/share/pixmaps/vibeos-logo.svg
 
 # --- PHASE 2: install vibed from the builder stage ---------------------------
 # Installing the binary satisfies vibed.service's ConditionPathExists guard, so
@@ -882,6 +893,55 @@ RUN QT_QPA_PLATFORM=offscreen /usr/bin/quickshell --version
 # never node_modules or TS sources. Wiring it into Zed's settings.json (couche
 # 0/1) follows once the live E2E validates the bundle (ADR-015 §6).
 COPY --from=zed-agent-selected /out/zed-agent/ /usr/lib/vibeos/zed-agent/
+
+# =============================================================================
+# 7ter. Boot identity: activate the VibeOS Plymouth splash + regenerate the
+#       initramfs (bootc/OSTree). This is the immutable-OS-specific step the
+#       Plymouth/desktop READMEs describe: on a mutable distro `plymouth-set-
+#       default-theme -R` would rebuild the initramfs on the machine; here the
+#       initramfs is IMAGE CONTENT, so we set the default theme and rebuild it
+#       AT BUILD TIME, once, for every kernel the image ships.
+#
+#       Two things must ride in the rebuilt initramfs:
+#         * the VibeOS Plymouth theme — this is what actually replaces the Fedora
+#           boot logo; the splash renders from the initramfs, before the root fs
+#           is mounted, so setting the default in /etc is not enough on its own.
+#         * the NVIDIA modules (amd64), via /usr/lib/dracut/dracut.conf.d/
+#           99-vibeos-nvidia.conf written in the NVIDIA layer — early KMS so the
+#           splash appears on the RTX 3070 Ti and the Wayland handoff is seamless
+#           (complements the nvidia-drm.modeset=1 karg that fixes the black screen).
+#
+#       Invocation is the proven bootc/OSTree one (BlueBuild/uBlue): --add ostree
+#       (the ostree dracut module MUST be present, or the deployment cannot pivot
+#       to /sysroot), --no-hostonly (a GENERIC initramfs that boots any hardware,
+#       exactly as the Fedora base ships), --reproducible, --force. The trailing
+#       VERIFICATION fails the build if the result is structurally wrong — missing
+#       ostree module, missing VibeOS theme, or (when the nvidia dracut conf is
+#       present) missing nvidia. A broken initramfs is a RED BUILD here, never a
+#       shipped image that refuses to boot on the user's machine.
+# =============================================================================
+RUN set -eu; \
+    command -v plymouth-set-default-theme >/dev/null 2>&1 \
+        || { echo "FATAL: plymouth-set-default-theme missing (plymouth-scripts)"; exit 1; }; \
+    test -f /usr/share/plymouth/themes/vibeos/vibeos.plymouth \
+        || { echo "FATAL: VibeOS Plymouth theme not present in the image"; exit 1; }; \
+    plymouth-set-default-theme vibeos; \
+    for kdir in /usr/lib/modules/*/; do \
+        KVER="$(basename "${kdir}")"; \
+        [ -f "${kdir}/vmlinuz" ] || [ -d "${kdir}/kernel" ] || continue; \
+        echo "Regenerating initramfs for ${KVER}"; \
+        dracut --force --kver "${KVER}" --add ostree --no-hostonly --reproducible \
+            "${kdir}/initramfs.img"; \
+        chmod 0600 "${kdir}/initramfs.img"; \
+        lsinitrd -m "${kdir}/initramfs.img" | grep -qw ostree \
+            || { echo "FATAL: ostree dracut module missing from initramfs ${KVER}"; exit 1; }; \
+        lsinitrd "${kdir}/initramfs.img" | grep -q 'plymouth/themes/vibeos' \
+            || { echo "FATAL: VibeOS Plymouth theme missing from initramfs ${KVER}"; exit 1; }; \
+        if [ -f /usr/lib/dracut/dracut.conf.d/99-vibeos-nvidia.conf ]; then \
+            lsinitrd "${kdir}/initramfs.img" | grep -q 'nvidia' \
+                || { echo "FATAL: nvidia modules missing from initramfs ${KVER}"; exit 1; }; \
+        fi; \
+    done
 
 # =============================================================================
 # 8. Finalize: NEVRA manifest, scrub machine-local state, validate the image

@@ -87,9 +87,19 @@ btrfs /var/home  --subvol --name=home LABEL=vibeos
 #    --encrypted --luks-version=luks2 --label=vibeos-memory
 
 # --- Bootloader --------------------------------------------------------------
-# Default kernel args only. The amnesic mode is NOT a default kernel arg:
-# it ships as a separate boot menu entry (see %post, [Phase 3]).
-bootloader --append="rhgb quiet"
+# Default kernel args. The amnesic mode is NOT a default kernel arg: it ships
+# as a separate boot menu entry (see %post, [Phase 3]).
+#
+# NVIDIA display args (rd.driver.blacklist=nouveau modprobe.blacklist=nouveau
+# nvidia-drm.modeset=1) are REQUIRED for the reference PC to reach a Wayland
+# desktop instead of a black screen — the RTX 3070 Ti is the only display path
+# (no iGPU on the Ryzen 3700X) and Plasma 6 Wayland needs NVIDIA KMS. They are
+# duplicated from /usr/lib/bootc/kargs.d/10-vibeos-nvidia.toml because the
+# Anaconda install path does not consult kargs.d — keep the two lists in sync.
+# Harmless on non-NVIDIA hardware (nouveau simply is not present to blacklist,
+# and the nvidia-drm parameter is ignored when the module is absent).
+# Secure Boot must be OFF until MOK signing lands (Phase 4) — see kargs.d file.
+bootloader --append="rhgb quiet rd.driver.blacklist=nouveau modprobe.blacklist=nouveau nvidia-drm.modeset=1"
 
 # --- Users -------------------------------------------------------------------
 # Root stays locked: administration goes through the wheel user (sudo).

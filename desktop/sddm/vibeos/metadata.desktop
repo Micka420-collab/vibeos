@@ -3,8 +3,8 @@
 # =============================================================================
 # Target (image build): /usr/share/sddm/themes/vibeos/metadata.desktop
 # Source: desktop/sddm/vibeos/metadata.desktop (COPY-ed into the image).
-# Status: 🛣️ Phase 5 (branding). Activation (set [Theme] Current=vibeos) is a
-# Phase 5 task — see desktop/sddm/README.md.
+# Status: ✅ ACTIVE (2026-07-23). The activation drop-in ([Theme] Current=vibeos)
+# ships at /usr/lib/sddm/sddm.conf.d/10-vibeos.conf — see desktop/sddm/README.md.
 # =============================================================================
 Name=VibeOS
 Description=VibeOS login — dark glass card over a mauve→blue aurora, JetBrains Mono clock, signature ring.

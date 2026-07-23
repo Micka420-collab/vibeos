@@ -3,7 +3,7 @@
 > Version : v0.1 (fondation) — Date : 2026-07-03
 > Statut : document de référence du chantier bureau. Sources amont : [ECOSYSTEM.md](ECOSYSTEM.md) (stack curée), [ARCHITECTURE.md](ARCHITECTURE.md) (vibed, tiers T0–T3), [MEMORY.md](MEMORY.md) (mémoire, mode amnésique). Fichiers du chantier : [`desktop/`](../desktop/README.md).
 >
-> **Convention de lecture (règle d'honnêteté du projet)** : tout ce qui n'est pas livré en v0.1 est marqué **Phase N** (numérotation de [ROADMAP.md](../ROADMAP.md)). En v0.1, la couche bureau réellement embarquée dans l'image se limite au **schéma de couleurs `VibeOSDark.colors`**, aux **dotfiles terminal `/etc/skel`** (fish/Starship/Ghostty/Zellij/nvim) et aux **polices** (JetBrains Mono / Fira Code). Le **HUD Quickshell** (rendu + autostart + client du socket `vibed` **câblé**) et le **Global Theme / layout** sont **livrés** (Phase 2) ; la **validation visuelle du HUD** (jamais rendu sur un Plasma booté), le **preset Panel Colorizer**, les **activités** et les **raccourcis** restent des livrables **Phase 2** ; les **wallpapers** sont livrés dans l'image (« VibeOS » posé en défaut par le Global Theme, « Genesis »/« Void » sélectionnables) ; le branding complet (logo, activation SDDM/Plymouth) relève de la **Phase 5**. Aucun mécanisme non implémenté n'est décrit au présent.
+> **Convention de lecture (règle d'honnêteté du projet)** : tout ce qui n'est pas livré en v0.1 est marqué **Phase N** (numérotation de [ROADMAP.md](../ROADMAP.md)). En v0.1, la couche bureau réellement embarquée dans l'image se limite au **schéma de couleurs `VibeOSDark.colors`**, aux **dotfiles terminal `/etc/skel`** (fish/Starship/Ghostty/Zellij/nvim) et aux **polices** (JetBrains Mono / Fira Code). Le **HUD Quickshell** (rendu + autostart + client du socket `vibed` **câblé**) et le **Global Theme / layout** sont **livrés** (Phase 2) ; la **validation visuelle du HUD** (jamais rendu sur un Plasma booté), le **preset Panel Colorizer**, les **activités** et les **raccourcis** restent des livrables **Phase 2** ; les **wallpapers** sont livrés dans l'image (« VibeOS » posé en défaut par le Global Theme, « Genesis »/« Void » sélectionnables) ; les thèmes **SDDM** et **Plymouth** ainsi que l'**identité OS** (os-release + logo) sont désormais **actifs par défaut** (2026-07-23, à la demande du mainteneur — plus de logo Fedora). Restent en **Phase 5** : jeux d'icônes/curseurs VibeOS, atlas Kvantum complet, thème GRUB et chartes de marque. Aucun mécanisme non implémenté n'est décrit au présent.
 
 ---
 
@@ -121,7 +121,7 @@ Les activités Plasma (mécanisme natif, stable) incarnent le pilier **Contexte*
 
 ## 4. La session par défaut
 
-1. **SDDM** (greeter par défaut : Breeze ; le thème SDDM VibeOS original est **copié dans l'image**, sélectionnable — activation par défaut en **Phase 5**, voir `desktop/sddm/`) ouvre une **session Plasma 6 Wayland** (X11 non installé, héritage Kinoite).
+1. **SDDM** (greeter par défaut : **VibeOS** — thème original activé le 2026-07-23 via `/usr/lib/sddm/sddm.conf.d/10-vibeos.conf` ; il nomme le **citoyen IA** né au premier boot ; repli SDDM intégré si le thème échoue — voir `desktop/sddm/`) ouvre une **session Plasma 6 Wayland** (X11 non installé, héritage Kinoite).
 2. La session s'ouvre en **Global Theme VibeOS Dark par défaut** (pointeur `/etc/xdg/kdeglobals`, layout panneau + dock du paquet `org.vibeos.dark` appliqué aux nouvelles sessions ; surchargeable par utilisateur). Le wallpaper par défaut est **« VibeOS »**, posé par le Global Theme (« Genesis » et « Void » restent sélectionnables).
 3. L'**autostart utilisateur** livré dans l'image (`/etc/skel/.config/autostart/vibeos-hud.desktop` → `/usr/bin/vibeos-hud`, `$HOME` — pas de service système) **lance le HUD Quickshell** en session Plasma. Le supprimer de son `$HOME` désactive le HUD.
 4. **Reste Phase 2 (validation visuelle)** : le HUD **ouvre** `connect()` sur `/run/vibed/mcp.sock` — le QML ouvre bien le socket (câblé dans `shell.qml`), reste à valider le rendu sur un Plasma booté :
@@ -173,8 +173,9 @@ v0.1 : **Breeze** (défaut Plasma, LGPL) — aucun fork d'icônes tant que le br
 ### 5.4 Wallpapers et branding
 
 - **Trois wallpapers originaux livrés dans l'image** (créés pour le projet, licence du dépôt — aucun asset tiers non redistribuable) : « VibeOS » (fond officiel, **défaut** posé par le Global Theme), « Genesis » (dégradé Base→Crust avec halo Mauve, pour Vibe/Review) et « Void » (Crust quasi uni, pour Focus). Copiés sous `/usr/share/wallpapers/` (paquets `VibeOS`, `VibeOSDark`, `VibeOSVoid` — sources : `desktop/wallpapers/`).
-- Logo : glyphe provisoire en v0.1 (le nom lui-même est un nom de code — voir ROADMAP Phase 5).
-- **Phase 5** : identité complète — logo définitif, **activation par défaut** des thèmes SDDM et Plymouth VibeOS (originaux, déjà copiés dans l'image sous `/usr/share/sddm/themes/vibeos/` et `/usr/share/plymouth/themes/vibeos/` — l'existant adi1090x reste rejeté pour provenance d'assets floue, cf. ECOSYSTEM), GRUB, lignes directrices de marque.
+- **Identité OS livrée (2026-07-23)** : `/usr/lib/os-release` réécrit (`ID=vibeos`, `PRETTY_NAME="VibeOS 0.1.0-dev (Genesis)"`, `ID_LIKE=fedora` pour la compat dnf/rpm-ostree) — le nom « Fedora » disparaît du menu de boot (BLS), du greeter, de `fastfetch` et de `/etc/os-release`. Logo VibeOS livré sous `/usr/share/pixmaps/vibeos-logo.svg` (référencé par `LOGO=vibeos-logo`).
+- **Thèmes SDDM + Plymouth activés par défaut (2026-07-23)** : greeter VibeOS (drop-in SDDM) et splash VibeOS (posé + initramfs régénéré au build, remplace le logo Fedora). L'existant adi1090x reste rejeté pour provenance d'assets floue (cf. ECOSYSTEM).
+- **Reste Phase 5** : logo définitif (le glyphe actuel est provisoire, le nom lui-même est un nom de code), jeux d'icônes/curseurs VibeOS, atlas Kvantum complet, thème GRUB dédié, lignes directrices de marque.
 
 ---
 
@@ -257,7 +258,9 @@ Le bureau réussit si, à chaque étape, les trois questions du triptyque ont un
 | Panneau Mémoire du HUD (`memory.query`) | ❌ (état « non accessible ») | 🛣️ Phase 2 | enrichi (mémoire v2) | — |
 | Dialogues d'approbation T2/T3 dans Plasma | ❌ (T2/T3 = refus fail-closed, cf. [ARCHITECTURE.md](ARCHITECTURE.md) §4.5) | 🛣️ Phase 4 | — | — |
 | Indicateur de mode amnésique dans la zone système | ❌ | — | 🛣️ **Phase 3** (avec le mode lui-même) | — |
-| Thèmes SDDM et Plymouth VibeOS (originaux) | ❌ (Breeze / défaut distro) | ✅ **copiés dans l'image** (sélectionnables, non actifs par défaut ; PNG Plymouth à générer) | — | 🛣️ **Phase 5** (activation par défaut, GRUB, icônes) |
+| Thèmes SDDM et Plymouth VibeOS (originaux) | ❌ (Breeze / défaut distro) | ✅ **copiés dans l'image** | — | ✅ **activés par défaut (2026-07-23)** — greeter + splash VibeOS, os-release + logo ; restent Phase 5 : icônes/curseurs, atlas Kvantum, thème GRUB |
+| Identité OS (os-release, logo, plus de « Fedora ») | ❌ | — | — | ✅ **livré (2026-07-23)** (`/usr/lib/os-release`, `LOGO=vibeos-logo`) |
+| Login « naissance » : le greeter nomme le citoyen IA | ❌ | — | — | ✅ **livré (2026-07-23)** (`vibeos-identity.service` → `/run/vibeos/citizen.json`, lu par `Main.qml`) |
 | Session « focus » distincte au login | ❌ | — | — | 🛣️ Phase 5 (optionnelle) |
 
 ---

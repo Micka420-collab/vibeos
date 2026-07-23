@@ -4,10 +4,11 @@
 //   alongside the assets: mark.png, ring.png, wordmark.png (see README).
 // Source: desktop/plymouth/vibeos/vibeos.script (COPY-ed into the image).
 //
-// STATUS — assets présents (générés par generate-assets.py) ; activation du
-// thème = 🛣️ Phase 5 (régénération de l'initramfs au build de l'image). Œuvre
-// ORIGINALE VibeOS dessinée par code (generate-assets.py), aucune source tierce
-// — le pack adi1090x est écarté pour provenance floue (docs/DESKTOP.md §5.4).
+// STATUS — ✅ ACTIVÉ (2026-07-23) : ce thème est le splash de boot par défaut,
+// posé par os/Containerfile (plymouth-set-default-theme vibeos + régénération de
+// l'initramfs au build). Œuvre ORIGINALE VibeOS dessinée par code
+// (generate-assets.py), aucune source tierce — le pack adi1090x est écarté pour
+// provenance floue (docs/DESKTOP.md §5.4).
 //
 // DESIGN — docs/DESIGN-SYSTEM.md §11.1 (Boot). The boot is "the first chord of
 // the score": Crust backdrop (never pure #000), a calm breathing core, a slow
