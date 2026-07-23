@@ -54,8 +54,6 @@
 VibeOS est une distribution Linux **AI-native, immuable et sécurisée par conception**, dédiée au *vibecoding*. Dérivée de Fedora Kinoite (KDE Plasma 6) et construite en mode image avec bootc/OSTree, elle expose le contrôle du système aux agents IA à travers un contrat strict — un démon système (`vibed`), un serveur MCP, un moteur de politiques et un journal d'audit — plutôt qu'un accès brut au shell. L'OS est livré **vierge** : sa mémoire est créée au premier démarrage par une séquence *Genesis* et appartient à son utilisateur, et à personne d'autre (le chiffrement LUKS de cette mémoire arrive en **Phase 3** — voir [ROADMAP.md](ROADMAP.md)). Projet pluriannuel : la fondation v0.1 est posée — image multi-arch signée, deux ISO, démon `vibed` actif au boot, bureau vibecoding livré.
 
 > 📊 **Où en est le projet ?** L'état d'avancement vivant (fait / en cours / reste à faire) est dans **[STATUS.md](STATUS.md)**.
->
-> 🟢 **Travail autonome (week-end 2026-07-18 → 20)** : la trousse **SaaS + ecommerce gouvernée** est **livrée** (outils embarqués, serveurs en conteneurs par projet, installeur à la demande vérifié, catalogue) — voir la section dédiée plus bas. Côté déploiement : `deploy.plan` (T2, lecture d'état) est depuis **livré et refusé par défaut** — l'**activation** (allowlist `[rule.deploy]`, jeton scellé) et les capacités d'écriture restent une décision d'architecture ouverte. Suivi en direct dans **[WEEKEND-LOG.md](WEEKEND-LOG.md)**.
 
 ---
 
