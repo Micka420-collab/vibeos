@@ -78,6 +78,10 @@ struct ChainState {
     next_seq: u64,
     /// SHA-256 of the last written record's line (the next record's `prev`).
     last_hash: String,
+    /// UTC date ("YYYY-MM-DD") of the daily file the last record was written to.
+    /// The next write never targets a file sorting BEFORE this — see the
+    /// monotonic-date clamp in `record_with_digest_at`. Empty for a fresh chain.
+    last_file_date: String,
 }
 
 pub struct AuditLog {
@@ -152,9 +156,32 @@ impl AuditLog {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        let ts_unix_ms = now.as_millis() as u64;
-        let epoch_secs = now.as_secs();
+        self.record_with_digest_at(
+            now.as_millis() as u64,
+            now.as_secs(),
+            tool,
+            args_digest,
+            target,
+            decision,
+            outcome,
+            caller,
+        )
+    }
 
+    /// Body of [`AuditLog::record_with_digest`] with the clock injected, so tests
+    /// can exercise a moving (including BACKWARD) wall clock deterministically.
+    #[allow(clippy::too_many_arguments)]
+    fn record_with_digest_at(
+        &self,
+        ts_unix_ms: u64,
+        epoch_secs: u64,
+        tool: &str,
+        args_digest: &str,
+        target: Option<&str>,
+        decision: &str,
+        outcome: &str,
+        caller: Caller,
+    ) -> io::Result<()> {
         let mut state = self
             .state
             .lock()
@@ -183,8 +210,24 @@ impl AuditLog {
         entry["hash"] = Value::String(hash.clone());
         let line = entry.to_string();
 
+        // Monotonic day-file selection. The daily file is normally chosen from
+        // the wall clock, but `daily_files`, `verify_chain` and
+        // `recover_chain_state` all assume filename order (UTC date) == chain
+        // (seq) order. A BACKWARD wall-clock step across a UTC-day boundary — an
+        // NTP correction, a VM-snapshot restore, or an unset RTC reading ~1970 at
+        // boot — would otherwise drop this higher-seq record into an
+        // EARLIER-sorting file, which (1) makes verify_chain read records out of
+        // seq order and falsely report a break on an untampered log, and (2) makes
+        // the next restart's recover_chain_state pick the wrong head and stamp a
+        // DUPLICATE seq, permanently corrupting the chain — from benign clock skew,
+        // no attacker. Clamping the file date forward keeps on-disk file order
+        // monotone with seq, so that invariant holds and verify/recover stay
+        // correct unchanged. (The record's `ts_unix_ms` still reflects the raw
+        // clock: seq is the ordering authority, the timestamp is informational.)
+        let file_date = monotonic_date(&state.last_file_date, &utc_date(epoch_secs));
+
         fs::create_dir_all(&self.dir)?;
-        let target_file = day_file(&self.dir, epoch_secs);
+        let target_file = self.dir.join(format!("vibed-{file_date}.jsonl"));
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -200,13 +243,28 @@ impl AuditLog {
         // failed write never desyncs the in-memory head from the file.
         state.next_seq += 1;
         state.last_hash = hash;
+        state.last_file_date = file_date;
         Ok(())
     }
 }
 
-/// Path of the daily audit file for `epoch_secs` under `dir`.
-fn day_file(dir: &Path, epoch_secs: u64) -> PathBuf {
-    dir.join(format!("vibed-{}.jsonl", utc_date(epoch_secs)))
+/// The daily-file date to write to: never earlier than the last one written,
+/// so a backward wall clock cannot drop a higher-seq record into an
+/// earlier-sorting file (ISO dates sort lexicographically = chronologically).
+fn monotonic_date(last_file_date: &str, now_date: &str) -> String {
+    if now_date > last_file_date {
+        now_date.to_string()
+    } else {
+        last_file_date.to_string()
+    }
+}
+
+/// Extract "YYYY-MM-DD" from a daily audit file path (`vibed-YYYY-MM-DD.jsonl`).
+fn file_date(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    name.strip_prefix("vibed-")
+        .and_then(|s| s.strip_suffix(".jsonl"))
+        .map(str::to_string)
 }
 
 /// The daily audit files under `dir`, sorted chronologically (the `vibed-` +
@@ -281,9 +339,14 @@ fn truncate_trailing_partial(dir: &Path) {
 /// (Belt-and-suspenders: `truncate_trailing_partial` already removed a torn
 /// tail at open, but recovery stays tolerant of one anyway.)
 fn recover_chain_state(dir: &Path) -> ChainState {
+    let files = daily_files(dir);
+    // The newest daily file by name is, under the monotonic-date invariant the
+    // writer maintains, where the chain head lives — seed `last_file_date` from
+    // it so the first write after a restart also refuses an earlier-dated file.
+    let last_file_date = files.last().and_then(|p| file_date(p)).unwrap_or_default();
     let mut recovered: Option<(u64, String)> = None;
-    for file in daily_files(dir) {
-        let Ok(content) = fs::read_to_string(&file) else {
+    for file in &files {
+        let Ok(content) = fs::read_to_string(file) else {
             continue;
         };
         for line in content.lines() {
@@ -305,10 +368,12 @@ fn recover_chain_state(dir: &Path) -> ChainState {
         Some((seq, hash)) => ChainState {
             next_seq: seq + 1,
             last_hash: hash,
+            last_file_date,
         },
         None => ChainState {
             next_seq: 0,
             last_hash: CHAIN_IV.to_string(),
+            last_file_date,
         },
     }
 }
@@ -484,6 +549,102 @@ mod tests {
         assert_eq!(
             report.records, 2,
             "torn record rolled back, exactly two committed records: {report:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn monotonic_date_never_goes_backward() {
+        assert_eq!(
+            monotonic_date("", "2026-07-23"),
+            "2026-07-23",
+            "empty -> now"
+        );
+        assert_eq!(
+            monotonic_date("2026-07-23", "2026-07-24"),
+            "2026-07-24",
+            "a later date advances"
+        );
+        assert_eq!(
+            monotonic_date("2026-07-23", "2026-07-23"),
+            "2026-07-23",
+            "the same date stays"
+        );
+        assert_eq!(
+            monotonic_date("2026-07-23", "2026-07-22"),
+            "2026-07-23",
+            "an earlier date is clamped forward (backward clock)"
+        );
+    }
+
+    #[test]
+    fn backward_clock_across_day_boundary_keeps_the_chain_ordered() {
+        let dir = temp_test_dir("clockback");
+        let caller = Caller {
+            uid: Some(0),
+            gid: Some(0),
+            pid: Some(1),
+        };
+        let log = AuditLog::new(dir.clone());
+
+        // Two epochs on DIFFERENT UTC days, written in BACKWARD order — a wall
+        // clock that steps back across midnight between two audit writes (NTP
+        // correction / VM snapshot / unset RTC).
+        let later = 1_784_000_000u64; // day B
+        let earlier = later - 2 * 86_400; // day A, two days earlier
+        assert_ne!(
+            utc_date(later),
+            utc_date(earlier),
+            "the two epochs must straddle a UTC-day boundary"
+        );
+
+        log.record_with_digest_at(
+            later * 1000,
+            later,
+            "os.status",
+            "0",
+            None,
+            "allow",
+            "ok",
+            caller,
+        )
+        .expect("seq 0 on day B");
+        // Clock jumps BACK to day A for the next record.
+        log.record_with_digest_at(
+            earlier * 1000,
+            earlier,
+            "os.status",
+            "0",
+            None,
+            "allow",
+            "ok",
+            caller,
+        )
+        .expect("seq 1 with a backward clock");
+
+        // The backward record is clamped into day B's file, so on-disk file order
+        // stays monotone with seq: a SINGLE daily file, not an earlier-dated one.
+        let files = daily_files(&dir);
+        assert_eq!(
+            files.len(),
+            1,
+            "a backward-clock write must not open an earlier-dated file: {files:?}"
+        );
+
+        // verify_chain must NOT falsely flag this untampered log as broken.
+        let report = verify_chain(&dir).expect("verify runs");
+        assert!(report.ok, "clock skew must not break the chain: {report:?}");
+        assert_eq!(report.records, 2);
+
+        // A restart recovers seq 2 as the next — no duplicate-seq corruption.
+        let log2 = AuditLog::new(dir.clone());
+        log2.record("fs.read", &json!({}), None, "allow", "ok", caller)
+            .expect("seq 2 after restart");
+        let report2 = verify_chain(&dir).expect("verify runs");
+        assert!(
+            report2.ok && report2.records == 3,
+            "restart continues the chain cleanly after a clock skew: {report2:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);
