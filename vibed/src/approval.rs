@@ -208,12 +208,28 @@ pub fn check_and_consume_grant(
         let Ok(grant) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
+        let granted = grant
+            .get("granted_ts_unix")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let expires = grant
             .get("expires_unix")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if now >= expires {
-            let _ = std::fs::remove_file(&path); // prune stale grant
+        // Freshness is a WINDOW [granted, expires], not just an upper bound. A
+        // `now` reading BEFORE the grant was minted means the wall clock has moved
+        // back to before creation — most concretely a reboot with an unset RTC,
+        // where `now` resets to ~seconds-since-boot, far below a real grant
+        // timestamp. Without this lower bound a stale one-shot grant would
+        // auto-consume on that first boot and be audited as a FRESH human
+        // approval. Treat a backward clock exactly like expiry: prune + skip. Same
+        // fail-safe as mode.rs / audit.rs — the safe state is always the default.
+        // RESIDUAL (documented, not closed here): a SMALL backward step landing
+        // within [granted, expires] of a grant already expired in real time still
+        // reads fresh; closing that needs proactive pruning or a persisted
+        // high-water-mark of the max clock seen (a larger change to the store).
+        if now >= expires || now < granted {
+            let _ = std::fs::remove_file(&path); // prune stale / clock-invalid grant
             continue;
         }
         let g_tool = grant.get("tool").and_then(Value::as_str);
@@ -461,6 +477,53 @@ mod tests {
             now
         )
         .is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_backward_clock_before_grant_creation_is_not_honored() {
+        let root = store("clockback");
+        let granted_at = 1_700_000_000; // a real ~2023 grant instant
+        let id = request_approval(
+            &root,
+            "svc.restart",
+            Some("sshd.service"),
+            "T2",
+            Some(1000),
+            granted_at,
+        )
+        .expect("request");
+        approve(&root, &id, Some(0), granted_at).expect("approve");
+        // The wall clock reads BEFORE the grant was minted — most concretely a
+        // reboot with an unset RTC (now resets to ~seconds-since-boot). The stale
+        // one-shot grant must NOT be revived and consumed as a "fresh" human
+        // approval; it is treated as expired and pruned (fail-safe).
+        assert!(
+            check_and_consume_grant(
+                &root,
+                "svc.restart",
+                Some("sshd.service"),
+                Some("T2"),
+                Some(1000),
+                42
+            )
+            .is_none(),
+            "a grant must not be consumable when the clock reads before its creation"
+        );
+        // It was pruned: even a subsequent correct-clock check within the nominal
+        // window finds nothing.
+        assert!(
+            check_and_consume_grant(
+                &root,
+                "svc.restart",
+                Some("sshd.service"),
+                Some("T2"),
+                Some(1000),
+                granted_at + 10
+            )
+            .is_none(),
+            "the clock-invalid grant was pruned, so it cannot be consumed later either"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
