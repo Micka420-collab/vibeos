@@ -60,11 +60,16 @@ fn read_memory_scan(path: &std::path::Path) -> Option<(String, bool)> {
 /// Body of memory.query with the store root as a parameter, so the tests can
 /// run it against a scratch layout without touching /var/lib/vibeos/memory.
 fn memory_query_at(root: &std::path::Path, args: &Value) -> Result<String, String> {
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_lowercase();
+    // `query` is optional (absent/null lists the whole scope), but a PRESENT
+    // value must be a string — mirror the `scope` validation below. Silently
+    // coercing a non-string to "" turned a mistyped `{query: 123}` into a
+    // "return everything" instead of a search or an error (broader disclosure
+    // than intended, and a wrong result the caller could not detect).
+    let query = match args.get("query") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.to_lowercase(),
+        Some(_) => return Err("memory.query: 'query' must be a string".to_string()),
+    };
 
     // `scope` restricts the walk to one entry of the docs/MEMORY.md §3 layout.
     let scope = match args.get("scope") {
@@ -322,6 +327,13 @@ fn memory_query_ranked(
     let mut items: Vec<recall::MemoryItem> = Vec::new();
     let mut metas: std::collections::BTreeMap<String, RankMeta> = std::collections::BTreeMap::new();
     let mut capped = false;
+    // Did any file exceed MAX_MEMORY_SCAN_BYTES, so its tail was NOT ingested?
+    // On an append-only store (knowledge/facts.jsonl, busy journal day-files)
+    // that tail holds the NEWEST events — exactly what a recency-weighted rank
+    // should surface. Dropping them silently while reporting `truncated:false`
+    // told the caller it had the complete, correctly-ranked view when it did
+    // not. Track it and fold it into `truncated` (and surface it explicitly).
+    let mut byte_capped = false;
 
     'outer: for path in files {
         let relative = path
@@ -329,9 +341,12 @@ fn memory_query_ranked(
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        let Some((text, _longer)) = read_memory_scan(path) else {
+        let Some((text, longer)) = read_memory_scan(path) else {
             continue;
         };
+        if longer {
+            byte_capped = true;
+        }
         for (line_no, raw) in text.lines().enumerate() {
             if items.len() >= MAX_RANK_EVENTS {
                 capped = true;
@@ -423,7 +438,7 @@ fn memory_query_ranked(
             })
         })
         .collect();
-    let truncated = capped || items.len() > matches.len();
+    let truncated = capped || byte_capped || items.len() > matches.len();
 
     Ok(json!({
         "initialized": true,
@@ -432,6 +447,10 @@ fn memory_query_ranked(
         "ranked": true,
         "scanned_files": files.len(),
         "scanned_events": items.len(),
+        // Honest signal that at least one file was cut at MAX_MEMORY_SCAN_BYTES,
+        // so its newest events were not ranked — distinct from the event-count
+        // cap (`capped`) folded into `truncated`.
+        "byte_capped": byte_capped,
         "matches": matches,
         "truncated": truncated
     })
@@ -844,6 +863,55 @@ mod tests {
             matches[1]["snippet"].as_str().unwrap().contains("cuisine"),
             "the non-matching event survives, ranked last: {payload}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rank_flags_byte_capped_files_as_truncated() {
+        let root = memory_scratch("rankbytecap");
+        let _ = std::fs::remove_file(root.join("journal").join("2026-01-01.jsonl"));
+        // Build one journal day-file LARGER than MAX_MEMORY_SCAN_BYTES: its tail
+        // (the NEWEST events) will not be ingested by the bounded read. Rank must
+        // then report that it did NOT see everything, not claim completeness.
+        let mut body = String::new();
+        let mut i = 0;
+        while body.len() <= MAX_MEMORY_SCAN_BYTES + 4096 {
+            body.push_str(&format!(
+                "{{\"ts\":\"2026-07-20T10:00:00Z\",\"type\":\"observation\",\"source\":\"a\",\
+                 \"data\":{{\"note\":\"event {i} pnpm padding padding padding padding\"}}}}\n"
+            ));
+            i += 1;
+        }
+        assert!(
+            body.len() > MAX_MEMORY_SCAN_BYTES,
+            "fixture must exceed the per-file byte cap"
+        );
+        std::fs::write(root.join("journal").join("2026-07-20.jsonl"), &body).unwrap();
+
+        let payload = ranked(&root, "journal", "pnpm", 5000);
+        assert_eq!(
+            payload["byte_capped"], true,
+            "a file cut at MAX_MEMORY_SCAN_BYTES is flagged: {payload}"
+        );
+        assert_eq!(
+            payload["truncated"], true,
+            "byte-capped rank must NOT report truncated:false: {payload}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn query_must_be_a_string_when_present() {
+        let root = memory_scratch("qtype");
+        // A present, non-string query is rejected — not silently coerced to ""
+        // (which would return the whole store instead of searching or erroring).
+        let err = memory_query_at(&root, &json!({"query": 123})).unwrap_err();
+        assert!(err.contains("'query' must be a string"), "{err}");
+        let err2 = memory_query_at(&root, &json!({"query": {"x": 1}})).unwrap_err();
+        assert!(err2.contains("must be a string"), "{err2}");
+        // Absent or null query is unchanged (lists the scope, no filter).
+        assert!(memory_query_at(&root, &json!({"scope": "journal"})).is_ok());
+        assert!(memory_query_at(&root, &json!({"scope": "journal", "query": null})).is_ok());
         let _ = std::fs::remove_dir_all(&root);
     }
 

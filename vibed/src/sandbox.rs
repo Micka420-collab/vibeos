@@ -599,8 +599,16 @@ fn validate_credential_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Absolute path with no whitespace/newline (a property value, and a
-/// `BindReadOnlyPaths` src where a space would be parsed as a `:dst` separator).
+/// Absolute path with no whitespace, control characters, or COLON. The colon is
+/// systemd's FIELD SEPARATOR inside the property values this path is
+/// interpolated into — `BindReadOnlyPaths=SOURCE:DESTINATION:OPTIONS` and
+/// `LoadCredentialEncrypted=ID:PATH`. An unescaped `:` in the path would smuggle
+/// an extra field: e.g. a workspace of `/home:/exposed` compiles to
+/// `BindReadOnlyPaths=/home:/exposed`, which bind-mounts ALL users' homes
+/// read-only inside the transient unit — re-exposing them past `ProtectHome=yes`
+/// and defeating the per-project isolation. A legitimate project/credential path
+/// never contains a colon, so reject it fail-closed (the prior guard forbade
+/// whitespace but not the actual separator; the old comment named the wrong char).
 fn validate_abs_path(pth: &str, what: &str) -> Result<(), String> {
     if pth.is_empty() || pth.len() > 4096 {
         return Err(format!("{what} path has invalid length"));
@@ -608,8 +616,14 @@ fn validate_abs_path(pth: &str, what: &str) -> Result<(), String> {
     if !Path::new(pth).is_absolute() {
         return Err(format!("{what} path must be absolute: {pth:?}"));
     }
-    if pth.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("{what} path must not contain whitespace: {pth:?}"));
+    if pth
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == ':')
+    {
+        return Err(format!(
+            "{what} path must not contain whitespace, control chars, or ':' \
+             (systemd field separator): {pth:?}"
+        ));
     }
     Ok(())
 }
@@ -1697,6 +1711,28 @@ mod tests {
         let mut s = base();
         s.workspace = Some("/etc/x\n/etc/y".to_string());
         assert!(TransientUnit::compile(ToolClass::Deploy { needs_wx: false }, &s).is_err());
+        // COLON-bearing workspace: the colon is systemd's BindReadOnlyPaths
+        // SOURCE:DEST separator, so "/home:/exposed" would bind-mount every
+        // user's home read-only inside the sandbox, past ProtectHome. Must be
+        // rejected (confinement escape) — not just whitespace.
+        let mut s = base();
+        s.workspace = Some("/home:/exposed".to_string());
+        assert!(
+            TransientUnit::compile(ToolClass::Deploy { needs_wx: false }, &s).is_err(),
+            "a colon in the workspace path must be rejected (BindReadOnlyPaths escape)"
+        );
+    }
+
+    #[test]
+    fn validate_abs_path_rejects_the_systemd_field_separator() {
+        // The colon separates fields in BindReadOnlyPaths (SRC:DST:OPTS) and
+        // LoadCredentialEncrypted (ID:PATH); an unescaped one smuggles an extra
+        // field, so validate_abs_path must reject it in every path it guards.
+        assert!(validate_abs_path("/home:/exposed", "workspace").is_err());
+        assert!(validate_abs_path("/:/rootfs", "workspace").is_err());
+        assert!(validate_abs_path("/var/lib/vibed/creds/x:evil", "credential path").is_err());
+        // A normal absolute path (no colon) still passes.
+        assert!(validate_abs_path("/home/dev/project", "workspace").is_ok());
     }
 
     #[test]

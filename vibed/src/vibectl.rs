@@ -259,6 +259,71 @@ fn read_identity(root: &Path) -> Option<Value> {
     serde_json::to_value(parsed).ok()
 }
 
+/// `vibectl whoami` (alias `citizen`) — the machine's AI citizen and its birth
+/// character. Read-only, NOT root-gated: the citizen's PUBLIC identity is not a
+/// secret (it is the very data the login greeter shows). Delegates to the ONE
+/// citizen parser shared with the `agent.identity` MCP tool, so the operator CLI
+/// and the daemon never disagree on who lives on this machine.
+pub fn citizen_at(root: &Path) -> Value {
+    crate::tools::identity::identity_value(root)
+}
+
+/// Human-facing render of the citizen identity (for `vibectl whoami`): a short,
+/// in-character self-introduction rather than raw JSON. Falls back to a clear
+/// "not yet born" line before Genesis has run.
+pub fn render_citizen(value: &Value) -> String {
+    if value.get("born").and_then(Value::as_bool) != Some(true) {
+        let note = value
+            .get("note")
+            .and_then(Value::as_str)
+            .unwrap_or("aucun citoyen (Genesis n'a pas encore tourné).");
+        return format!("Aucun citoyen n'habite encore cette machine.\n{note}\n");
+    }
+    let s = |k: &str| value.get(k).and_then(Value::as_str).unwrap_or("");
+    let (name, archetype) = (s("name"), s("archetype"));
+    let mut out = if archetype.is_empty() {
+        format!("Je suis {name}.\n")
+    } else {
+        format!("Je suis {name}, {archetype}.\n")
+    };
+    let tone = s("tone");
+    if !tone.is_empty() {
+        out.push_str(&format!("Ton : {tone}\n"));
+    }
+    if let Some(traits) = value.get("traits").and_then(Value::as_object) {
+        // French labels in the canonical Genesis order (§3.5).
+        const ORDER: [(&str, &str); 6] = [
+            ("curiosity", "curiosité"),
+            ("caution", "prudence"),
+            ("initiative", "initiative"),
+            ("warmth", "chaleur"),
+            ("concision", "concision"),
+            ("playfulness", "jeu"),
+        ];
+        let parts: Vec<String> = ORDER
+            .iter()
+            .filter_map(|(k, label)| {
+                traits
+                    .get(*k)
+                    .and_then(Value::as_i64)
+                    .map(|v| format!("{label} {v}"))
+            })
+            .collect();
+        if !parts.is_empty() {
+            out.push_str(&format!("Traits : {}\n", parts.join(" · ")));
+        }
+    }
+    let birth = s("birth");
+    if !birth.is_empty() {
+        out.push_str(&format!("Naissance : {birth}\n"));
+    }
+    let seed = s("seed");
+    if !seed.is_empty() {
+        out.push_str(&format!("Graine : {seed}\n"));
+    }
+    out
+}
+
 /// Build the `vibectl memory status` report for a store rooted at `root`, using
 /// `marker_path` for the amnesic-mode marker (injectable for tests).
 pub fn memory_status_at(root: &Path, marker_path: &Path) -> Value {
@@ -1694,5 +1759,28 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&mem);
         let _ = std::fs::remove_dir_all(&run);
+    }
+
+    #[test]
+    fn citizen_render_reads_and_formats_the_character() {
+        let dir = std::env::temp_dir().join(format!("vibectl-citizen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Unborn (no personality.toml): a clear message, never a panic.
+        let unborn = render_citizen(&citizen_at(&dir));
+        assert!(unborn.contains("Aucun citoyen"), "{unborn}");
+        // Born: the citizen introduces itself, traits in the canonical order.
+        std::fs::write(
+            dir.join("personality.toml"),
+            "name = \"Lumen\"\narchetype = \"muse\"\ntone = \"vif et curieux\"\n\
+             [traits]\ncuriosity = 80\ncaution = 60\n",
+        )
+        .unwrap();
+        let out = render_citizen(&citizen_at(&dir));
+        assert!(out.contains("Je suis Lumen, muse."), "{out}");
+        assert!(out.contains("Ton : vif et curieux"), "{out}");
+        assert!(out.contains("curiosité 80"), "{out}");
+        assert!(out.contains("prudence 60"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

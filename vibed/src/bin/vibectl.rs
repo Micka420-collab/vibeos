@@ -221,6 +221,7 @@ fn usage() -> ExitCode {
          \x20 vibectl memory profile        current user profile (fold of updates)\n\
          \x20 vibectl memory projects       current project index (fold of updates)\n\
          \x20 vibectl memory knowledge      consolidated facts (dedup of facts.jsonl)\n\
+         \x20 vibectl whoami                this machine's AI citizen (name, archetype, traits)\n\
          \x20 vibectl memory reset [--yes]  FACTORY RESET (root): purge the memory store and\n\
          \x20                               re-arm Genesis at next boot; cryptographic erasure\n\
          \x20                               arrives with LUKS (Phase 3) — DANGER\n\
@@ -395,6 +396,16 @@ fn main() -> ExitCode {
         ["mode", "governed"] => {
             let (report, ok) = vibectl::mode_governed();
             emit(report, ok)
+        }
+        ["whoami"] | ["citizen"] => {
+            // The machine's AI citizen introduces itself (read-only, no root
+            // gate — the PUBLIC birth character, same data the login greeter
+            // shows). Human-facing render; use `memory status` for JSON.
+            print!(
+                "{}",
+                vibectl::render_citizen(&vibectl::citizen_at(&memory_dir()))
+            );
+            ExitCode::SUCCESS
         }
         ["agent", sub @ ..] => agent_dispatch(sub),
         ["-h"] | ["--help"] | ["help"] => {

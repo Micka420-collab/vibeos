@@ -16,9 +16,16 @@
 //!      REQUEST it but can never grant it to itself — the mode file is root-only
 //!      and on `vibed`'s built-in WRITE denylist (`fs.write` can never forge it).
 //!      This is the one invariant the whole OS rests on: no self-escalation.
-//!   2. **The audit trail stays on.** Every call is still audited (open-mode
-//!      calls carry the distinct `*_open_mode` outcome), and every mode
-//!      transition is audited. Autonomy is not untraceability.
+//!   2. **The audit trail stays on.** Every governed CALL made while open is
+//!      still audited in the tamper-evident chain (it carries the distinct
+//!      `*_open_mode` outcome) — so autonomy is not untraceability. HONEST
+//!      LIMIT: the mode TRANSITION itself (who unlocked, when, for how long,
+//!      why) is recorded in the root-only `mode.json` for `status` and the
+//!      danger panel, but is NOT yet written to the tamper-evident audit chain,
+//!      and `set_governed` overwrites `mode.json`, so there is no durable
+//!      HISTORY of past unlocks. Recording each transition in the chain must go
+//!      through the single-writer daemon — a `vibectl`-side append would fork
+//!      the hash chain (duplicate seq) — so it is deferred, not yet done.
 //!   3. **The kill-switch stays with the human.** `vibectl mode governed`
 //!      reverts instantly, and open mode AUTO-EXPIRES after its bounded window
 //!      (checked on every evaluation — no background task, no way to "stick").
@@ -85,9 +92,24 @@ pub fn effective(path: &Path, now: u64) -> Mode {
     if v.get("mode").and_then(Value::as_str) != Some("open") {
         return Mode::Governed;
     }
+    let since = v.get("since_unix").and_then(Value::as_u64).unwrap_or(0);
     let expires = v.get("expires_unix").and_then(Value::as_u64).unwrap_or(0);
-    if now >= expires {
-        return Mode::Governed; // expired -> safe default (auto-revert)
+    // Fail-safe against a BACKWARD or implausible wall clock. The bounded window
+    // is measured in wall-clock seconds, so a `now` earlier than `since_unix`
+    // (the instant the operator unlocked) means the clock has moved BACK —
+    // an NTP correction, a VM-snapshot restore, or an unset RTC reading ~1970 at
+    // boot. `now` is then not a valid point inside the window, and a stale open
+    // record must NOT reactivate autonomy: without this guard a clock step-back
+    // silently exceeds OPEN_MAX_SECS, and a box with no RTC battery boots
+    // straight into UNATTENDED open mode (T2/T3 auto-granted) before any human is
+    // present. Both a backward step (now < since) and expiry (now >= expires)
+    // collapse to the governed default (module docs §FAIL-SAFE). This also shuts
+    // the self-perpetuation escape: an agent already in open mode that steps the
+    // clock back to extend its window instead CLOSES it. Clock read failure
+    // (now == 0, see mcp::now_epoch_secs) is subsumed — 0 < since for any real
+    // unlock — so an uncertain clock resolves to Governed, as the doctrine says.
+    if now < since || now >= expires {
+        return Mode::Governed;
     }
     Mode::Open
 }
@@ -254,6 +276,45 @@ mod tests {
             "auto-expires at the boundary (now >= expires)"
         );
         assert!(!is_open(&p, now + 10_000), "long past -> governed");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn backward_clock_or_unset_rtc_does_not_reactivate_open() {
+        let p = scratch("clockback");
+        let unlock = 1_700_000_000u64; // a real ~2023 wall-clock unlock instant
+        set_open(&p, 3600, Some(0), unlock, Some("nightly")).expect("unlock");
+        assert!(is_open(&p, unlock + 10), "active inside the window");
+
+        // (a) wall clock steps BACK during the window (NTP correction, VM
+        // snapshot restore): `now` earlier than the unlock instant must fail
+        // safe to governed, never keep or reactivate open mode.
+        assert!(
+            !is_open(&p, unlock - 5),
+            "a backward clock step must NOT keep open mode active"
+        );
+        let s = status(&p, unlock - 5);
+        assert_eq!(s["mode"], "governed", "backward clock reads governed");
+        assert_eq!(s["danger"], false);
+
+        // (b) reboot with an UNSET RTC reading ~seconds-since-1970: the stale
+        // open record is still on disk (expires ~1.7e9) but `now` is tiny — the
+        // box must NOT boot straight into unattended open mode.
+        assert!(
+            !is_open(&p, 42),
+            "an unset-RTC boot must not reactivate open mode"
+        );
+
+        // (c) clock-read failure surfaces as now=0 (mcp::now_epoch_secs's
+        // unwrap_or(0)); an uncertain clock resolves to governed.
+        assert!(
+            !is_open(&p, 0),
+            "now=0 (clock failure) fails safe to governed"
+        );
+
+        // Forward motion inside the window still works; expiry still closes.
+        assert!(is_open(&p, unlock + 3599), "still open just before expiry");
+        assert!(!is_open(&p, unlock + 3600), "auto-expires at the boundary");
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
