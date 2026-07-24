@@ -148,7 +148,16 @@ fn is_valid_label(label: &str) -> bool {
 /// pattern matches nothing — a typo silently widening the allow-list would be
 /// the worst possible failure mode, so the check is: pattern invalid ⇒ no match.
 pub fn domain_match(pattern: &str, host: &str) -> bool {
-    if !host.is_ascii() || host.is_empty() {
+    // ENFORCE the "host must be canonical" precondition, do not merely document
+    // it. `host` is meant to arrive from `host_of`/`parse_connect_target`
+    // (lowercase, ASCII, legal labels). A weaker guard (`is_ascii && !empty`) let
+    // a non-canonical host slip through the wildcard branch: `"x .github.com"`
+    // ends_with `".github.com"`, and `"API.github.com"` (uppercase) does too, so
+    // a future caller that forgot to validate would silently get an allow-list
+    // bypass. `is_valid_host` rejects exactly those (space, uppercase, empty
+    // label, over-long), and a genuine `host_of` output always passes it — so
+    // this is fail-closed defense-in-depth, never a rejection of a real host.
+    if !is_valid_host(host) {
         return false;
     }
     match pattern.strip_prefix("*.") {
@@ -234,6 +243,13 @@ mod tests {
         // onto an ASCII pattern.
         assert_eq!(host_of("https://gіthub.com/"), None); // Cyrillic і
         assert_eq!(host_of("https://tést.com/"), None);
+        // Backslash is NOT an authority terminator here (only '/','?','#' are),
+        // so a browser-style `\`-as-`/` URL either trips the userinfo '@' refusal
+        // or the invalid-character check — either way host_of returns None
+        // (fail-closed). The browser could route these to a host we never
+        // allow-listed, so refusing to extract a host is the safe answer.
+        assert_eq!(host_of("https://github.com\\@evil.tld/"), None);
+        assert_eq!(host_of("https://github.com\\.evil.tld/"), None);
         // Malformed authorities.
         assert_eq!(host_of("https:///path"), None); // empty host
         assert_eq!(host_of("https://github.com./"), None); // trailing dot
@@ -295,6 +311,35 @@ mod tests {
         // host_of, so an uppercase pattern can never match. Failing closed makes
         // the bug visible instead of silently disabling a rule.
         assert!(!domain_match("GitHub.com", "github.com"));
+    }
+
+    #[test]
+    fn a_non_canonical_host_never_matches() {
+        // domain_match ENFORCES that the host is canonical (host_of output), not
+        // just documents it. Each host below ends_with ".github.com" and would
+        // have slipped through the wildcard branch under the old is_ascii-only
+        // guard — a bypass for any future caller that skipped host_of. They must
+        // all fail closed now.
+        assert!(
+            !domain_match("*.github.com", "x .github.com"),
+            "space in host"
+        );
+        assert!(
+            !domain_match("*.github.com", "API.github.com"),
+            "uppercase host"
+        );
+        assert!(
+            !domain_match("*.github.com", ".github.com"),
+            "empty leading label"
+        );
+        assert!(
+            !domain_match("github.com", "GITHUB.COM"),
+            "uppercase exact host"
+        );
+        // A genuine canonical host is unaffected — the guard rejects only
+        // malformed/non-canonical input, never a real host_of result.
+        assert!(domain_match("*.github.com", "api.github.com"));
+        assert!(domain_match("github.com", "github.com"));
     }
 
     #[test]
