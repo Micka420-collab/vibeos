@@ -150,29 +150,64 @@ fn redact(text: &str) -> (String, bool) {
     (out, any)
 }
 
+/// Tokenisation : on découpe sur TOUT blanc ASCII, séparateur conservé.
+///
+/// `split(' ')` — l'ancienne découpe — avait deux trous réels, tous deux sur la
+/// règle `Bearer`, la SEULE de cette passe qui porte un état (« masque le jeton
+/// suivant ») et donc la seule que la forme des blancs pouvait dérégler :
+///
+///   1. `Bearer  <jeton>` (deux espaces) produisait un jeton VIDE entre les
+///      deux. Ce vide consommait l'attente (`mask_next` remis à faux) et le
+///      jeton réel passait ensuite au travers, en clair. Les journaux alignés en
+///      colonnes produisent des espaces multiples en permanence.
+///   2. `Bearer\t<jeton>` ne donnait qu'UN seul jeton, `"Bearer\t<jeton>"`, qui
+///      n'est pas `eq_ignore_ascii_case("bearer")` : la règle ne se déclenchait
+///      jamais.
+///
+/// Les règles SANS état étaient déjà correctes derrière une tabulation, et le
+/// restent : `key_is_sensitive` recoupe déjà sur `\t`, et `split(' ')` +
+/// `join(" ")` reconstruisait la ligne exactement. Ce changement ne corrige donc
+/// que le chemin à état ci-dessus ; `split_inclusive` colle le séparateur au
+/// jeton, ce qui garde la reconstruction exacte pour tous les blancs.
+///
+/// La rédaction reste best-effort (ADR-011 §3) — ceci en élargit la couverture,
+/// ça n'en fait pas une garantie.
 fn redact_line(line: &str) -> (String, bool) {
     let mut hit = false;
-    let mut out: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(line.len());
     let mut mask_next = false;
-    for tok in line.split(' ') {
+    for piece in line.split_inclusive(|c: char| c.is_ascii_whitespace()) {
+        let (tok, sep) = match piece.strip_suffix(|c: char| c.is_ascii_whitespace()) {
+            Some(t) => (t, &piece[t.len()..]),
+            None => (piece, ""),
+        };
+        // Un jeton vide vient d'un séparateur multiple : il ne DÉCIDE de rien, et
+        // surtout il ne consomme pas l'attente de masquage (trou n°1 ci-dessus).
+        if tok.is_empty() {
+            out.push_str(sep);
+            continue;
+        }
         if mask_next {
             mask_next = false;
-            if !tok.is_empty() {
-                out.push(MASK.to_string());
-                hit = true;
-                continue;
-            }
+            out.push_str(MASK);
+            out.push_str(sep);
+            hit = true;
+            continue;
         }
         // "Bearer <token>" — mask the following non-empty token.
         if tok.eq_ignore_ascii_case("bearer") {
-            out.push(tok.to_string());
+            out.push_str(tok);
+            out.push_str(sep);
             mask_next = true;
             continue;
         }
         // key=value with a sensitive-looking key -> mask the value only.
         if let Some((k, v)) = tok.split_once('=') {
             if !v.is_empty() && key_is_sensitive(k) {
-                out.push(format!("{k}={MASK}"));
+                out.push_str(k);
+                out.push('=');
+                out.push_str(MASK);
+                out.push_str(sep);
                 hit = true;
                 continue;
             }
@@ -183,7 +218,8 @@ fn redact_line(line: &str) -> (String, bool) {
         if let Some((scheme, rest)) = tok.split_once("://") {
             if let Some((userinfo, host)) = rest.split_once('@') {
                 if let Some((user, _pass)) = userinfo.split_once(':') {
-                    out.push(format!("{scheme}://{user}:{MASK}@{host}"));
+                    out.push_str(&format!("{scheme}://{user}:{MASK}@{host}"));
+                    out.push_str(sep);
                     hit = true;
                     continue;
                 }
@@ -191,18 +227,20 @@ fn redact_line(line: &str) -> (String, bool) {
         }
         // Standalone high-entropy blob (long base64/hex-like token).
         if looks_high_entropy(tok) {
-            out.push(MASK.to_string());
+            out.push_str(MASK);
+            out.push_str(sep);
             hit = true;
             continue;
         }
-        out.push(tok.to_string());
+        out.push_str(tok);
+        out.push_str(sep);
     }
     // PEM private-key marker: the base64 body is caught by high-entropy, but flag
     // the presence so `redacted` is truthful.
     if line.contains("PRIVATE KEY") {
         hit = true;
     }
-    (out.join(" "), hit)
+    (out, hit)
 }
 
 /// Does this `key=` look like it carries a secret? Marker set from ADR-011 plus
@@ -358,6 +396,42 @@ mod tests {
         // A plain URL without credentials is left untouched.
         let (m5, h5) = redact("fetched https://example.com/api/v1 ok");
         assert!(!h5, "a credential-free URL must not be redacted: {m5}");
+    }
+
+    /// Les deux trous de l'ancienne découpe `split(' ')`, sur le SEUL chemin de
+    /// cette passe qui porte un état (« masque le jeton suivant »).
+    #[test]
+    fn whitespace_shapes_do_not_let_a_bearer_token_through() {
+        // Trou n°1 : deux espaces. Le jeton vide intercalé consommait l'attente,
+        // et le vrai jeton passait en clair. (Choisi court et sans chiffre pour
+        // que la passe entropie ne le rattrape PAS — sinon le test prouve autre
+        // chose que ce qu'il croit prouver.)
+        let (m, h) = redact("auth header Bearer  abcdefghijklmnop");
+        assert!(h, "le jeton doit être détecté : {m}");
+        assert!(
+            !m.contains("abcdefghijklmnop"),
+            "le jeton a fui derrière un double espace : {m}"
+        );
+        assert!(m.contains(MASK));
+
+        // Trou n°2 : tabulation. `Bearer\t<jeton>` ne faisait qu'UN jeton, jamais
+        // reconnu comme « bearer », donc la règle ne se déclenchait pas.
+        let (m2, h2) = redact("auth header Bearer\tabcdefghijklmnop");
+        assert!(h2, "le jeton tabulé doit être détecté : {m2}");
+        assert!(
+            !m2.contains("abcdefghijklmnop"),
+            "le jeton a fui derrière une tabulation : {m2}"
+        );
+
+        // NON-RÉGRESSION (ces deux-là passaient DÉJÀ avant le changement, et
+        // doivent continuer) : une règle sans état derrière une tabulation, et
+        // la reconstruction exacte d'une ligne bénigne.
+        let (m3, h3) = redact("env\tAPI_KEY=short");
+        assert!(h3 && m3.contains(&format!("API_KEY={MASK}")), "{m3}");
+        let odd = "col1\tcol2   col3\tok";
+        let (m4, h4) = redact(odd);
+        assert!(!h4);
+        assert_eq!(m4, odd, "la ligne bénigne doit survivre octet pour octet");
     }
 
     #[test]

@@ -78,7 +78,9 @@ const SYSTEMCTL_BIN: &str = "/usr/bin/systemctl";
 ///   * on success the unit is READ BACK (`systemctl show`) and its fresh
 ///     ActiveState/SubState/ActiveEnterTimestamp are returned, so the caller
 ///     and the audit trail get PROOF the unit actually restarted, not just
-///     "the command ran".
+///     "the command ran". When that read-back itself fails, the payload says so
+///     (`readback: "unavailable"` + `readback_note`) instead of returning a
+///     bare `action: "restarted"` that LOOKS proven but is not.
 pub(crate) fn svc_restart(args: &Value) -> Result<String, String> {
     svc_restart_with(args, SYSTEMCTL_BIN)
 }
@@ -122,14 +124,36 @@ fn svc_restart_with(args: &Value, systemctl: &str) -> Result<String, String> {
             &unit,
         ])
         .output();
-    let mut payload = match &show {
-        Ok(out) if out.status.success() => {
-            parse_systemctl_show(&String::from_utf8_lossy(&out.stdout))
-        }
-        _ => serde_json::Map::new(),
+    // `readback` is the soft note this function's contract promises, and it was
+    // MISSING: on a read-back failure the payload simply lost its state fields
+    // while still announcing `action: "restarted"`. A caller (or an agent) that
+    // reads the JSON saw the same "restarted" verdict whether the proof had been
+    // obtained or not, and the absence of `active_state` was left to be inferred.
+    // The claim "the caller and the audit trail get PROOF" was therefore only
+    // true on the happy path. It is now stated explicitly, in both directions.
+    let (mut payload, readback, note) = match &show {
+        Ok(out) if out.status.success() => (
+            parse_systemctl_show(&String::from_utf8_lossy(&out.stdout)),
+            "confirmed",
+            None,
+        ),
+        Ok(out) => (
+            serde_json::Map::new(),
+            "unavailable",
+            Some(format!("systemctl show exited with {}", out.status)),
+        ),
+        Err(e) => (
+            serde_json::Map::new(),
+            "unavailable",
+            Some(format!("cannot run systemctl show: {e}")),
+        ),
     };
     payload.insert("unit".to_string(), Value::String(unit));
     payload.insert("action".to_string(), Value::String("restarted".to_string()));
+    payload.insert("readback".to_string(), Value::String(readback.to_string()));
+    if let Some(note) = note {
+        payload.insert("readback_note".to_string(), Value::String(note));
+    }
     Ok(Value::Object(payload).to_string())
 }
 
@@ -243,12 +267,25 @@ mod tests {
         marker: &std::path::Path,
         restart_exit: i32,
     ) -> String {
+        fake_systemctl_with_show(dir, marker, restart_exit, 0)
+    }
+
+    /// Same, with the `show` (read-back) arm's exit code controllable, so the
+    /// "restart succeeded but the proof could not be obtained" path is testable.
+    #[cfg(unix)]
+    fn fake_systemctl_with_show(
+        dir: &std::path::Path,
+        marker: &std::path::Path,
+        restart_exit: i32,
+        show_exit: i32,
+    ) -> String {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("systemctl");
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = restart ]; then echo \"$@\" > '{marker}'; exit {restart_exit}; fi\n\
              if [ \"$1\" = show ]; then \
+               if [ {show_exit} -ne 0 ]; then exit {show_exit}; fi; \
                printf 'Id=%s\\nActiveState=active\\nSubState=running\\nActiveEnterTimestamp=Mon 2026-07-13 21:00:00 UTC\\n' \"$5\"; \
                exit 0; fi\n\
              exit 2\n",
@@ -303,6 +340,7 @@ mod tests {
         assert_eq!(v["unit"], "vibed.service");
         assert_eq!(v["active_state"], "active");
         assert_eq!(v["sub_state"], "running");
+        assert_eq!(v["readback"], "confirmed");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -322,6 +360,42 @@ mod tests {
             err.contains("systemctl exited"),
             "the failure must be surfaced verbatim: {err}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Le contrat de `svc.restart` promet une PREUVE du redémarrage. Quand la
+    /// relecture échoue, il n'y a pas de preuve — et la charge utile doit le
+    /// DIRE. Avant ce correctif elle rendait un `action: "restarted"` nu,
+    /// indiscernable du cas prouvé si ce n'est par l'ABSENCE des champs d'état :
+    /// un appelant (ou un agent) lisait le même verdict dans les deux cas.
+    #[cfg(unix)]
+    #[test]
+    fn a_restart_whose_readback_fails_says_so_instead_of_looking_proven() {
+        let dir =
+            std::env::temp_dir().join(format!("vibed-svcrestart-noproof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("restarted");
+        // restart réussit (0), la relecture échoue (3).
+        let bin = fake_systemctl_with_show(&dir, &marker, 0, 3);
+
+        let out = svc_restart_retry(&json!({"unit": "vibed"}), &bin)
+            .expect("un échec de relecture n'annule pas le redémarrage");
+        let v: Value = serde_json::from_str(&out).unwrap();
+
+        assert!(marker.exists(), "le redémarrage a bien eu lieu");
+        assert_eq!(v["action"], "restarted");
+        assert_eq!(
+            v["readback"], "unavailable",
+            "sans preuve, la charge utile doit le déclarer : {v}"
+        );
+        assert!(
+            v["readback_note"].as_str().unwrap_or("").contains("show"),
+            "la note doit dire CE QUI a échoué : {v}"
+        );
+        // Et surtout : aucun champ d'état inventé.
+        assert!(v.get("active_state").is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
