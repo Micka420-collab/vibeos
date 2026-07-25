@@ -79,7 +79,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::domain::{domain_matches_any, is_valid_pattern};
-use crate::glob::glob_match;
+use crate::glob::{glob_match, is_valid_path_pattern};
 
 /// Capability tiers of the VibeOS tool model.
 ///
@@ -625,6 +625,29 @@ fn parse_and_validate(src: &str) -> Result<Vec<Rule>, FileError> {
                     "rule '{}': invalid domain pattern {bad:?} (expected \
                      'example.com' or '*.example.com', lowercase ASCII; an IDN \
                      must be punycoded)",
+                    rule.id
+                )));
+            }
+        }
+        // A path pattern that is not already canonical matches NOTHING (paths
+        // arrive normalized, patterns were matched verbatim), so a `paths.denied`
+        // entry like "/srv/keys/" or "//srv/keys/**" silently denies nothing and
+        // the rule fails OPEN — the operator believes a path is refused while
+        // every call to it is allowed. Refuse to start, same stance as the domain
+        // allow-list above. See `glob::is_valid_path_pattern`.
+        if let Some(paths) = rule.paths.as_ref() {
+            let all = paths
+                .allowed
+                .iter()
+                .flatten()
+                .chain(paths.denied.iter())
+                .collect::<Vec<_>>();
+            if let Some(bad) = all.into_iter().find(|p| !is_valid_path_pattern(p)) {
+                return Err(FileError::Invalid(format!(
+                    "rule '{}': invalid path pattern {bad:?} — a path pattern must \
+                     be absolute and canonical (no '//', no trailing '/', no '.' or \
+                     '..' segment), or it matches nothing and the rule silently \
+                     fails open; deny-everything is spelled '/**'",
                     rule.id
                 )));
             }
@@ -1439,6 +1462,57 @@ mod tests {
         assert!(result.is_err(), "duplicate rule ids must abort the load");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_non_canonical_path_pattern_refuses_to_load() {
+        // THE BYPASS this closes: paths reach the matcher normalized, patterns were
+        // matched verbatim, so a `denied` entry that is not already canonical
+        // matched NOTHING — the operator believed a path was refused while every
+        // call to it was allowed (a dead `denied` pattern is a policy bypass, not
+        // merely a dead rule). Each shape below must now refuse the whole policy.
+        for bad in [
+            "/home/dev/finance/",   // trailing slash
+            "//srv/secrets/**",     // empty segment
+            "/srv/./secrets/**",    // "." segment
+            "/srv/x/../secrets/**", // ".." segment
+            "srv/secrets/**",       // relative
+        ] {
+            let src = format!(
+                "schema_version = 1\n\
+                 [[rule]]\nid = \"fs-read\"\ntools = [\"fs.read\"]\n\
+                 tier = \"T0\"\naction = \"allow\"\n\
+                 [rule.paths]\ndenied = [\"{bad}\"]\n"
+            );
+            let err = parse_and_validate(&src).expect_err(&format!("{bad} must be rejected"));
+            let msg = match err {
+                FileError::Invalid(m) | FileError::Parse(m) => m,
+            };
+            assert!(
+                msg.contains("path pattern"),
+                "the error must name the bad path pattern: {msg}"
+            );
+        }
+        // An `allowed` list is validated the same way (a dead allow is fail-closed,
+        // but it is still a misconfiguration the operator must see).
+        let src = "schema_version = 1\n\
+                   [[rule]]\nid = \"r\"\ntools = [\"fs.read\"]\n\
+                   tier = \"T0\"\naction = \"allow\"\n\
+                   [rule.paths]\nallowed = [\"/home/dev/\"]\n";
+        assert!(parse_and_validate(src).is_err());
+        // Canonical patterns — including wildcards — still load untouched.
+        let ok = "schema_version = 1\n\
+                  [[rule]]\nid = \"r\"\ntools = [\"fs.read\"]\n\
+                  tier = \"T0\"\naction = \"allow\"\n\
+                  [rule.paths]\nallowed = [\"/home/**\"]\ndenied = [\"/home/*/.ssh/**\", \"/**\"]\n";
+        // `FileError` has no Debug impl, so match rather than `expect`.
+        let rules = match parse_and_validate(ok) {
+            Ok(r) => r,
+            Err(FileError::Invalid(m) | FileError::Parse(m)) => {
+                panic!("canonical patterns must load: {m}")
+            }
+        };
+        assert_eq!(rules.len(), 1);
     }
 
     #[test]
