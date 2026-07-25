@@ -1922,6 +1922,18 @@ fn agents_list(
     let mut by_pid: std::collections::BTreeMap<u64, Agg> = std::collections::BTreeMap::new();
 
     for r in read_recent_audit(audit_dir, cutoff) {
+        // ONE CALL, ONE RECORD. The dispatcher writes `started*` before running
+        // and `ok*`/`error` after, while a refusal writes a single line — so
+        // counting every record made `calls` roughly DOUBLE for an agent whose
+        // calls are allowed, and exact for one that keeps getting refused. The
+        // number shown to the human was therefore not a call count at all, and
+        // it flattered the busiest agents most. `agent.activity` deliberately
+        // keeps BOTH records: it is a timeline, where "began" and "concluded"
+        // are two real events and `outcome` is shown. Here we are counting, so
+        // we count terminal records only.
+        if !crate::audit::is_terminal_record(&r) {
+            continue;
+        }
         // Confine to the caller's own uid; skip the caller's own process.
         if r.get("caller_uid").and_then(Value::as_u64) != Some(u64::from(uid)) {
             continue;
@@ -2812,6 +2824,75 @@ mod tests {
         assert_eq!(out2["count"], 0, "an unidentified caller sees nothing");
 
         assert_eq!(tool_tier("agents.list"), Some(Tier::T0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `calls` doit compter des APPELS, pas des lignes de journal.
+    ///
+    /// Le répartiteur écrit `started` avant d'exécuter puis `ok` après, alors
+    /// qu'un refus n'écrit qu'une ligne. Compter toutes les lignes rendait donc
+    /// un `calls` à peu près DOUBLE pour un agent dont les appels passent, et
+    /// exact pour un agent qui se fait refuser — le nombre affiché à l'humain
+    /// n'était pas un compte d'appels, et il flattait le plus les agents les
+    /// plus actifs.
+    #[test]
+    fn agents_list_compte_des_appels_pas_des_lignes_de_journal() {
+        let dir = std::env::temp_dir().join(format!("vibed-agents-calls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = AuditLog::new(dir.clone());
+
+        let me = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(111),
+        };
+        let peer = Caller {
+            uid: Some(1000),
+            gid: Some(1000),
+            pid: Some(222),
+        };
+
+        // Deux appels AUTORISÉS, tels que le répartiteur les écrit réellement :
+        // ouverture puis issue. Plus un refus, qui n'écrit qu'une ligne.
+        for _ in 0..2 {
+            log.record(
+                "fs.read",
+                &json!({}),
+                Some("/home/a/x"),
+                "allow",
+                "started",
+                peer,
+            )
+            .unwrap();
+            log.record(
+                "fs.read",
+                &json!({}),
+                Some("/home/a/x"),
+                "allow",
+                "ok",
+                peer,
+            )
+            .unwrap();
+        }
+        log.record(
+            "fs.write",
+            &json!({}),
+            Some("/etc/passwd"),
+            "deny",
+            "blocked",
+            peer,
+        )
+        .unwrap();
+
+        let out: Value = serde_json::from_str(&agents_list(&json!({}), me, &dir).unwrap()).unwrap();
+        let agents = out["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1, "{out}");
+        assert_eq!(
+            agents[0]["calls"], 3,
+            "5 lignes de journal, mais 3 appels : {out}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

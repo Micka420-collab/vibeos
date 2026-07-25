@@ -227,6 +227,18 @@ pub(crate) fn derive_user_model(
     let mut executed_total = 0u64;
 
     for rec in records {
+        // UN APPEL, UNE FOIS. Le répartiteur écrit `started` avant d'exécuter
+        // puis `ok`/`error` après ; un refus n'écrit qu'une ligne. Sans ce
+        // filtre, chaque action AUTORISÉE pesait DOUBLE et chaque friction une
+        // seule fois : `executed_total` annonçait deux fois le vrai volume, les
+        // `patterns` et le texte « done N time(s) » des anticipations doublaient
+        // leur compte, et surtout la friction — le signal qu'ADR-028 veut
+        // justement remonter — se retrouvait sous-pondérée d'un facteur deux
+        // face aux actions réussies. Le modèle mentait donc dans le sens
+        // flatteur : beaucoup d'activité, peu de frottement.
+        if !crate::audit::is_terminal_record(rec) {
+            continue;
+        }
         let Some((tool, target, ts, decision)) = fields(rec) else {
             continue;
         };
@@ -353,6 +365,99 @@ mod tests {
             r["target"] = json!(t);
         }
         r
+    }
+
+    /// Comme `rec`, mais avec l'`outcome` réellement écrit par le répartiteur —
+    /// pour les tests qui doivent voir le journal tel qu'il est vraiment.
+    fn rec_out(tool: &str, target: Option<&str>, ts: u64, decision: &str, outcome: &str) -> Value {
+        let mut r = rec(tool, target, ts, decision);
+        r["outcome"] = json!(outcome);
+        r
+    }
+
+    /// Le vrai journal écrit DEUX lignes par appel autorisé (`started` puis
+    /// `ok`) et UNE seule par refus. Les compter toutes faisait peser chaque
+    /// action réussie double et chaque friction simple : `executed_total`
+    /// annonçait deux fois le volume réel, « done N time(s) » doublait son N, et
+    /// la friction — le signal qu'ADR-028 veut justement remonter — se
+    /// retrouvait sous-pondérée d'un facteur deux. Le modèle mentait dans le
+    /// sens flatteur.
+    #[test]
+    fn une_action_autorisee_ne_pese_pas_double_face_a_la_friction() {
+        let now = 100_000;
+        let mut records = Vec::new();
+        // 3 appels AUTORISÉS, tels que le répartiteur les écrit : 6 lignes.
+        for i in 0..3u64 {
+            let ts = now - 100 - i;
+            records.push(rec_out(
+                "fs.read",
+                Some("/etc/hosts"),
+                ts,
+                "allow",
+                "started",
+            ));
+            records.push(rec_out("fs.read", Some("/etc/hosts"), ts, "allow", "ok"));
+        }
+        // 3 refus : 3 lignes.
+        for i in 0..3u64 {
+            records.push(rec_out(
+                "fs.write",
+                Some("/etc/passwd"),
+                now - 200 - i,
+                "deny",
+                "blocked",
+            ));
+        }
+
+        let model = derive_user_model(&records, &json!({}), &[], now, 3600);
+
+        assert_eq!(
+            model["executed_total"], 3,
+            "9 lignes, mais 3 actions exécutées : {model}"
+        );
+        // Autant de friction que d'exécutions — c'est le rapport réel, et c'est
+        // celui que le modèle doit montrer.
+        let patterns = model["patterns"].as_array().unwrap();
+        let lecture = patterns.iter().find(|p| p["tool"] == "fs.read").unwrap();
+        assert_eq!(lecture["count"], 3, "compte doublé : {lecture}");
+        let friction = model["friction"].as_array().unwrap();
+        let ecriture = friction.iter().find(|f| f["tool"] == "fs.write").unwrap();
+        assert_eq!(ecriture["count"], 3, "{ecriture}");
+
+        // Et le texte montré à l'humain dit le vrai nombre.
+        let anticipation = model["anticipations"][0].clone();
+        assert!(
+            anticipation["reason"]
+                .as_str()
+                .unwrap()
+                .contains("done 3 time(s)"),
+            "la raison affichée doit dire le vrai compte : {anticipation}"
+        );
+
+        // Le rythme aussi : 3 actions, pas 6.
+        let total_heures: u64 = model["rhythm"]["by_hour"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .sum();
+        assert_eq!(total_heures, 3, "le rythme comptait les ouvertures");
+    }
+
+    /// Les formes décorées de l'ouverture (mode ouvert, appel approuvé par un
+    /// humain) doivent être filtrées AUSSI — ce sont précisément les appels les
+    /// plus sensibles, et les rater les aurait comptés double.
+    #[test]
+    fn les_ouvertures_decorees_sont_filtrees_elles_aussi() {
+        let now = 100_000;
+        let records = vec![
+            rec_out("browser.run", None, now - 10, "allow", "started_open_mode"),
+            rec_out("browser.run", None, now - 10, "allow", "ok_open_mode"),
+            rec_out("svc.restart", None, now - 20, "allow", "started_approved:0"),
+            rec_out("svc.restart", None, now - 20, "allow", "ok_approved:0"),
+        ];
+        let model = derive_user_model(&records, &json!({}), &[], now, 3600);
+        assert_eq!(model["executed_total"], 2, "{model}");
     }
 
     #[test]
