@@ -331,6 +331,160 @@ pub fn render_citizen(value: &Value) -> String {
     out
 }
 
+/// `vibectl conscience` — le citoyen confronte son caractère à sa conduite.
+///
+/// Lit l'identité (déterministe, ADR-029) sous `memory_root` et le journal
+/// d'audit sous `audit_dir`, puis rend le rapport de `conscience::confronter`.
+/// Rien d'autre : aucune écriture, aucune décision.
+///
+/// Le journal est lu EN FLUX (`audit::for_each_record`) : l'agrégat est borné
+/// même quand le journal ne l'est pas. Les lignes illisibles rencontrées sont
+/// remontées telles quelles — un rapport qui n'annoncerait que ce qu'il a su
+/// lire donnerait une image faussement complète.
+///
+/// Ce rapport ne dit RIEN de l'intégrité de la chaîne : c'est le travail de
+/// `vibectl audit verify`, et le texte rendu renvoie explicitement à lui. Lire
+/// le journal et le croire intègre sont deux choses différentes.
+pub fn conscience_at(memory_root: &Path, audit_dir: &Path) -> (Value, bool) {
+    let identite = citizen_at(memory_root);
+    if identite.get("born").and_then(Value::as_bool) != Some(true) {
+        return (
+            json!({
+                "born": false,
+                "note": identite.get("note").cloned().unwrap_or_else(
+                    || Value::String("aucun citoyen (Genesis n'a pas encore tourné).".to_string())
+                ),
+            }),
+            true,
+        );
+    }
+
+    let traits: std::collections::BTreeMap<String, i64> = identite
+        .get("traits")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_i64().map(|n| (k.clone(), n)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut conduite = crate::conscience::Conduite::default();
+    // `None` : l'opérateur voit TOUT le journal, pas seulement sa propre
+    // activité. C'est une commande root, sur un fichier déjà root-only.
+    let scan = match crate::audit::for_each_record(audit_dir, |r| conduite.observe(r, None)) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                json!({"error": format!("journal d'audit illisible sous {}: {e}", audit_dir.display())}),
+                false,
+            )
+        }
+    };
+    conduite.illisibles = scan.skipped;
+
+    let mut rapport = crate::conscience::confronter(&traits, &conduite);
+    if let Some(obj) = rapport.as_object_mut() {
+        obj.insert("born".to_string(), Value::Bool(true));
+        for k in ["name", "archetype"] {
+            if let Some(v) = identite.get(k) {
+                obj.insert(k.to_string(), v.clone());
+            }
+        }
+        if let Some(directive) = identite
+            .get("style")
+            .and_then(|s| s.get("directive"))
+            .and_then(Value::as_str)
+        {
+            obj.insert(
+                "style_annoncé".to_string(),
+                Value::String(directive.to_string()),
+            );
+        }
+        obj.insert(
+            "intégrité".to_string(),
+            Value::String(
+                "non vérifiée ici — ce rapport LIT le journal, il ne le valide pas. Chaîne : `vibectl audit verify`."
+                    .to_string(),
+            ),
+        );
+    }
+    (rapport, true)
+}
+
+/// Rendu humain de `conscience_at`. Les noms d'outils ne sont jamais imprimés
+/// bruts ailleurs que dans le JSON : ici on n'imprime que des libellés d'axes
+/// (constantes du code) et des nombres, donc rien qui vienne de l'appelant.
+pub fn render_conscience(value: &Value) -> String {
+    if value.get("born").and_then(Value::as_bool) != Some(true) {
+        let note = value
+            .get("note")
+            .and_then(Value::as_str)
+            .unwrap_or("aucun citoyen (Genesis n'a pas encore tourné).");
+        return format!("Aucun citoyen n'habite encore cette machine.\n{note}\n");
+    }
+    if let Some(err) = value.get("error").and_then(Value::as_str) {
+        return format!("Impossible de rendre compte : {err}\n");
+    }
+    let s = |k: &str| value.get(k).and_then(Value::as_str).unwrap_or("");
+    let n = |k: &str| value.get(k).and_then(Value::as_u64).unwrap_or(0);
+
+    let mut out = String::new();
+    let name = s("name");
+    if name.is_empty() {
+        out.push_str("Ce que j'ai fait, et ce que je prétends être.\n");
+    } else {
+        out.push_str(&format!(
+            "{name} — ce que j'ai fait, et ce que je prétends être.\n"
+        ));
+    }
+    let style = s("style_annoncé");
+    if !style.is_empty() {
+        out.push_str(&format!("Annoncé : {style}\n"));
+    }
+    out.push_str(&format!(
+        "Enregistré : {} appel(s) · {} refus · {} approbation(s) exigée(s) · {} échec(s) · {} outil(s) distinct(s)\n",
+        n("appels"),
+        n("refuses"),
+        n("approbations_exigees"),
+        n("echecs"),
+        n("outils_distincts"),
+    ));
+    if n("outils_tronques") > 0 {
+        out.push_str(&format!(
+            "  (dont {} appel(s) dont le nom d'outil n'a pas été retenu — table bornée)\n",
+            n("outils_tronques")
+        ));
+    }
+    if n("lignes_illisibles") > 0 {
+        out.push_str(&format!(
+            "  ⚠ {} ligne(s) du journal illisible(s) : ce bilan est incomplet.\n",
+            n("lignes_illisibles")
+        ));
+    }
+    out.push('\n');
+
+    if let Some(axes) = value.get("axes").and_then(Value::as_array) {
+        for axe in axes {
+            let nom = axe.get("axe").and_then(Value::as_str).unwrap_or("?");
+            let verdict = axe.get("verdict").and_then(Value::as_str).unwrap_or("?");
+            let constat = axe.get("constat").and_then(Value::as_str).unwrap_or("");
+            let marque = match verdict {
+                "cohérent" => "·",
+                "en tension" => "!",
+                _ => "?",
+            };
+            out.push_str(&format!("  {marque} {nom} — {verdict}\n    {constat}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&format!("Verdict : {}\n", s("verdict")));
+    out.push_str(&format!("Intégrité de la chaîne : {}\n", s("intégrité")));
+    out.push_str(&format!("Portée : {}\n", s("portée")));
+    out
+}
+
 /// Build the `vibectl memory status` report for a store rooted at `root`, using
 /// `marker_path` for the amnesic-mode marker (injectable for tests).
 pub fn memory_status_at(root: &Path, marker_path: &Path) -> Value {
@@ -1789,5 +1943,80 @@ mod tests {
         assert!(out.contains("curiosité 80"), "{out}");
         assert!(out.contains("prudence 60"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bout-en-bout : un vrai citoyen sur disque, un vrai journal d'audit sur
+    /// disque, et ce que l'opérateur lit réellement. Ce test existe parce que la
+    /// partie intéressante n'est PAS la fonction pure (déjà testée dans
+    /// `conscience`) mais le câblage : lire le bon fichier, filtrer le bon
+    /// champ, et ne rien inventer quand il manque quelque chose.
+    #[test]
+    fn conscience_confronte_le_caractere_au_journal_reel() {
+        let mem = scratch("conscience-mem");
+        let audit = scratch("conscience-audit");
+        std::fs::create_dir_all(&mem).unwrap();
+        std::fs::create_dir_all(&audit).unwrap();
+
+        // Pas encore né : message clair, jamais un rapport vide qui aurait l'air
+        // d'un bulletin.
+        let (avant, ok) = conscience_at(&mem, &audit);
+        assert!(ok);
+        assert_eq!(avant["born"], false);
+        assert!(render_conscience(&avant).contains("Aucun citoyen"));
+
+        // Un citoyen qui se déclare TRÈS prudent...
+        std::fs::write(
+            mem.join("personality.toml"),
+            "name = \"Lumen\"\narchetype = \"muse\"\n\
+             [traits]\ncuriosity = 50\ncaution = 92\ninitiative = 50\n",
+        )
+        .unwrap();
+
+        // ...et un journal où il se fait refuser un appel sur cinq.
+        let mut lignes = String::new();
+        for i in 0..24 {
+            lignes.push_str(&format!(
+                "{{\"seq\":{i},\"tool\":\"fs.read\",\"decision\":\"allow\",\"outcome\":\"ok\",\"caller_uid\":1000}}\n"
+            ));
+        }
+        for i in 24..30 {
+            lignes.push_str(&format!(
+                "{{\"seq\":{i},\"tool\":\"fs.write\",\"decision\":\"deny\",\"outcome\":\"denied\",\"caller_uid\":1000}}\n"
+            ));
+        }
+        // Une ligne illisible : elle doit être COMPTÉE, pas avalée.
+        lignes.push_str("{ceci n'est pas du JSON\n");
+        std::fs::write(audit.join("vibed-2026-07-25.jsonl"), &lignes).unwrap();
+
+        let (rapport, ok) = conscience_at(&mem, &audit);
+        assert!(ok);
+        assert_eq!(rapport["born"], true);
+        assert_eq!(rapport["name"], "Lumen");
+        assert_eq!(rapport["appels"], 30);
+        assert_eq!(rapport["refuses"], 6);
+        assert_eq!(
+            rapport["lignes_illisibles"], 1,
+            "une ligne illisible doit être remontée, pas ignorée : {rapport}"
+        );
+        assert_eq!(
+            rapport["verdict"], "conduite en tension avec le caractère annoncé",
+            "{rapport}"
+        );
+
+        let texte = render_conscience(&rapport);
+        assert!(texte.contains("Lumen"), "{texte}");
+        assert!(texte.contains("! prudence — en tension"), "{texte}");
+        assert!(
+            texte.contains("ligne(s) du journal illisible(s)"),
+            "l'incomplétude doit être VISIBLE dans le rendu : {texte}"
+        );
+        // Le rapport ne prétend rien sur l'intégrité de la chaîne, et renvoie
+        // explicitement à la commande qui, elle, la vérifie.
+        assert!(texte.contains("audit verify"), "{texte}");
+        // Et il dit noir sur blanc qu'il n'autorise ni ne restreint rien.
+        assert!(texte.contains("OBSERVATION SEULE"), "{texte}");
+
+        let _ = std::fs::remove_dir_all(&mem);
+        let _ = std::fs::remove_dir_all(&audit);
     }
 }

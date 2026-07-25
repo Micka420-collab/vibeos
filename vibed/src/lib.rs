@@ -7,6 +7,7 @@ pub mod approval;
 pub mod audit;
 pub mod browser_transport;
 pub mod cdp;
+pub mod conscience;
 pub mod domain;
 pub mod glob;
 pub mod mcp;
