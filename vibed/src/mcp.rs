@@ -1064,7 +1064,11 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             Tier::T2,
             "Restart a systemd unit via systemctl (T2: human approval required — the \
              operator grants once with `vibectl approve`, then the unit is actually \
-             restarted and read back to confirm; strict unit-name validation)",
+             restarted and read back to confirm; strict unit-name validation). The \
+             result carries `readback`: \"confirmed\" means the fresh ActiveState/\
+             SubState/ActiveEnterTimestamp in the payload PROVE the restart; \
+             \"unavailable\" means the restart succeeded but the proof could not be \
+             obtained (see `readback_note`) — do not report it as verified",
             json!({"type": "object", "required": ["unit"],
                    "properties": {"unit": {"type": "string"}}}),
         ),
