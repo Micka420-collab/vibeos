@@ -759,6 +759,64 @@ async fn an_over_long_path_is_audited_by_length_not_by_value() {
     srv.cleanup();
 }
 
+/// Le SECOND champ non borné du même enregistrement d'audit : le nom d'outil.
+///
+/// Borner la `target` ne suffisait pas. `AuditCtx.tool` porte le `name` de la
+/// requête TEL QUEL, et chaque `try_audit` l'écrit verbatim — y compris depuis
+/// les branches antérieures au limiteur de débit. Un appelant rouvrait donc
+/// exactement le même déni de service en déplaçant la charge d'un champ à
+/// l'autre : un `name` énorme avec un `path` court et invalide écrivait ~1 Mio
+/// par appel dans le journal, à la vitesse du socket, sans consommer de jeton.
+///
+/// Trouvé par la relecture adverse de la PR qui bornait la cible : elle fermait
+/// une porte et laissait la fenêtre.
+#[tokio::test]
+async fn an_over_long_tool_name_is_refused_before_anything_is_audited() {
+    let mut srv = Server::start("tool-name-too-long");
+
+    // 200 Kio de nom d'outil + un chemin COURT et invalide : la cible est donc
+    // parfaitement bornée (7 octets), et seul le champ `tool` peut inonder.
+    let huge = "a".repeat(200_000);
+    let resp = srv
+        .request(
+            1,
+            "tools/call",
+            json!({"name": huge, "arguments": {"path": "relatif"}}),
+        )
+        .await;
+
+    // Erreur de PROTOCOLE, pas un résultat d'outil : la trame est malformée.
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "un nom d'outil démesuré est une trame invalide : {resp}"
+    );
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("200000 bytes") && message.len() < 200,
+        "le refus dit la longueur sans réécho­er la valeur : {message}"
+    );
+
+    // ET RIEN N'A ÉTÉ ÉCRIT. C'est le cœur du correctif : borner l'écriture
+    // aurait laissé un flood de 4 Kio par appel, non limité en débit puisque
+    // cette branche précède le limiteur.
+    let records = srv.audit_records();
+    assert!(
+        records.is_empty(),
+        "aucun enregistrement d'audit ne doit être écrit : {} ligne(s), {} octets",
+        records.len(),
+        records.iter().map(|r| r.to_string().len()).sum::<usize>()
+    );
+
+    // Le serveur reste utilisable : un appel normal passe derrière.
+    let (is_error, text) = srv.tool_call(2, "os.status", json!({})).await;
+    assert!(
+        !is_error,
+        "un appel légitime doit suivre normalement : {text}"
+    );
+
+    srv.cleanup();
+}
+
 #[tokio::test]
 async fn per_uid_rate_limit_refuses_a_flood_and_audits_it() {
     // Capacity 2, no refill: the third tool call in the burst is over-limit.

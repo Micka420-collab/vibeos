@@ -450,6 +450,34 @@ async fn handle_tools_call(
     if name.is_empty() {
         return error_response(id, -32602, "invalid params: missing tool name");
     }
+    // Le nom d'outil est le SECOND champ non borné de l'enregistrement d'audit.
+    //
+    // Borner `target` ne suffisait pas : `actx.tool` porte ce nom TEL QUEL, et
+    // chaque `try_audit` l'écrit verbatim — y compris depuis les branches qui
+    // s'exécutent avant le limiteur de débit (chemin invalide, batch browser
+    // malformé). Un appelant pouvait donc rouvrir exactement le même déni de
+    // service en déplaçant la charge d'un champ à l'autre : un `name` de ~1 Mio
+    // avec un `path` court et invalide écrivait ~1 Mio par appel dans le
+    // journal, à la vitesse du socket, sans consommer de jeton. Corriger la
+    // cible en laissant le nom ouvert, c'était fermer une porte et laisser la
+    // fenêtre.
+    //
+    // Refusé comme ERREUR DE PROTOCOLE, avant la construction d'`actx` et donc
+    // avant toute écriture : aucun outil du catalogue n'approche cette taille
+    // (les noms font quelques dizaines d'octets), donc ce n'est pas une décision
+    // de politique à tracer, c'est une trame malformée — même traitement que le
+    // nom manquant juste au-dessus, qui ne s'audite pas non plus. Rien n'est
+    // écrit, donc l'inondation est close, pas seulement rétrécie.
+    if name.len() > MAX_TARGET_BYTES {
+        return error_response(
+            id,
+            -32602,
+            &format!(
+                "invalid params: tool name is {} bytes; the maximum is {MAX_TARGET_BYTES}",
+                name.len()
+            ),
+        );
+    }
     // Shared, never deep-cloned again: the audit records (blocking pool) and
     // the execution closure each take an `Arc` on the same parsed arguments —
     // a `fs.write` payload close to MAX_LINE_BYTES used to be deep-cloned for
