@@ -42,6 +42,7 @@ silence. Un check qui devient aveugle et répond vert est le pire des deux monde
 |---|---|---|
 | `check-base-eol.sh` | une base Fedora EOL, ou à < 30 j de l'être | l'OS a tourné 49 j sur Fedora 42 EOL, sans aucun signal |
 | `check-base-digest-fresh.sh` | le digest de base épinglé purgé par quay (base vivante) | le build a cassé 2 jours de suite, la purge arrive sans push |
+| `check-base-digest-sync.py` | deux digests de base différents dans le dépôt, ou un site d'épinglage inconnu de `bump-base-digest.sh` | le bumpeur ne réécrivait que le Containerfile : `image-info.json` restait sur l'ancien digest et l'image annonçait une base qui n'était pas la sienne |
 | `check-sectools-sync.py` | `security-tools.txt` ≠ couche sectools du Containerfile | 3 outils retirés du build, jamais du manifeste |
 | `check-saas-sync.py` | `saas-tools.txt` ≠ couche 1d-ter du Containerfile | même dérive que la trousse cybersécu, prévenue en amont |
 | `check-saas-compose.py` | un modèle compose SaaS publiant un port hors loopback (0.0.0.0) | une base exposée au réseau local (souvent sans mdp fort en dev) = fuite |

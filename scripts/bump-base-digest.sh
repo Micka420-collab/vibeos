@@ -10,6 +10,15 @@
 # la main. On épingle toujours le digest quay COURANT — pas de changement de la
 # source de confiance, juste l'automatisation d'une corvée.
 #
+# PLUSIEURS SITES D'ÉPINGLAGE
+# Le digest n'est pas épinglé QUE dans le Containerfile : `image-info.json`, la
+# carte d'identité de l'image lue à l'exécution, porte le même `base_image`. Ce
+# script ne réécrivait que le Containerfile — le JSON dérivait donc en silence à
+# chaque bump, et annonçait au système une base qui n'était plus celle construite.
+# On réécrit désormais TOUS les sites connus (liste ci-dessous), et
+# check-base-digest-sync.sh fait rougir la CI si un nouveau site apparaît sans
+# être ajouté ici.
+#
 # USAGE : bump-base-digest.sh <containerfile>
 # SORTIE : imprime "changed <old> -> <new>" et rc 0 si bumpé ; "unchanged" et rc 0
 #          si déjà à jour ; rc != 0 sur erreur (digest introuvable, pas multi-arch).
@@ -18,6 +27,12 @@ set -euo pipefail
 CF="${1:?usage: bump-base-digest.sh <containerfile>}"
 REPO="quay.io/fedora/fedora-kinoite"
 TAG="44"
+
+# Racine du dépôt déduite de l'emplacement du script : les sites additionnels
+# résolvent quel que soit le cwd de l'appelant (la CI appelle depuis la racine,
+# un humain depuis n'importe où).
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+EXTRA_PIN_SITES=("$ROOT/os/rootfs/usr/lib/vibeos/image-info.json")
 
 command -v skopeo >/dev/null || {
 	echo "erreur: skopeo requis" >&2
@@ -82,6 +97,16 @@ for arch in amd64 arm64; do
 	fi
 done
 
-# Réécrit toutes les occurrences (FROM + label).
+# Réécrit toutes les occurrences (FROM + label), puis les sites additionnels.
+# Un site absent du disque est une ERREUR, pas un silence : la liste ci-dessus
+# est le contrat, et un fichier renommé doit casser bruyamment ici plutôt que de
+# laisser un pin périmé derrière lui.
 sed -i "s|${pinned}|${current}|g" "$CF"
+for site in "${EXTRA_PIN_SITES[@]}"; do
+	[ -f "$site" ] || {
+		echo "erreur: site d'épinglage introuvable: $site (liste EXTRA_PIN_SITES à corriger)" >&2
+		exit 7
+	}
+	sed -i "s|${pinned}|${current}|g" "$site"
+done
 echo "changed ${pinned} -> ${current}"

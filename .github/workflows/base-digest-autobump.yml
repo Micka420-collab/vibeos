@@ -98,9 +98,14 @@ jobs:
           git config user.name "vibeos-autobump[bot]"
           git config user.email "vibeos-autobump@users.noreply.github.com"
           git switch -C "$BRANCH"
-          git add os/Containerfile
+          # Le digest est épinglé à DEUX endroits (Containerfile + image-info.json,
+          # la carte d'identité lue à l'exécution). N'ajouter que le Containerfile
+          # poussait une PR à moitié bumpée : le JSON restait sur l'ANCIEN digest
+          # et l'image annonçait une base qui n'était pas la sienne.
+          # check-base-digest-sync.py fait désormais rougir la CI dans ce cas.
+          git add os/Containerfile os/rootfs/usr/lib/vibeos/image-info.json
           if git diff --cached --quiet; then
-            echo "Containerfile inchangé — rien à pousser."
+            echo "Pins inchangés — rien à pousser."
             exit 0
           fi
           git commit \

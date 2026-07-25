@@ -55,6 +55,11 @@ on:
       - "os/Containerfile"
       - "os/security-tools.txt"
       - "os/saas-tools.txt"
+      # `image-info.json` (sous usr/lib/vibeos) porte le MÊME digest de base que
+      # le Containerfile, et check-base-digest-sync.py garde leur accord. Sans
+      # cette entrée, éditer le seul JSON — désynchroniser le digest — ne
+      # déclencherait aucun workflow. Exactement le trou décrit au-dessus.
+      - "os/rootfs/usr/lib/vibeos/**"
       # Sans cette entrée, une PR qui ne touche QUE les modèles compose ne
       # déclenche pas ci.yml — et check-saas-compose.py (le garde loopback-only)
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
@@ -94,6 +99,11 @@ on:
       - "os/Containerfile"
       - "os/security-tools.txt"
       - "os/saas-tools.txt"
+      # `image-info.json` (sous usr/lib/vibeos) porte le MÊME digest de base que
+      # le Containerfile, et check-base-digest-sync.py garde leur accord. Sans
+      # cette entrée, éditer le seul JSON — désynchroniser le digest — ne
+      # déclencherait aucun workflow. Exactement le trou décrit au-dessus.
+      - "os/rootfs/usr/lib/vibeos/**"
       # Sans cette entrée, une PR qui ne touche QUE les modèles compose ne
       # déclenche pas ci.yml — et check-saas-compose.py (le garde loopback-only)
       # ne tournerait JAMAIS sur les fichiers qu'il garde. Même trou que pour
@@ -201,6 +211,18 @@ jobs:
       - name: Base Fedora supportée (pas EOL)
         working-directory: .
         run: bash scripts/check-base-eol.sh os/Containerfile
+
+      # Le digest de base est épinglé à DEUX endroits : os/Containerfile (FROM +
+      # label OCI) et os/rootfs/usr/lib/vibeos/image-info.json, la carte
+      # d'identité lue à l'exécution. bump-base-digest.sh ne réécrivait que le
+      # premier : à chaque purge quay suivie d'un bump, le JSON gardait l'ANCIEN
+      # digest et l'image annonçait une base qui n'était pas la sienne. Dérive
+      # muette, invisible en CI. Ce garde exige un seul digest partout, ET que
+      # tout nouveau site d'épinglage soit connu du bumpeur. Zéro réseau (la
+      # résolution du digest, elle, est le cron base-digest-fresh).
+      - name: Digest de base — un seul, partout, et bumpable
+        working-directory: .
+        run: python3 scripts/check-base-digest-sync.py
 
       # Le garde-fou des garde-fous. Ce dépôt a accumulé 5 checks mécaniques,
       # chacun câblé À LA MAIN — le motif « garder en synchro » qui a dérivé
