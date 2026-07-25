@@ -111,6 +111,23 @@ denied = [
   "/proc/**/mem",              # ...including per-thread task/<tid>/mem
   "/proc/*/pagemap",           # virtual->physical page mapping
   "/proc/**/pagemap",
+  # Sweep adverse 2026-07-25 : fichiers /proc GLOBAUX root-only (0400) que le
+  # préfixe de lecture "/proc/" servait à n'importe quel appelant (fuite vérifiée).
+  "/proc/vmallocinfo",         # adresses vmalloc du noyau (KASLR)
+  "/proc/slabinfo",            # internes de l'allocateur slab
+  "/proc/timer_list",          # adresses noyau + internes des timers
+  "/proc/iomem",               # cartographie mémoire physique
+  "/proc/ioports",             # cartographie des ports d'E/S
+  "/proc/keys",                # porte-clés du noyau
+  "/proc/key-users",           # porte-clés du noyau, par utilisateur
+  # Fichiers ASLR / état noyau par processus, refusés pour TOUT pid (le contrôle
+  # de propriétaire par pid ne suffisait pas : un binaire setuid garde l'uid réel).
+  "/proc/*/auxv",              # AT_RANDOM / AT_BASE -> défait l'ASLR
+  "/proc/**/auxv",
+  "/proc/*/stack",             # pile noyau
+  "/proc/**/stack",
+  "/proc/*/syscall",           # registres vivants de l'appel système
+  "/proc/**/syscall",
   "/run/user/**",              # XDG_RUNTIME_DIR of every user (mode 0700)
   "/run/secrets/**",           # systemd/container secrets convention
   "/run/credentials/**",       # decrypted systemd-creds exposed to services

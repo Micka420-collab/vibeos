@@ -590,16 +590,36 @@ fn proc_pid_of(canonical: &str) -> Option<u32> {
         .ok()
 }
 
-/// Real uid owning process `pid`, from `/proc/<pid>/status` `Uid:` (real uid =
-/// the first field). None if the pid is gone or its status is unreadable.
-fn proc_pid_owner(pid: u32) -> Option<u32> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+/// The FOUR uids of a `/proc/<pid>/status` `Uid:` line — real, effective, saved
+/// and filesystem — or `None` if the line is absent or malformed. Pure so the
+/// credential-change logic below is unit-testable without a real setuid process.
+///
+/// Why all four and not just the real uid: comparing only the REAL uid is not the
+/// kernel's access rule. A setuid-root process (the everyday example: `sudo`
+/// sitting at its password prompt) keeps the launching user as its real uid while
+/// its `/proc` files become root-owned, mode 0400, gated by `ptrace_may_access`.
+/// The launching user cannot read them — but `vibed` runs as root and would, so
+/// matching on the real uid alone leaked the ASLR layout (`auxv` carries
+/// AT_RANDOM/AT_BASE), the kernel `stack`, the live `syscall` registers and the
+/// full `maps` of a PRIVILEGED process to an unprivileged caller.
+fn parse_proc_uids(status: &str) -> Option<[u32; 4]> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
-            return rest.split_whitespace().next()?.parse().ok();
+            let mut it = rest.split_whitespace();
+            let mut out = [0u32; 4];
+            for slot in out.iter_mut() {
+                *slot = it.next()?.parse().ok()?;
+            }
+            return Some(out);
         }
     }
     None
+}
+
+/// All four uids of process `pid`. None if the pid is gone or unreadable.
+fn proc_pid_uids(pid: u32) -> Option<[u32; 4]> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    parse_proc_uids(&status)
 }
 
 /// Confine a `/proc/<pid>` read to the caller's own process(es). Fail-closed: an
@@ -617,15 +637,21 @@ fn confine_proc_pid(
              unavailable (SO_PEERCRED); refusing (fail-closed)"
         )
     })?;
-    let owner = proc_pid_owner(pid).ok_or_else(|| {
+    let uids = proc_pid_uids(pid).ok_or_else(|| {
         format!("{tool}: cannot determine the owner of /proc/{pid} (gone or unreadable); refusing")
     })?;
-    if owner == uid {
+    // EVERY uid must be the caller's: real, effective, saved and fs. A process
+    // that changed credentials (setuid-root, e.g. `sudo` at its prompt) keeps the
+    // caller as its REAL uid while its /proc files become root-owned 0400 — the
+    // caller cannot read them, but root-`vibed` could, so a real-uid-only match
+    // leaked a privileged process's ASLR layout / stack / registers / maps.
+    // Fail-closed: any divergence refuses (see `parse_proc_uids`).
+    if uids.iter().all(|&u| u == uid) {
         Ok(ReadScope::System)
     } else {
         Err(format!(
-            "{tool}: /proc/{pid} belongs to uid {owner}, not the caller (uid {uid}); \
-             cross-user process reads are refused"
+            "{tool}: /proc/{pid} has uids {uids:?}, not all the caller's (uid {uid}); \
+             cross-user and credential-changing (setuid) process reads are refused"
         ))
     }
 }
@@ -956,6 +982,36 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_changing_process_is_not_the_callers_own() {
+        // `sudo` at its password prompt: real uid stays the launching user while
+        // the /proc files become root-owned 0400. Matching the REAL uid alone
+        // granted access and root-vibed then leaked the process's ASLR layout
+        // (auxv), kernel stack, live registers (syscall) and maps. All four uids
+        // must be the caller's, so this must NOT read as "the caller's own".
+        let setuid_root = "Name:\tsudo\nUid:\t1001\t0\t0\t0\nGid:\t1001\t1001\t1001\t1001\n";
+        let uids = parse_proc_uids(setuid_root).expect("Uid: line parses");
+        assert_eq!(uids, [1001, 0, 0, 0]);
+        assert!(
+            !uids.iter().all(|&u| u == 1001),
+            "a setuid-root process must not count as the caller's own"
+        );
+        // An ordinary unprivileged process of the caller: all four match.
+        let plain = "Name:\tbash\nUid:\t1001\t1001\t1001\t1001\n";
+        let uids = parse_proc_uids(plain).expect("parses");
+        assert!(uids.iter().all(|&u| u == 1001));
+        // Another user's process is refused as before.
+        let other = "Uid:\t1002\t1002\t1002\t1002\n";
+        assert!(!parse_proc_uids(other)
+            .expect("parses")
+            .iter()
+            .all(|&u| u == 1001));
+        // Fail-closed on a malformed / truncated / absent Uid: line.
+        assert!(parse_proc_uids("Name:\tx\n").is_none());
+        assert!(parse_proc_uids("Uid:\t1001\t0\n").is_none(), "short line");
+        assert!(parse_proc_uids("Uid:\tnope\tx\ty\tz\n").is_none());
+    }
+
+    #[test]
     fn fs_write_rejects_non_regular_targets_instead_of_hanging() {
         // The asymmetry this pins: fs.read rejected a FIFO before its blocking
         // open, fs.write did NOT — so a FIFO in the agent's OWN home (where every
@@ -1106,7 +1162,9 @@ mod tests {
     #[test]
     fn proc_pid_read_is_confined_to_the_owning_caller() {
         let me = std::process::id();
-        let my_uid = proc_pid_owner(me).expect("own pid status is readable");
+        // The test runner is an ordinary process, so all four of its uids agree;
+        // take the real one as "the caller".
+        let my_uid = proc_pid_uids(me).expect("own pid status is readable")[0];
         // Own process, own uid -> allowed (System scope, not Home).
         assert_eq!(
             confine_read("fs.read", caller_uid(my_uid), &format!("/proc/{me}/maps")),

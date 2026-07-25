@@ -143,6 +143,30 @@ const BUILTIN_DENY_ALWAYS: &[&str] = &[
     "/proc/**/mem",    // ...including per-thread task/<tid>/mem
     "/proc/*/pagemap", // virtual->physical page mapping (exploit primitive)
     "/proc/**/pagemap",
+    // Same class, missed by the 2026-07-14 pass and caught by the 2026-07-25
+    // adversarial sweep: these are GLOBAL, root-only (mode 0400) pseudo-files, so
+    // the per-pid confinement never applies to them and the blanket "/proc/"
+    // system-read prefix let vibed-as-root hand them to ANY caller — including one
+    // with no SO_PEERCRED identity at all. Each leaks kernel addresses (KASLR) or
+    // allocator/hardware layout; none is a legitimate agent read.
+    "/proc/vmallocinfo", // kernel vmalloc addresses
+    "/proc/slabinfo",    // slab allocator internals
+    "/proc/timer_list",  // kernel addresses + timer internals
+    "/proc/iomem",       // physical memory map
+    "/proc/ioports",     // I/O port map
+    "/proc/keys",        // kernel keyring
+    "/proc/key-users",   // kernel keyring, per-user
+    // Per-process ASLR / kernel-state files. environ+cmdline+mem+pagemap were
+    // already covered; these were not, and they defeat ASLR (auxv carries
+    // AT_RANDOM/AT_BASE) or expose kernel stack/registers. Denied for EVERY pid,
+    // not just other users': the per-pid owner check alone was not enough (a
+    // setuid process keeps the caller's real uid — see `parse_proc_uids`).
+    "/proc/*/auxv",
+    "/proc/**/auxv",
+    "/proc/*/stack",
+    "/proc/**/stack",
+    "/proc/*/syscall",
+    "/proc/**/syscall",
     "/run/credentials/**", // decrypted systemd credentials
     // Per-user runtime dirs are mode 0700; vibed-as-root would otherwise let
     // caller A read caller B's session state/sockets/tokens (cross-user).
@@ -2230,6 +2254,22 @@ mod tests {
             "/etc/ipsec.secrets",
             "/etc/ipsec.d/private/host.key",
             "/etc/pki/tls/private/server.key",
+            // Adversarial sweep 2026-07-25: GLOBAL root-only (0400) /proc files
+            // the blanket "/proc/" read prefix served to any caller — verified
+            // leaking real bytes before this entry existed.
+            "/proc/vmallocinfo",
+            "/proc/slabinfo",
+            "/proc/timer_list",
+            "/proc/iomem",
+            "/proc/ioports",
+            "/proc/keys",
+            "/proc/key-users",
+            // Per-process ASLR / kernel-state files, denied for EVERY pid (the
+            // per-pid owner check alone did not stop a setuid process).
+            "/proc/1234/auxv",
+            "/proc/1234/task/5678/auxv",
+            "/proc/1234/stack",
+            "/proc/1234/syscall",
         ] {
             assert!(
                 builtin_denied(path, false).is_some(),
