@@ -208,15 +208,37 @@ fn assess(class: ToolClass, r: &Value, own_ns_mnt: Option<&str>) -> (bool, Vec<S
     }
     // The service must be in a DIFFERENT mount namespace than vibed (ProtectSystem/
     // PrivateTmp guarantee one); sharing vibed's means an unconfined fork.
+    //
+    // Les arms sont ordonnés : d'abord ce que le RAPPORT ne fournit pas, ensuite
+    // ce que NOUS n'avons pas pu établir, et seulement alors la comparaison.
+    //
+    // Le troisième arm manquait, et c'était le seul passage silencieux de tout
+    // le barème : quand `own_ns_mnt` vaut None — `read_link("/proc/self/ns/mnt")`
+    // a échoué — la comparaison est impossible, mais le rapport portait bien un
+    // `ns_mnt` valide, donc aucun arm ne matchait et l'ancien `_ => {}` avalait
+    // le cas. Résultat : la vérification qui attrape « le bac à sable n'a pas
+    // pris du tout, c'est un simple fork qui partage le namespace de vibed »
+    // était sautée sans un mot, et `confined: true` pouvait être rendu sans
+    // qu'elle ait jamais eu lieu. Or c'est le verdict que cet outil existe pour
+    // produire, et un « confiné » faux est le pire résultat qu'il puisse rendre.
+    //
+    // Ne pas pouvoir lire son propre namespace est en outre anormal pour un
+    // processus root : c'est un signal en soi, pas une raison de conclure.
     match (own_ns_mnt, r["ns_mnt"].as_str()) {
+        (_, None) => issues.push("ns_mnt is missing from the report".to_string()),
+        (_, Some(m)) if m.starts_with("error:") => {
+            issues.push(format!("ns_mnt could not be read in the probe: {m}"))
+        }
+        (None, _) => issues.push(
+            "vibed could not read its OWN mount namespace (/proc/self/ns/mnt): the \
+             different-namespace check could not be performed, so confinement is \
+             NOT established"
+                .to_string(),
+        ),
         (Some(own), Some(m)) if m == own => issues.push(
             "ns_mnt equals vibed's own — the service shares vibed's mount namespace (unconfined)"
                 .to_string(),
         ),
-        (_, Some(m)) if m.starts_with("error:") => {
-            issues.push(format!("ns_mnt could not be read in the probe: {m}"))
-        }
-        (_, None) => issues.push("ns_mnt is missing from the report".to_string()),
         _ => {}
     }
     // Behavioural namespace proof, per class: deploy denies all namespace
@@ -414,6 +436,65 @@ mod tests {
         assert!(
             issues.len() >= 8,
             "every absent field must raise an issue: {issues:?}"
+        );
+    }
+
+    /// Le seul passage silencieux qui restait dans le barème.
+    ///
+    /// Quand `vibed` ne peut pas lire son PROPRE namespace de montage
+    /// (`read_link("/proc/self/ns/mnt")` échoue), la comparaison
+    /// « le service est-il ailleurs que moi ? » est impossible. Le rapport, lui,
+    /// porte un `ns_mnt` parfaitement valide — donc aucun arm ne matchait, et le
+    /// `_ => {}` final avalait le cas sans un mot.
+    ///
+    /// Conséquence : la vérification qui attrape « le bac à sable n'a pas pris du
+    /// tout, c'est un fork qui partage le namespace de vibed » était sautée, et
+    /// `confined: true` pouvait sortir sans qu'elle ait jamais eu lieu. C'est le
+    /// verdict que cet outil existe pour produire, et un « confiné » faux est le
+    /// pire résultat qu'il puisse rendre — le contrat du module promet d'ailleurs
+    /// « never a silent pass ».
+    #[test]
+    fn ne_pas_pouvoir_lire_son_propre_namespace_ne_vaut_pas_confinement() {
+        // Un rapport PARFAIT à tous les autres égards : seul l'état de vibed
+        // change entre les deux appels.
+        let parfait: Value = serde_json::from_str(&confined_deploy_report()).unwrap();
+
+        // Référence : avec un namespace propre connu et différent -> confiné.
+        let (confined, issues) = assess(
+            ToolClass::Deploy { needs_wx: false },
+            &parfait,
+            Some("mnt:[4026531234]"),
+        );
+        assert!(
+            confined,
+            "rapport parfait, namespaces distincts : {issues:?}"
+        );
+
+        // Le cas qui passait en silence : vibed n'a pas pu lire le sien.
+        let (confined, issues) = assess(ToolClass::Deploy { needs_wx: false }, &parfait, None);
+        assert!(
+            !confined,
+            "sans le namespace de vibed, la comparaison n'a pas eu lieu : rien ne peut \
+             être déclaré confiné"
+        );
+        assert!(
+            issues.iter().any(|i| i.contains("could not read its OWN")),
+            "et le motif doit le DIRE, pas se taire : {issues:?}"
+        );
+
+        // Non-régression : le partage de namespace reste détecté, avec son
+        // propre motif, distinct du précédent.
+        let (confined, issues) = assess(
+            ToolClass::Deploy { needs_wx: false },
+            &parfait,
+            Some("mnt:[4026532999]"), // == le ns_mnt du rapport
+        );
+        assert!(!confined);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("shares vibed's mount namespace")),
+            "{issues:?}"
         );
     }
 
