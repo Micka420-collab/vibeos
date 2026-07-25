@@ -471,12 +471,53 @@ async fn handle_tools_call(
         Some(raw) => match normalize_path(raw) {
             Some(normalized) => Some(normalized),
             None => {
-                // Relative path or attempt to climb above `/`: fail-closed.
-                // The raw (rejected) path is the non-secret audit target.
-                try_audit(&actx, Some(raw), Decision::Deny, "blocked_invalid_path").await;
+                // Relative path, attempt to climb above `/`, or LONGER THAN
+                // PATH_MAX — `normalize_path` refuses all three, and it tests
+                // the length FIRST, so an over-long path lands here whether it
+                // is absolute or not.
+                //
+                // Audit the LENGTH, not the value, exactly as the
+                // `target_too_long` branch below does — and for the same
+                // reason, stated there: "echoing 1 MiB of hostile text into the
+                // audit trail is the same flood, one file over". This branch
+                // used to write `raw` VERBATIM, and it runs BEFORE that bound,
+                // before the rate limiter, before the built-in denylist and
+                // before any tier is computed. So an unprivileged caller could
+                // park ~1 MiB (the whole JSON-RPC line budget) into the audit
+                // log per call, at socket speed, consuming no rate-limit token
+                // — while every other refusal path writes at most 4 KiB and
+                // costs a token. Two consequences, both real: the audit
+                // partition fills, and once the audit write fails `try_audit`
+                // returns false, at which point the Allow path refuses ALL
+                // execution (fail-closed) — a root daemon denied to every user
+                // by the least privileged caller. And the trail an operator
+                // must read becomes unreadable, which is the very argument the
+                // `target_too_long` branch makes about the approval queue.
+                //
+                // The reply is truncated for the same reason: it echoed the
+                // full hostile string back. That leaks nothing the caller did
+                // not send, but it makes the refusal itself an amplifier.
+                let over_long = raw.len() > MAX_TARGET_BYTES;
+                let audit_target = if over_long {
+                    format!("<invalid path: {} bytes>", raw.len())
+                } else {
+                    raw.to_string()
+                };
+                try_audit(
+                    &actx,
+                    Some(&audit_target),
+                    Decision::Deny,
+                    "blocked_invalid_path",
+                )
+                .await;
+                let shown = if over_long {
+                    audit_target
+                } else {
+                    format!("'{raw}'")
+                };
                 return tool_result(
                     id,
-                    format!("policy: path '{raw}' is not an absolute, normalizable path"),
+                    format!("policy: path {shown} is not an absolute, normalizable path"),
                     true,
                 );
             }
