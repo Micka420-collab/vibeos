@@ -81,6 +81,100 @@ fn non_empty(s: &Option<String>) -> Value {
     }
 }
 
+/// Translate the birth traits into an ACTIONABLE operating style.
+///
+/// The gap this closes: Genesis draws six trait axes (ADR-029) and the citizen
+/// could read the numbers, but nothing told it what a `concision` of 82 or a
+/// `caution` of 61 should CHANGE about how it works. Numbers are not behaviour.
+/// This is the deterministic mapping from character to conduct — the machine's
+/// own temperament, expressed as instructions it can actually follow.
+///
+/// Properties, by construction:
+///   * PURE and DETERMINISTIC — same traits ⇒ same style, so the same machine
+///     behaves consistently across boots (amnesic included: the traits are
+///     re-derived identically from machine-id, so the style is too).
+///   * Thresholds are FIXED and documented here, never learned or random: the
+///     style is auditable and explainable ("why are you terse?" → concision 82).
+///   * A missing axis reads as 50 (neutral), so a partial personality still
+///     yields a usable, middle-of-the-road style rather than nothing.
+///
+/// SECURITY — THE STYLE IS NEVER A PERMISSION. It expresses conduct ABOVE the
+/// governance floor and can never lower it. A citizen with low `caution` does
+/// NOT get to skip an approval, drop a tier, or act without a grant: the policy
+/// decision, the T2/T3 human-approval floor, the denylist and the audit trail
+/// are decided entirely elsewhere (`policy.rs`, `approval.rs`, `mode.rs`) and
+/// never consult this function. The only direction the style can move is
+/// MORE conservative than the floor (a high-caution citizen volunteering to
+/// confirm even reversible work), never less. That asymmetry is the whole
+/// reason this is safe to derive from a randomly-drawn trait.
+fn operating_style(traits: &BTreeMap<String, i64>) -> Value {
+    // Already-clamped axes; a missing one is neutral rather than absent.
+    let axis = |name: &str| traits.get(name).copied().unwrap_or(50);
+    let (concision, caution) = (axis("concision"), axis("caution"));
+    let (initiative, warmth) = (axis("initiative"), axis("warmth"));
+    let (curiosity, playfulness) = (axis("curiosity"), axis("playfulness"));
+
+    // Each axis maps to one named band. Bands are coarse on purpose: a 3-point
+    // trait difference must not produce a visibly different personality, or the
+    // determinism above would read as noise.
+    let band = |v: i64, high: &'static str, mid: &'static str, low: &'static str| {
+        if v >= 66 {
+            high
+        } else if v >= 33 {
+            mid
+        } else {
+            low
+        }
+    };
+
+    let verbosity = if concision >= 75 {
+        "télégraphique"
+    } else {
+        band(concision, "concis", "explicatif", "détaillé")
+    };
+    // `caution` is floored at 50 by Genesis (a VibeOS citizen is never careless),
+    // so the low band here is "leans on the governance floor", NOT "careless".
+    let confirmation = if caution >= 85 {
+        "confirme même le réversible"
+    } else if caution >= 65 {
+        "confirme l'irréversible"
+    } else {
+        "s'appuie sur le plancher de gouvernance"
+    };
+    let next_steps = band(
+        initiative,
+        "propose la suite",
+        "propose si on le lui demande",
+        "attend la consigne",
+    );
+    let explanation = band(warmth, "pédagogue", "explique à la demande", "minimal");
+    let exploration = band(
+        curiosity,
+        "explore des alternatives",
+        "une alternative si elle est utile",
+        "la voie directe",
+    );
+    let register = band(playfulness, "vif", "neutre et chaleureux", "sobre");
+
+    json!({
+        "verbosity": verbosity,
+        "confirmation": confirmation,
+        "next_steps": next_steps,
+        "explanation": explanation,
+        "exploration": exploration,
+        "register": register,
+        // One line an agent can follow directly, rather than re-deriving it.
+        "directive": format!(
+            "Travaille de façon {verbosity} ; explication : {explanation} ; \
+             recherche : {exploration} ; suite : {next_steps} ; {confirmation}."
+        ),
+        "floor": "Ce style décrit une CONDUITE, jamais une permission : il ne peut \
+                  jamais abaisser le plancher de gouvernance (tier, approbation \
+                  humaine T2/T3, denylist, audit). Il ne peut que rendre le citoyen \
+                  PLUS prudent que le plancher, jamais moins."
+    })
+}
+
 /// Read + parse the citizen's PUBLIC identity from `root/personality.toml` and
 /// return it as structured JSON. Fail-safe: absent/unreadable/malformed yields
 /// `{born:false, note:...}`. Shared by `agent.identity` (MCP, this module) and
@@ -113,11 +207,15 @@ pub(crate) fn identity_value(root: &Path) -> Value {
             "note": "personality.toml carries no name; the citizen is not yet characterised."
         });
     }
-    let traits: serde_json::Map<String, Value> = p
+    // Clamp once, then serve the SAME values to the caller and to the style
+    // derivation — so the published numbers always explain the published style.
+    let clamped: BTreeMap<String, i64> = p
         .traits
         .iter()
-        .map(|(k, v)| (k.clone(), json!(clamp_trait(k, *v))))
+        .map(|(k, v)| (k.clone(), clamp_trait(k, *v)))
         .collect();
+    let traits: serde_json::Map<String, Value> =
+        clamped.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
     json!({
         "born": true,
         "name": non_empty(&p.name),
@@ -126,9 +224,12 @@ pub(crate) fn identity_value(root: &Path) -> Value {
         "birth": non_empty(&p.birth),
         "seed": non_empty(&p.seed),
         "traits": traits,
+        // The traits translated into conduct — see `operating_style`.
+        "style": operating_style(&clamped),
         "note": "This is your BIRTH character (ADR-029), derived deterministically from this \
-                 machine's id — who you ARE here. What you LEARN lives in the memory store \
-                 (memory.query); this never changes across boots, even amnesic ones."
+                 machine's id — who you ARE here, and `style` is what that means for HOW you \
+                 work (conduct only, never a permission). What you LEARN lives in the memory \
+                 store (memory.query); this never changes across boots, even amnesic ones."
     })
 }
 
@@ -266,6 +367,125 @@ mod tests {
         write_personality(&dir, "name = \"   \"\narchetype = \"muse\"\n");
         let v = identity_value(&dir);
         assert_eq!(v["born"], false, "whitespace-only name is not a character");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a clamped trait map for the style tests.
+    fn traits_of(pairs: &[(&str, i64)]) -> BTreeMap<String, i64> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), clamp_trait(k, *v)))
+            .collect()
+    }
+
+    #[test]
+    fn style_is_deterministic_and_explains_itself() {
+        let t = traits_of(&[
+            ("concision", 82),
+            ("caution", 90),
+            ("initiative", 70),
+            ("warmth", 20),
+            ("curiosity", 70),
+            ("playfulness", 10),
+        ]);
+        let a = operating_style(&t);
+        let b = operating_style(&t);
+        assert_eq!(a, b, "same traits must always yield the same style");
+        assert_eq!(a["verbosity"], "télégraphique", "concision 82 is terse");
+        assert_eq!(
+            a["confirmation"], "confirme même le réversible",
+            "caution 90"
+        );
+        assert_eq!(a["next_steps"], "propose la suite", "initiative 70");
+        assert_eq!(a["explanation"], "minimal", "warmth 20");
+        assert_eq!(a["exploration"], "explore des alternatives", "curiosity 70");
+        assert_eq!(a["register"], "sobre", "playfulness 10");
+        // The directive is the same content, in one followable line.
+        let directive = a["directive"].as_str().unwrap();
+        assert!(directive.contains("télégraphique") && directive.contains("propose la suite"));
+    }
+
+    #[test]
+    fn style_bands_are_coarse_and_hit_their_boundaries() {
+        // A one-point step across a boundary changes the band; inside a band it
+        // does not (coarse on purpose — determinism must not read as noise).
+        let band_of = |v: i64| {
+            operating_style(&traits_of(&[("curiosity", v)]))["exploration"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(band_of(66), "explore des alternatives");
+        assert_eq!(band_of(65), "une alternative si elle est utile");
+        assert_eq!(band_of(33), "une alternative si elle est utile");
+        assert_eq!(band_of(32), "la voie directe");
+        assert_eq!(band_of(40), band_of(60), "no visible change inside a band");
+        // concision has an extra top band at 75.
+        let verb = |v: i64| {
+            operating_style(&traits_of(&[("concision", v)]))["verbosity"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(verb(75), "télégraphique");
+        assert_eq!(verb(74), "concis");
+        assert_eq!(verb(0), "détaillé");
+    }
+
+    #[test]
+    fn missing_axes_read_as_neutral() {
+        // An empty/partial personality still yields a usable middle style rather
+        // than nothing (all axes default to 50).
+        let s = operating_style(&BTreeMap::new());
+        // The scale is monotone: détaillé < explicatif < concis < télégraphique.
+        // A neutral 50 sits in the second band — middle-of-the-road, by design.
+        assert_eq!(s["verbosity"], "explicatif");
+        assert_eq!(s["explanation"], "explique à la demande");
+        assert_eq!(
+            s["confirmation"], "s'appuie sur le plancher de gouvernance",
+            "neutral caution leans on the floor, it does not weaken it"
+        );
+    }
+
+    #[test]
+    fn style_never_claims_a_permission() {
+        // The security invariant: the style is conduct, never authority. Even the
+        // most cavalier trait draw must still point at the governance floor, and
+        // must never emit anything that reads as a right to skip it. `caution` is
+        // floored at 50 by Genesis, so 0 exercises the clamp too.
+        let reckless = traits_of(&[("caution", 0), ("initiative", 100), ("concision", 100)]);
+        let s = operating_style(&reckless);
+        assert_eq!(
+            s["confirmation"], "s'appuie sur le plancher de gouvernance",
+            "a low-caution citizen defers to the floor; it never bypasses it"
+        );
+        let floor = s["floor"].as_str().unwrap();
+        assert!(floor.contains("jamais une permission"), "{floor}");
+        assert!(floor.contains("plancher"), "{floor}");
+        // Nothing in the style may look like an authorization verb.
+        let blob = s.to_string().to_lowercase();
+        for forbidden in ["approuv", "autoris", "sans approbation", "bypass"] {
+            assert!(
+                !blob.contains(forbidden) || blob.contains("jamais"),
+                "style must not read as granting anything: {forbidden} in {blob}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_publishes_a_style_consistent_with_its_traits() {
+        let dir = scratch("style");
+        write_personality(
+            &dir,
+            "name = \"Vesper\"\n[traits]\nconcision = 80\ncaution = 70\nwarmth = 80\n",
+        );
+        let v = identity_value(&dir);
+        assert_eq!(v["born"], true);
+        // The published numbers must explain the published style.
+        assert_eq!(v["traits"]["concision"], 80);
+        assert_eq!(v["style"]["verbosity"], "télégraphique");
+        assert_eq!(v["style"]["confirmation"], "confirme l'irréversible");
+        assert_eq!(v["style"]["explanation"], "pédagogue");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

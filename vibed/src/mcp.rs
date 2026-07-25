@@ -1229,8 +1229,13 @@ fn build_tool_catalog() -> Vec<(&'static str, Tier, &'static str, Value)> {
             "WHO YOU ARE on this machine: your BIRTH character, chosen at first boot \
              and derived deterministically from the machine id (ADR-029). Returns \
              { born, name, archetype, tone, birth, seed, traits{curiosity, caution, \
-             initiative, warmth, concision, playfulness} } — or { born:false, note } \
-             before Genesis has run. The fourth face of self-knowledge, beside \
+             initiative, warmth, concision, playfulness}, style{...} } — or \
+             { born:false, note } before Genesis has run. `style` translates those \
+             traits into ACTIONABLE conduct (verbosity, confirmation, next_steps, \
+             explanation, exploration, register, plus a one-line `directive` you can \
+             follow): it is CONDUCT ONLY and can never lower the governance floor — \
+             a low-caution style never skips a tier, an approval or the audit. The \
+             fourth face of self-knowledge, beside \
              agent.thinking (your thoughts), agent.activity (your deeds) and \
              user.model (your model of the human). Read-only; reads only your PUBLIC \
              character (personality.toml) — never hostname or machine_id. This is \
