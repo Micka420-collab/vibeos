@@ -683,6 +683,82 @@ async fn an_over_long_target_is_refused_and_never_reaches_the_approval_queue() {
     srv.cleanup();
 }
 
+/// Le MÊME plafond, sur le chemin que le test jumeau ci-dessus ne couvrait pas :
+/// l'argument `path`.
+///
+/// `an_over_long_target_is_refused_and_never_reaches_the_approval_queue` teste
+/// `pkg.install{name}` — un argument porteur de `target`, donc soumis à la borne
+/// `MAX_TARGET_BYTES`. Mais `path` sort par une branche ANTÉRIEURE : quand
+/// `normalize_path` refuse (chemin relatif, remontée au-dessus de `/`, ou
+/// simplement plus long que PATH_MAX — la longueur est testée EN PREMIER, donc
+/// un chemin absolu sur-long tombe là aussi), le répartiteur auditait le chemin
+/// BRUT et le renvoyait verbatim à l'appelant.
+///
+/// Cette branche s'exécute avant la borne, avant le limiteur de débit, avant la
+/// denylist intégrée et avant tout calcul de palier. Un appelant non privilégié
+/// pouvait donc verser ~1 Mio (tout le budget de ligne JSON-RPC) dans le journal
+/// d'audit par appel, à la vitesse du socket, SANS consommer de jeton de débit —
+/// là où toute autre voie de refus écrit au plus 4 Kio et coûte un jeton. Deux
+/// conséquences réelles : la partition d'audit se remplit, et dès que l'écriture
+/// d'audit échoue le chemin Allow refuse TOUTE exécution (fail-closed) — un
+/// daemon root refusé à tous les utilisateurs par l'appelant le moins
+/// privilégié.
+#[tokio::test]
+async fn an_over_long_path_is_audited_by_length_not_by_value() {
+    let mut srv = Server::start("path-too-long");
+
+    // 200 Kio : bien au-delà de PATH_MAX (4096), bien en deçà de MAX_LINE_BYTES
+    // (1 Mio) — la ligne est donc acceptée, et seule cette branche peut l'arrêter.
+    let huge = "a".repeat(200_000);
+    let (is_error, text) = srv
+        .tool_call(1, "fs.read", json!({"path": huge.clone()}))
+        .await;
+    assert!(
+        is_error,
+        "un chemin de 200 Kio doit être refusé : {}",
+        &text[..text.len().min(120)]
+    );
+    assert!(
+        text.len() < 200,
+        "le refus ne doit pas renvoyer la chaîne hostile ({} octets)",
+        text.len()
+    );
+    assert!(
+        text.contains("200000 bytes"),
+        "le refus doit dire ce qui n'allait pas : {text}"
+    );
+
+    let records = srv.audit_records();
+    let refusal = records
+        .iter()
+        .find(|r| r["outcome"] == "blocked_invalid_path")
+        .expect("le refus doit être audité");
+    assert_eq!(refusal["decision"], "deny");
+    let audited_target = refusal["target"].as_str().unwrap_or_default();
+    assert!(
+        audited_target.contains("200000 bytes"),
+        "l'audit enregistre la LONGUEUR : {audited_target}"
+    );
+    assert!(
+        audited_target.len() < 100,
+        "l'audit ne doit PAS réécho­er la valeur hostile ({} octets)",
+        audited_target.len()
+    );
+
+    // Un chemin invalide de taille NORMALE reste diagnostiquable tel quel :
+    // la borne ne doit pas rendre les refus ordinaires opaques.
+    let (is_error, text) = srv
+        .tool_call(2, "fs.read", json!({"path": "relatif/pas/absolu"}))
+        .await;
+    assert!(is_error);
+    assert!(
+        text.contains("relatif/pas/absolu"),
+        "un chemin court doit rester cité en clair : {text}"
+    );
+
+    srv.cleanup();
+}
+
 #[tokio::test]
 async fn per_uid_rate_limit_refuses_a_flood_and_audits_it() {
     // Capacity 2, no refill: the third tool call in the burst is over-limit.
