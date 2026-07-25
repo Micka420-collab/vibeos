@@ -313,6 +313,13 @@ pub fn render_citizen(value: &Value) -> String {
             out.push_str(&format!("Traits : {}\n", parts.join(" · ")));
         }
     }
+    // The traits translated into conduct (tools::identity::operating_style). The
+    // numbers say WHO the citizen is; this line says how that shows up in work.
+    if let Some(style) = value.get("style").and_then(Value::as_object) {
+        if let Some(directive) = style.get("directive").and_then(Value::as_str) {
+            out.push_str(&format!("Style : {directive}\n"));
+        }
+    }
     let birth = s("birth");
     if !birth.is_empty() {
         out.push_str(&format!("Naissance : {birth}\n"));

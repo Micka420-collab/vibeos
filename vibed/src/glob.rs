@@ -46,6 +46,61 @@ fn match_segment(pattern: &str, segment: &str) -> bool {
     helper(pattern.as_bytes(), segment.as_bytes())
 }
 
+/// Is this a well-formed PATH glob pattern — i.e. one that can actually match?
+///
+/// WHY THIS EXISTS (it closes a policy bypass). Paths always reach the matcher
+/// NORMALIZED (`normalize_path` collapses `//`, drops `.`, resolves `..`, strips
+/// the trailing `/`), but a pattern from a policy file was matched VERBATIM. The
+/// two are split on `/` and compared segment by segment, so any pattern that is
+/// not already in canonical form matches **nothing**:
+/// `"/srv/keys/"` splits to `["", "srv", "keys", ""]` and its trailing empty
+/// segment can never equal `"prod.pem"`, so a `paths.denied = ["/srv/keys/"]`
+/// entry silently denies NOTHING and the rule fails OPEN. Same for `//srv/x/**`,
+/// `/srv/./x/**`, `/srv/y/../x/**` and the relative `srv/x/**`.
+///
+/// Direction matters: a dead `allowed` pattern is merely fail-closed, but a dead
+/// `denied` pattern is a policy bypass — the operator believes a path is refused
+/// while every call to it is allowed. So this is validated at LOAD time and a bad
+/// pattern refuses the whole policy, exactly as `domain::is_valid_pattern` does
+/// for host patterns and the `[rule.deploy]` checks do for deploy targets: a rule
+/// that quietly matches nothing looks identical to one that works.
+///
+/// Requirements: the pattern must be anchored — either ABSOLUTE (`/etc/**`) or
+/// starting with a leading `**` (`**/.ssh/**`), which is the documented idiom for
+/// "at any depth" and DOES match absolute paths because `**` swallows the root
+/// marker too (see `leading_double_star_matches_any_prefix`). Beyond the anchor,
+/// no empty segment (so no `//` and no trailing `/`) and no `.`/`..` segment.
+/// Wildcards are untouched — `*` and `**` are ordinary segment content here.
+/// Deny-everything is spelled `/**` or `**`, not `/`.
+///
+/// Applies to PATH patterns only, never to tool-name patterns (`os.metrics.*`),
+/// which are single-segment strings with no `/` at all.
+pub fn is_valid_path_pattern(pattern: &str) -> bool {
+    if pattern.is_empty() || pattern.len() > MAX_PATH_BYTES {
+        return false;
+    }
+    // Anchored either at the root, or by a leading `**` that can absorb it.
+    let absolute = pattern.starts_with('/');
+    if !absolute && pattern != "**" && !pattern.starts_with("**/") {
+        return false;
+    }
+    // `"/a/b".split('/')` yields ["", "a", "b"]: for an absolute pattern the
+    // leading "" is the root marker and is skipped; every remaining segment must
+    // be a real, non-dot segment.
+    let mut segments = pattern.split('/');
+    if absolute {
+        segments.next(); // root marker
+    }
+    let mut saw_segment = false;
+    for seg in segments {
+        saw_segment = true;
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return false;
+        }
+    }
+    saw_segment
+}
+
 /// PATH_MAX on Linux: no real filesystem path exceeds this. Longer inputs
 /// cannot name an existing file, so they are policy probes — or DoS attempts
 /// against the glob matcher, whose `**` handling is O(n²) in the number of
@@ -189,5 +244,52 @@ mod tests {
         // At sane lengths, deep paths keep working.
         let ok = format!("/{}", "a/".repeat(100)) + "file";
         assert!(normalize_path(&ok).is_some());
+    }
+
+    #[test]
+    fn path_patterns_must_be_absolute_and_canonical() {
+        // Canonical patterns (the only ones that can actually match a normalized
+        // path) are accepted — wildcards are ordinary segment content.
+        for good in [
+            "/etc/shadow*",
+            "/proc/**/environ",
+            "/home/*/.ssh/**",
+            "/var/lib/vibeos/audit/**",
+            "/**",
+            // Leading `**` is the documented "at any depth" idiom and DOES match
+            // absolute paths (it absorbs the root marker) — the shipped policy
+            // relies on it, so rejecting it would stop vibed from booting.
+            "**/.ssh/**",
+            "**",
+        ] {
+            assert!(is_valid_path_pattern(good), "{good} must be valid");
+        }
+        // Every one of these matched NOTHING against a normalized path, so a
+        // `paths.denied` entry in this shape silently failed OPEN. They must now
+        // be rejected at policy load time instead.
+        for bad in [
+            "/srv/keys/",        // trailing slash: last segment is "" -> never matches
+            "//srv/keys/**",     // empty segment
+            "/srv/./keys/**",    // "." segment
+            "/srv/x/../keys/**", // ".." segment
+            "srv/keys/**",       // relative
+            "",                  // empty
+            "/",                 // no segment at all; deny-all is "/**"
+        ] {
+            assert!(!is_valid_path_pattern(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn the_rejected_shapes_really_did_match_nothing() {
+        // Proves WHY the validator exists rather than asserting it on faith: the
+        // matcher genuinely never matches these against a normalized path, which
+        // is what made a denied-path rule fail open.
+        assert!(!glob_match("/srv/keys/", "/srv/keys/prod.pem"));
+        assert!(!glob_match("//srv/keys/**", "/srv/keys/prod.pem"));
+        assert!(!glob_match("/srv/./keys/**", "/srv/keys/prod.pem"));
+        assert!(!glob_match("srv/keys/**", "/srv/keys/prod.pem"));
+        // ...while the canonical spelling does match, as expected.
+        assert!(glob_match("/srv/keys/**", "/srv/keys/prod.pem"));
     }
 }

@@ -18,10 +18,11 @@ use crate::policy::{CallContext, Decision, PolicyEngine};
 /// Hard cap on file content returned by fs.read.
 const MAX_READ_BYTES: usize = 256 * 1024;
 
-/// `O_NONBLOCK` (Linux): open() does not block. Belt-and-suspenders for fs.read
-/// against a FIFO — even if a regular file is swapped for a FIFO in the TOCTOU
-/// window after the file-type check, the open returns instead of hanging the
-/// worker thread forever (a FIFO with no writer would otherwise block).
+/// `O_NONBLOCK` (Linux): open() does not block. Belt-and-suspenders for BOTH
+/// fs.read and fs.write against a FIFO — even if a regular file is swapped for a
+/// FIFO in the TOCTOU window after the file-type check, the open returns instead
+/// of hanging the worker thread forever (a FIFO with no writer blocks an
+/// `O_RDONLY` open; with no reader it blocks an `O_WRONLY` one).
 const O_NONBLOCK: i32 = 0x800;
 
 /// Hard cap on entries returned by one fs.list call.
@@ -388,13 +389,41 @@ pub(crate) fn fs_write(
     // with per-tool sandboxing in Phase 3. Winning the race is hard (a tight,
     // repeated swap) and the common cases (symlinked final component, symlinked
     // parent already in place at check time) are already refused above.
+    // Reject a target that EXISTS and is not a regular file, BEFORE opening —
+    // the same anti-DoS guard `fs.read` applies (see its comment): a FIFO opened
+    // O_WRONLY with no reader BLOCKS the spawn_blocking worker forever, and
+    // enough of those exhaust the blocking pool and stall every user's calls.
+    // The asymmetry was real: fs.read checked the file type, fs.write did not,
+    // so a FIFO in the agent's OWN home — where every confinement guard above
+    // legitimately passes — was a hang, not a refusal. `symlink_metadata` (lstat)
+    // does not follow the final component, which O_NOFOLLOW refuses anyway; a
+    // missing target is the normal create case and must stay allowed.
+    match std::fs::symlink_metadata(&canonical_target) {
+        Ok(existing) if !existing.file_type().is_file() => {
+            return Err(format!(
+                "fs.write: '{canonical_str}' exists and is not a regular file"
+            ));
+        }
+        _ => {}
+    }
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .custom_flags(O_NOFOLLOW)
+        // O_NONBLOCK: belt-and-suspenders like fs.read — if the target is swapped
+        // for a FIFO in the TOCTOU window after the check above, open() returns
+        // (ENXIO with no reader) instead of blocking. Ignored for regular files.
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(&canonical_target)
         .map_err(|e| format!("fs.write {canonical_str}: {e}"))?;
+    // Post-open re-check (TOCTOU): if what we actually opened is not a regular
+    // file, refuse BEFORE writing rather than piping the payload into it.
+    let opened = file
+        .metadata()
+        .map_err(|e| format!("fs.write {canonical_str}: {e}"))?;
+    if !opened.is_file() {
+        return Err(format!("fs.write: '{canonical_str}' is not a regular file"));
+    }
     file.write_all(content.as_bytes())
         .map_err(|e| format!("fs.write {canonical_str}: {e}"))?;
     Ok(format!("wrote {} bytes to {canonical_str}", content.len()))
@@ -561,16 +590,36 @@ fn proc_pid_of(canonical: &str) -> Option<u32> {
         .ok()
 }
 
-/// Real uid owning process `pid`, from `/proc/<pid>/status` `Uid:` (real uid =
-/// the first field). None if the pid is gone or its status is unreadable.
-fn proc_pid_owner(pid: u32) -> Option<u32> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+/// The FOUR uids of a `/proc/<pid>/status` `Uid:` line — real, effective, saved
+/// and filesystem — or `None` if the line is absent or malformed. Pure so the
+/// credential-change logic below is unit-testable without a real setuid process.
+///
+/// Why all four and not just the real uid: comparing only the REAL uid is not the
+/// kernel's access rule. A setuid-root process (the everyday example: `sudo`
+/// sitting at its password prompt) keeps the launching user as its real uid while
+/// its `/proc` files become root-owned, mode 0400, gated by `ptrace_may_access`.
+/// The launching user cannot read them — but `vibed` runs as root and would, so
+/// matching on the real uid alone leaked the ASLR layout (`auxv` carries
+/// AT_RANDOM/AT_BASE), the kernel `stack`, the live `syscall` registers and the
+/// full `maps` of a PRIVILEGED process to an unprivileged caller.
+fn parse_proc_uids(status: &str) -> Option<[u32; 4]> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
-            return rest.split_whitespace().next()?.parse().ok();
+            let mut it = rest.split_whitespace();
+            let mut out = [0u32; 4];
+            for slot in out.iter_mut() {
+                *slot = it.next()?.parse().ok()?;
+            }
+            return Some(out);
         }
     }
     None
+}
+
+/// All four uids of process `pid`. None if the pid is gone or unreadable.
+fn proc_pid_uids(pid: u32) -> Option<[u32; 4]> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    parse_proc_uids(&status)
 }
 
 /// Confine a `/proc/<pid>` read to the caller's own process(es). Fail-closed: an
@@ -588,15 +637,21 @@ fn confine_proc_pid(
              unavailable (SO_PEERCRED); refusing (fail-closed)"
         )
     })?;
-    let owner = proc_pid_owner(pid).ok_or_else(|| {
+    let uids = proc_pid_uids(pid).ok_or_else(|| {
         format!("{tool}: cannot determine the owner of /proc/{pid} (gone or unreadable); refusing")
     })?;
-    if owner == uid {
+    // EVERY uid must be the caller's: real, effective, saved and fs. A process
+    // that changed credentials (setuid-root, e.g. `sudo` at its prompt) keeps the
+    // caller as its REAL uid while its /proc files become root-owned 0400 — the
+    // caller cannot read them, but root-`vibed` could, so a real-uid-only match
+    // leaked a privileged process's ASLR layout / stack / registers / maps.
+    // Fail-closed: any divergence refuses (see `parse_proc_uids`).
+    if uids.iter().all(|&u| u == uid) {
         Ok(ReadScope::System)
     } else {
         Err(format!(
-            "{tool}: /proc/{pid} belongs to uid {owner}, not the caller (uid {uid}); \
-             cross-user process reads are refused"
+            "{tool}: /proc/{pid} has uids {uids:?}, not all the caller's (uid {uid}); \
+             cross-user and credential-changing (setuid) process reads are refused"
         ))
     }
 }
@@ -927,6 +982,102 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_changing_process_is_not_the_callers_own() {
+        // `sudo` at its password prompt: real uid stays the launching user while
+        // the /proc files become root-owned 0400. Matching the REAL uid alone
+        // granted access and root-vibed then leaked the process's ASLR layout
+        // (auxv), kernel stack, live registers (syscall) and maps. All four uids
+        // must be the caller's, so this must NOT read as "the caller's own".
+        let setuid_root = "Name:\tsudo\nUid:\t1001\t0\t0\t0\nGid:\t1001\t1001\t1001\t1001\n";
+        let uids = parse_proc_uids(setuid_root).expect("Uid: line parses");
+        assert_eq!(uids, [1001, 0, 0, 0]);
+        assert!(
+            !uids.iter().all(|&u| u == 1001),
+            "a setuid-root process must not count as the caller's own"
+        );
+        // An ordinary unprivileged process of the caller: all four match.
+        let plain = "Name:\tbash\nUid:\t1001\t1001\t1001\t1001\n";
+        let uids = parse_proc_uids(plain).expect("parses");
+        assert!(uids.iter().all(|&u| u == 1001));
+        // Another user's process is refused as before.
+        let other = "Uid:\t1002\t1002\t1002\t1002\n";
+        assert!(!parse_proc_uids(other)
+            .expect("parses")
+            .iter()
+            .all(|&u| u == 1001));
+        // Fail-closed on a malformed / truncated / absent Uid: line.
+        assert!(parse_proc_uids("Name:\tx\n").is_none());
+        assert!(parse_proc_uids("Uid:\t1001\t0\n").is_none(), "short line");
+        assert!(parse_proc_uids("Uid:\tnope\tx\ty\tz\n").is_none());
+    }
+
+    #[test]
+    fn fs_write_rejects_non_regular_targets_instead_of_hanging() {
+        // The asymmetry this pins: fs.read rejected a FIFO before its blocking
+        // open, fs.write did NOT — so a FIFO in the agent's OWN home (where every
+        // confinement guard legitimately passes) hung the spawn_blocking worker
+        // forever instead of being refused. Enough of those exhaust the pool and
+        // stall every user's calls, so this is a cross-tenant DoS, not a nuisance.
+        let uid = current_uid();
+        if uid == 0 {
+            return; // root's home is /root, denylisted
+        }
+        let policy = permissive_policy();
+        let caller = caller_uid(uid);
+        let base = home_scratch(uid, "write-nonreg");
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A directory is not a regular file.
+        let subdir = base.join("adir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let err = fs_write(
+            &json!({"path": subdir.to_string_lossy(), "content": "x"}),
+            &policy,
+            caller,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not a regular file"),
+            "a directory target must be refused: {err}"
+        );
+
+        // A FIFO with no reader: open(O_WRONLY) would block forever without the
+        // pre-open type check. The test returning at all IS the assertion.
+        let fifo = base.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if made {
+            let err = fs_write(
+                &json!({"path": fifo.to_string_lossy(), "content": "x"}),
+                &policy,
+                caller,
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("not a regular file"),
+                "a FIFO must be refused BEFORE the blocking open: {err}"
+            );
+        }
+
+        // A normal write into the same scratch still works — the new guard must
+        // reject only non-regular targets, never the ordinary create case.
+        let ok = base.join("ordinary.txt");
+        let out = fs_write(
+            &json!({"path": ok.to_string_lossy(), "content": "hello"}),
+            &policy,
+            caller,
+        )
+        .expect("a regular-file write must still succeed");
+        assert!(out.contains("wrote 5 bytes"), "{out}");
+        assert_eq!(std::fs::read_to_string(&ok).unwrap(), "hello");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn fs_read_reads_regular_file_and_bounds_large_one() {
         let uid = current_uid();
         if uid == 0 {
@@ -1011,7 +1162,9 @@ mod tests {
     #[test]
     fn proc_pid_read_is_confined_to_the_owning_caller() {
         let me = std::process::id();
-        let my_uid = proc_pid_owner(me).expect("own pid status is readable");
+        // The test runner is an ordinary process, so all four of its uids agree;
+        // take the real one as "the caller".
+        let my_uid = proc_pid_uids(me).expect("own pid status is readable")[0];
         // Own process, own uid -> allowed (System scope, not Home).
         assert_eq!(
             confine_read("fs.read", caller_uid(my_uid), &format!("/proc/{me}/maps")),
