@@ -4,7 +4,7 @@
   "version": "0.1.0-dev",
   "codename": "Genesis",
   "variant": "kinoite",
-  "base_image": "quay.io/fedora/fedora-kinoite:44@sha256:51eb49dc3509fb9f332e39bdf6ef571d3191f110281e2f4a8f58693d44aa9916",
+  "base_image": "quay.io/fedora/fedora-kinoite:44@sha256:705e6a9814973cd503bd49bad03e2992a49e2fb59c4eb03bc4800c98ae4f0228",
   "image_ref": "ghcr.io/micka420-collab/vibeos",
   "architectures": ["amd64", "arm64"],
   "build_date": "2026-07-23",
