@@ -56,28 +56,12 @@ const MAX_OUTILS_SUIVIS: usize = 12;
 /// reste : un nom de 10 Mio n'a pas à voyager jusqu'au terminal de l'opérateur.
 const MAX_LONGUEUR_NOM_OUTIL: usize = 64;
 
-/// UN APPEL, DEUX ENREGISTREMENTS.
-///
-/// Le répartiteur écrit `started*` AVANT d'exécuter puis `ok*`/`error`/`panic`
-/// après — c'est l'invariant « auditer avant d'agir », et il vaut pour le seul
-/// chemin `Allow`. Un refus (`blocked*`), une approbation en attente
-/// (`pending_approval`) ou un débit dépassé (`rate_limited`) n'écrivent qu'UNE
-/// ligne.
-///
-/// Compter toutes les lignes ferait donc peser un appel autorisé DEUX fois et un
-/// appel refusé une seule : le taux de refus serait mécaniquement divisé par
-/// deux, et un citoyen imprudent passerait pour raisonnable. On ne compte que
-/// les enregistrements TERMINAUX, c'est-à-dire tout sauf `started*`.
-///
-/// Conséquence assumée : un appel dont le `started` existe mais dont l'issue n'a
-/// jamais été écrite (arrêt brutal entre les deux) n'est pas compté. On préfère
-/// ne compter que ce qu'on a vu conclure — l'autre sens inventerait une issue.
-fn est_terminal(record: &Value) -> bool {
-    !record
-        .get("outcome")
-        .and_then(Value::as_str)
-        .is_some_and(|o| o.starts_with("started"))
-}
+/// Un appel autorisé écrit deux lignes, un appel refusé une seule : sans ce
+/// filtre le taux de refus serait divisé par deux et un citoyen imprudent
+/// passerait pour raisonnable. Le prédicat vit dans `audit`, avec le format
+/// d'enregistrement qu'il décrit — `user_model` s'appuie sur le même, et il n'y
+/// a donc qu'un endroit à corriger si le vocabulaire des issues change.
+use crate::audit::is_terminal_record as est_terminal;
 
 /// Ce que le journal dit qu'il s'est PASSÉ. Agrégats seulement — aucune cible,
 /// aucun argument, rien qui puisse fuir d'un appelant vers un autre.

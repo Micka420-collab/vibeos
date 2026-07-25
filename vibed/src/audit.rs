@@ -286,6 +286,32 @@ fn daily_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// UN APPEL, DEUX ENREGISTREMENTS — le prédicat qui remet les compteurs d'aplomb.
+///
+/// Le répartiteur écrit `started*` AVANT d'exécuter puis `ok*`/`error`/`panic`
+/// après : c'est l'invariant « auditer avant d'agir », et il ne vaut que pour le
+/// chemin `Allow`. Un refus (`blocked*`), une approbation en attente
+/// (`pending_approval`) ou un débit dépassé (`rate_limited`) n'écrivent qu'UNE
+/// ligne.
+///
+/// Conséquence pour QUICONQUE agrège ce journal : compter les lignes fait peser
+/// un appel autorisé DEUX fois et un appel refusé une seule. Tout ratio
+/// autorisé/refusé est alors faux d'un facteur deux, dans le sens le plus
+/// flatteur — la friction disparaît, le volume d'activité double. Ce prédicat
+/// vit ici, avec le format d'enregistrement qu'il décrit, pour qu'il n'y ait
+/// qu'UN endroit à corriger si le vocabulaire des issues change.
+///
+/// Conséquence assumée : un appel dont le `started` existe mais dont l'issue n'a
+/// jamais été écrite (arrêt brutal entre les deux) n'est compté par personne. On
+/// préfère ne compter que ce qu'on a vu conclure — l'autre sens inventerait une
+/// issue qui n'a pas été enregistrée.
+pub fn is_terminal_record(record: &Value) -> bool {
+    !record
+        .get("outcome")
+        .and_then(Value::as_str)
+        .is_some_and(|o| o.starts_with("started"))
+}
+
 /// Résultat d'un balayage en lecture du journal : ce qui a été lu, et ce qui
 /// n'a PAS pu l'être. Les lignes illisibles sont comptées, jamais avalées — un
 /// lecteur qui n'annoncerait que ce qu'il a compris donnerait une image
