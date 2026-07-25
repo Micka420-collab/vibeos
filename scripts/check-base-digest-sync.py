@@ -30,6 +30,11 @@ CE QU'IL NE VÉRIFIE PAS
 Que le digest résout encore — c'est `check-base-digest-fresh.sh` (réseau, cron).
 Ici : zéro réseau, cohérence interne pure, exécutable sur chaque push.
 
+ANGLE MORT ASSUMÉ. Un pin caché dans un fichier suivi mais non décodable en
+UTF-8 (binaire, ou UTF-16) est invisible : `scan()` passe son chemin. Ce dépôt
+n'épingle qu'en UTF-8 et rien ne suggère que ça change ; le noter ici vaut mieux
+que de laisser croire à une couverture totale.
+
 USAGE : python3 scripts/check-base-digest-sync.py   (0 = cohérent)
 """
 
@@ -125,14 +130,22 @@ if BUMPER.is_file():
     bumper_text = BUMPER.read_text(encoding="utf-8")
     for path in sorted({p for p, _, _, _ in pins if p != CONTAINERFILE}):
         rel = path.relative_to(ROOT).as_posix()
-        if rel not in bumper_text:
+        # On exige la forme EXACTE que le bumpeur utilise pour déclarer un site,
+        # `"$ROOT/<rel>"`, guillemets compris — pas le chemin nu quelque part
+        # dans le fichier. Chercher la sous-chaîne nue rendait le contrôle
+        # satisfiable par un simple COMMENTAIRE : retirer une entrée du tableau
+        # en laissant `# TODO: réajouter os/…/image-info.json` gardait la CI
+        # verte alors que le bumpeur ne réécrivait plus ce fichier — soit
+        # précisément la dérive que ce contrôle existe pour interdire.
+        if f'"$ROOT/{rel}"' not in bumper_text:
             errors.append(
                 f"{rel} porte un pin de base mais n'est pas déclaré dans "
                 f"EXTRA_PIN_SITES de scripts/bump-base-digest.sh.\n"
                 f"        Au prochain bump automatique, ce fichier garderait "
                 f"l'ancien digest — la dérive silencieuse que ce contrôle existe "
                 f"pour empêcher.\n"
-                f'        Remède : ajoute "$ROOT/{rel}" à EXTRA_PIN_SITES.'
+                f'        Remède : ajoute littéralement "$ROOT/{rel}" (guillemets '
+                f"compris) à EXTRA_PIN_SITES ; une mention en commentaire ne compte pas."
             )
 else:
     errors.append(
