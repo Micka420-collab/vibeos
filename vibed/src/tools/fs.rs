@@ -18,10 +18,11 @@ use crate::policy::{CallContext, Decision, PolicyEngine};
 /// Hard cap on file content returned by fs.read.
 const MAX_READ_BYTES: usize = 256 * 1024;
 
-/// `O_NONBLOCK` (Linux): open() does not block. Belt-and-suspenders for fs.read
-/// against a FIFO — even if a regular file is swapped for a FIFO in the TOCTOU
-/// window after the file-type check, the open returns instead of hanging the
-/// worker thread forever (a FIFO with no writer would otherwise block).
+/// `O_NONBLOCK` (Linux): open() does not block. Belt-and-suspenders for BOTH
+/// fs.read and fs.write against a FIFO — even if a regular file is swapped for a
+/// FIFO in the TOCTOU window after the file-type check, the open returns instead
+/// of hanging the worker thread forever (a FIFO with no writer blocks an
+/// `O_RDONLY` open; with no reader it blocks an `O_WRONLY` one).
 const O_NONBLOCK: i32 = 0x800;
 
 /// Hard cap on entries returned by one fs.list call.
@@ -388,13 +389,41 @@ pub(crate) fn fs_write(
     // with per-tool sandboxing in Phase 3. Winning the race is hard (a tight,
     // repeated swap) and the common cases (symlinked final component, symlinked
     // parent already in place at check time) are already refused above.
+    // Reject a target that EXISTS and is not a regular file, BEFORE opening —
+    // the same anti-DoS guard `fs.read` applies (see its comment): a FIFO opened
+    // O_WRONLY with no reader BLOCKS the spawn_blocking worker forever, and
+    // enough of those exhaust the blocking pool and stall every user's calls.
+    // The asymmetry was real: fs.read checked the file type, fs.write did not,
+    // so a FIFO in the agent's OWN home — where every confinement guard above
+    // legitimately passes — was a hang, not a refusal. `symlink_metadata` (lstat)
+    // does not follow the final component, which O_NOFOLLOW refuses anyway; a
+    // missing target is the normal create case and must stay allowed.
+    match std::fs::symlink_metadata(&canonical_target) {
+        Ok(existing) if !existing.file_type().is_file() => {
+            return Err(format!(
+                "fs.write: '{canonical_str}' exists and is not a regular file"
+            ));
+        }
+        _ => {}
+    }
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .custom_flags(O_NOFOLLOW)
+        // O_NONBLOCK: belt-and-suspenders like fs.read — if the target is swapped
+        // for a FIFO in the TOCTOU window after the check above, open() returns
+        // (ENXIO with no reader) instead of blocking. Ignored for regular files.
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(&canonical_target)
         .map_err(|e| format!("fs.write {canonical_str}: {e}"))?;
+    // Post-open re-check (TOCTOU): if what we actually opened is not a regular
+    // file, refuse BEFORE writing rather than piping the payload into it.
+    let opened = file
+        .metadata()
+        .map_err(|e| format!("fs.write {canonical_str}: {e}"))?;
+    if !opened.is_file() {
+        return Err(format!("fs.write: '{canonical_str}' is not a regular file"));
+    }
     file.write_all(content.as_bytes())
         .map_err(|e| format!("fs.write {canonical_str}: {e}"))?;
     Ok(format!("wrote {} bytes to {canonical_str}", content.len()))
@@ -923,6 +952,72 @@ mod tests {
                 "char device outside the trees must be refused"
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn fs_write_rejects_non_regular_targets_instead_of_hanging() {
+        // The asymmetry this pins: fs.read rejected a FIFO before its blocking
+        // open, fs.write did NOT — so a FIFO in the agent's OWN home (where every
+        // confinement guard legitimately passes) hung the spawn_blocking worker
+        // forever instead of being refused. Enough of those exhaust the pool and
+        // stall every user's calls, so this is a cross-tenant DoS, not a nuisance.
+        let uid = current_uid();
+        if uid == 0 {
+            return; // root's home is /root, denylisted
+        }
+        let policy = permissive_policy();
+        let caller = caller_uid(uid);
+        let base = home_scratch(uid, "write-nonreg");
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A directory is not a regular file.
+        let subdir = base.join("adir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let err = fs_write(
+            &json!({"path": subdir.to_string_lossy(), "content": "x"}),
+            &policy,
+            caller,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not a regular file"),
+            "a directory target must be refused: {err}"
+        );
+
+        // A FIFO with no reader: open(O_WRONLY) would block forever without the
+        // pre-open type check. The test returning at all IS the assertion.
+        let fifo = base.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if made {
+            let err = fs_write(
+                &json!({"path": fifo.to_string_lossy(), "content": "x"}),
+                &policy,
+                caller,
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("not a regular file"),
+                "a FIFO must be refused BEFORE the blocking open: {err}"
+            );
+        }
+
+        // A normal write into the same scratch still works — the new guard must
+        // reject only non-regular targets, never the ordinary create case.
+        let ok = base.join("ordinary.txt");
+        let out = fs_write(
+            &json!({"path": ok.to_string_lossy(), "content": "hello"}),
+            &policy,
+            caller,
+        )
+        .expect("a regular-file write must still succeed");
+        assert!(out.contains("wrote 5 bytes"), "{out}");
+        assert_eq!(std::fs::read_to_string(&ok).unwrap(), "hello");
+
         let _ = std::fs::remove_dir_all(&base);
     }
 
