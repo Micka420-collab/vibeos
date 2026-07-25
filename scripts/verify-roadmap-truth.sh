@@ -50,6 +50,7 @@ fi
 
 "$PY" - <<'PY'
 import glob
+import os
 import pathlib
 import re
 import subprocess
@@ -234,12 +235,63 @@ if real_tests:
 
 
 # --- Check D (WARNING) : PR citées « mergées » présentes dans l'historique ----
+#
+# CE CHECK EST AVEUGLE SUR UN CLONE SUPERFICIEL, ET DOIT LE DIRE.
+#
+# Un `git clone --depth N` tronque l'historique : toute PR mergée AVANT la borne
+# est absente de `git log` alors qu'elle est bel et bien dans main. Le check
+# signalait alors une « dérive documentaire » parfaitement imaginaire — et
+# comme il ne disait pas pourquoi, la seule façon de s'en apercevoir était
+# d'aller vérifier la PR à la main sur GitHub.
+#
+# C'est arrivé : deux avertissements (#33 et #37, mergées le 2026-07-14) sont
+# restés affichés pendant des jours sur les clones superficiels, à faire douter
+# d'un STATUS.md qui disait vrai. La CI, elle, checkout en `fetch-depth: 0` et
+# ne les a jamais vus — donc rien ne poussait à corriger l'illusion.
+#
+# Un contrôle qui devient aveugle et continue de parler comme s'il voyait est
+# pire qu'un contrôle absent (cf. scripts/README.md). On détecte donc la
+# troncature et on ANNOTE les avertissements concernés au lieu de les servir
+# comme des constats.
+shallow = False
+try:
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() == "true"
+except Exception:
+    # Vieux git sans `--is-shallow-repository` : le fichier marqueur fait foi.
+    shallow = os.path.exists(os.path.join(".git", "shallow"))
+
+# La borne du clone, pour que l'humain puisse trancher d'un coup d'œil : une PR
+# citée plus ancienne que cette date est hors de portée du check, point final.
+#
+# DEUX PIÈGES, tous deux rencontrés en écrivant ceci :
+#   * `git log --reverse --max-count=1` rend le commit le plus RÉCENT, pas le
+#     plus ancien — git choisit d'abord les commits (limite comprise) PUIS
+#     inverse l'affichage ;
+#   * `git rev-list --max-parents=0` rend LES racines (un clone superficiel en a
+#     plusieurs, une par greffe) dans l'ordre antichronologique — prendre la
+#     première donne encore la plus récente.
+# La dernière ligne du log EST, par définition, le plus ancien commit que git
+# consent à montrer. C'est exactement la borne qu'on veut annoncer.
+horizon = ""
+if shallow:
+    try:
+        histoire = subprocess.run(
+            ["git", "log", "--format=%ci %h %s"],
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        horizon = histoire[-1].strip() if histoire else ""
+    except Exception:
+        horizon = ""
+
 try:
     log = subprocess.run(
         ["git", "log", "--oneline", "--max-count=4000"],
         capture_output=True, text=True, check=True,
     ).stdout
-except Exception as exc:  # pas d'historique (checkout superficiel) : on saute
+except Exception as exc:  # pas d'historique du tout : on saute
     log = ""
     warn.append(f"check PR sauté (git log indisponible : {exc})")
 
@@ -275,11 +327,25 @@ if log:
         # Merge classique : « Merge pull request #N ». Squash : le numéro peut
         # apparaître dans le sujet «  (#N) ». On cherche les deux.
         if f"#{pr}" not in log:
-            warn.append(
-                f"PR #{pr} citée comme mergée ({doc}:{i}) mais absente de "
-                f"l'historique de main (possible : merge squash sans le numéro, "
-                f"ou mergée sur une mauvaise base — à vérifier à l'œil)."
-            )
+            if shallow:
+                # Le check ne VOIT pas tout l'historique : ce n'est pas un
+                # constat de dérive, c'est un angle mort. On le dit ainsi, avec
+                # de quoi vérifier (la borne du clone) — jamais comme un doute
+                # sur la doc.
+                warn.append(
+                    f"PR #{pr} citée comme mergée ({doc}:{i}) : NON VÉRIFIABLE ICI — "
+                    f"le clone est SUPERFICIEL, l'historique est tronqué"
+                    + (f" (le plus ancien commit visible est : {horizon})" if horizon else "")
+                    + ". Ce n'est PAS une dérive documentaire : la CI checkout en "
+                    "`fetch-depth: 0` et voit l'historique complet. Pour vérifier "
+                    "localement : `git fetch --unshallow`."
+                )
+            else:
+                warn.append(
+                    f"PR #{pr} citée comme mergée ({doc}:{i}) mais absente de "
+                    f"l'historique de main (possible : merge squash sans le numéro, "
+                    f"ou mergée sur une mauvaise base — à vérifier à l'œil)."
+                )
 
 
 # --- Rapport ------------------------------------------------------------------

@@ -286,6 +286,59 @@ fn daily_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Résultat d'un balayage en lecture du journal : ce qui a été lu, et ce qui
+/// n'a PAS pu l'être. Les lignes illisibles sont comptées, jamais avalées — un
+/// lecteur qui n'annoncerait que ce qu'il a compris donnerait une image
+/// faussement complète du journal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecordScan {
+    /// Enregistrements JSON valides passés à la fermeture.
+    pub records: u64,
+    /// Lignes non vides qui n'ont pas pu être analysées.
+    pub skipped: u64,
+}
+
+/// Parcourt les enregistrements du journal dans l'ordre chronologique et passe
+/// chacun à `f`, EN FLUX.
+///
+/// Pourquoi un flux et pas un `Vec` : le journal grandit sans borne (une ligne
+/// par appel d'outil, pour toujours). Le charger en mémoire pour l'agréger
+/// ferait grossir le coût du lecteur avec l'âge de la machine — un DoS lent,
+/// offert par la simple durée de vie. Ici la mémoire est bornée par la ligne la
+/// plus longue.
+///
+/// LECTURE SEULE, et volontairement distinct de `verify_chain` : celui-ci
+/// VÉRIFIE l'intégrité et s'arrête à la première rupture ; celui-là ne fait que
+/// lire pour agréger, et ne prétend RIEN sur l'intégrité. Un appelant qui a
+/// besoin des deux doit appeler les deux — confondre « j'ai lu le journal » et
+/// « le journal est intègre » est exactement le raccourci qu'on refuse.
+pub fn for_each_record(dir: &Path, mut f: impl FnMut(&Value)) -> io::Result<RecordScan> {
+    use std::io::BufRead;
+    let mut scan = RecordScan::default();
+    for file in daily_files(dir) {
+        let handle = match fs::File::open(&file) {
+            Ok(h) => h,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for line in io::BufReader::new(handle).lines() {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Value>(line) {
+                Ok(v) => {
+                    scan.records += 1;
+                    f(&v);
+                }
+                Err(_) => scan.skipped += 1,
+            }
+        }
+    }
+    Ok(scan)
+}
+
 /// UTC calendar date "YYYY-MM-DD" from unix epoch seconds — Howard Hinnant's
 /// civil_from_days algorithm, std-only (the crate deliberately has no date
 /// dependency).

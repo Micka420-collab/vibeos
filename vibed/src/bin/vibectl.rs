@@ -222,6 +222,9 @@ fn usage() -> ExitCode {
          \x20 vibectl memory projects       current project index (fold of updates)\n\
          \x20 vibectl memory knowledge      consolidated facts (dedup of facts.jsonl)\n\
          \x20 vibectl whoami                this machine's AI citizen (name, archetype, traits)\n\
+         \x20 vibectl conscience [DIR]      confront the citizen's DECLARED character with its\n\
+         \x20                               RECORDED conduct (audit log). Observation only:\n\
+         \x20                               the governance floor never consults it\n\
          \x20 vibectl memory reset [--yes]  FACTORY RESET (root): purge the memory store and\n\
          \x20                               re-arm Genesis at next boot; cryptographic erasure\n\
          \x20                               arrives with LUKS (Phase 3) — DANGER\n\
@@ -406,6 +409,22 @@ fn main() -> ExitCode {
                 vibectl::render_citizen(&vibectl::citizen_at(&memory_dir()))
             );
             ExitCode::SUCCESS
+        }
+        ["conscience"] | ["conscience", _] => {
+            // Le citoyen confronte son caractère annoncé (ADR-029) à sa conduite
+            // ENREGISTRÉE dans le journal d'audit. Lecture seule, aucune
+            // décision : le plancher de gouvernance ne consulte jamais ce
+            // rapport. Pas de garde root ici — le journal est déjà root-only au
+            // niveau du système de fichiers, et un non-root obtiendra une
+            // erreur de lecture claire plutôt qu'un rapport vide et trompeur.
+            let dir = parts.get(1).copied().unwrap_or(DEFAULT_AUDIT_DIR);
+            let (report, ok) = vibectl::conscience_at(&memory_dir(), Path::new(dir));
+            print!("{}", vibectl::render_conscience(&report));
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
         ["agent", sub @ ..] => agent_dispatch(sub),
         ["-h"] | ["--help"] | ["help"] => {
