@@ -185,7 +185,18 @@ La création de la mémoire au premier boot est décrite dans [MEMORY.md](MEMORY
 - **Réplication journald** : chaque décision émise en journal structuré (`SYSLOG_IDENTIFIER=vibed`, champs `VIBEOS_TOOL=`, `VIBEOS_TIER=`, `VIBEOS_DECISION=`), avec `Seal=yes` (FSS) pour détecter la falsification a posteriori ; `chattr +a` posé sur le JSONL.
 - **Scellement TPM périodique** : ancrage régulier du haché de **tête de chaîne** (signature par clé TPM résidente, ou étendue dans un PCR/NV index) — ferme aussi la troncature du dernier enregistrement ; même root ne pourra pas réécrire l'historique *antérieur au dernier scellement* sans détection.
 - **Verrou MAC** : `vibeos_audit_t` (module SELinux dédié, §2), append-only au niveau MAC.
-- **Export** : `vibectl audit verify` (CLI future) revalidera la chaîne complète ; export vers un collecteur distant en option (Phase 5).
+- **Export** : export vers un collecteur distant, en option (Phase 5). *(`vibectl audit verify` n'est plus « à venir » : il est livré — voir la section « Lecture du journal » ci-dessous. Il était annoncé ici comme une CLI future alors que [VALIDATION.md](VALIDATION.md) s'en servait déjà dans son protocole.)*
+
+### Lecture du journal : deux commandes, deux garanties distinctes — livrées
+
+Les confondre est le raccourci que cette section existe pour empêcher : **lire** le journal et le **croire intègre** sont deux choses différentes.
+
+| Commande | Ce qu'elle établit | Ce qu'elle N'établit PAS |
+|---|---|---|
+| `vibectl audit verify [RÉP]` (aussi `vibed --verify-audit`) | l'**intégrité** de la chaîne SHA-256 : `seq` continu depuis 0, chaque `hash` recalculé, chaque `prev` égal au précédent — la première rupture est localisée et rapportée | le *sens* de ce qui est enregistré |
+| `vibectl conscience [RÉP]` | ce que le citoyen a **fait**, confronté au caractère qu'il **déclare** (ADR-029) : taux de refus contre prudence annoncée, diversité d'outils contre curiosité, propositions contre initiative | **rien sur l'intégrité** — elle LIT le journal sans le valider, et son rapport renvoie explicitement à `audit verify` |
+
+`conscience` est en **lecture seule et opérateur seulement** : aucun outil MCP, aucun droit supplémentaire pour l'agent, aucune consultation par le plancher de gouvernance. Une conduite jugée « en tension » ne restreint rien, une conduite « cohérente » n'autorise rien — même discipline que le style opératoire (ADR-029). Elle n'expose par ailleurs **aucune `target`** : le journal en contient pour tous les appelants, elle n'en compte que des agrégats et ne nomme que des outils.
 
 ### Ce que l'audit garantit — et ne garantit pas
 
