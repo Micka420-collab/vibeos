@@ -43,8 +43,15 @@ const MAX_LABEL_LEN: usize = 63;
 /// * **userinfo** (`https://github.com@evil.tld/`): the host there is `evil.tld`,
 ///   and this is *the* classic way to make a URL read as a trusted site to a
 ///   human while resolving elsewhere. Refusing beats parsing it right;
-/// * IPv6 literals (`[::1]`) — bracket parsing is a bug farm, and an IP can never
-///   match a domain allow-list anyway;
+/// * IPv6 literals (`[::1]`) — bracket parsing is a bug farm, and nobody writes an
+///   IPv6 literal in a domain allow-list. NOTE, precisely because the looser claim
+///   would be false: an IPv**4** literal DOES survive this parser — `is_valid_host`
+///   accepts all-digit labels, so `host_of("http://127.0.0.1/")` yields
+///   `Some("127.0.0.1")` and an allow-list entry spelling that same literal would
+///   match it. That is a deliberate, listed-by-hand allowance, not a hole; the
+///   per-request egress gate is the CONNECT proxy (ADR-022), not this parser. Said
+///   here because "an IP can never match a domain allow-list" was the old wording,
+///   and it was only true for the half of the address space this function refuses;
 /// * any non-ASCII byte. An IDN must arrive already punycoded (`xn--…`), so a
 ///   homograph (`gіthub.com` with a Cyrillic і) can never be silently folded onto
 ///   an ASCII pattern;
