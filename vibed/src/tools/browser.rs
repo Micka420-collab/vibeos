@@ -91,7 +91,10 @@ pub(crate) fn plan_action(verb: &str, args: &Value) -> Result<BrowserAction, Str
             // pas d'IPv6, pas de non-ASCII) : c'est la validation d'URL, et son
             // Some(host) est exactement ce que `[rule.domains]` a autorisé en amont.
             let host = crate::domain::host_of(url).ok_or_else(|| {
-                format!("browser.navigate: URL http(s) invalide ou sans hôte : {url:?}")
+                format!(
+                    "browser.navigate: URL http(s) invalide ou sans hôte : {:?}",
+                    elide(url)
+                )
             })?;
             Ok(BrowserAction::Navigate {
                 host,
@@ -113,13 +116,43 @@ pub(crate) fn plan_action(verb: &str, args: &Value) -> Result<BrowserAction, Str
             selector: validate_selector(req_str(args, "selector", verb)?)?,
         }),
         other => Err(format!(
-            "browser: verbe inconnu {other:?} (attendus : navigate, read, screenshot, \
-             click, fill, submit)"
+            "browser: verbe inconnu {:?} (attendus : navigate, read, screenshot, \
+             click, fill, submit)",
+            elide(other)
         )),
     }
 }
 
 /// Récupère un argument chaîne requis, non vide.
+/// Nombre de caractères d'une valeur d'appelant qu'un message d'erreur a le droit
+/// de citer. Même ordre de grandeur que les extraits de `stderr` dans `svc.rs` et
+/// `log.rs` : assez pour diagnostiquer, jamais assez pour amplifier.
+const MAX_ECHO_CHARS: usize = 200;
+
+/// Cite une valeur venue de l'appelant dans un message d'erreur, BORNÉE.
+///
+/// `validate_selector` et `validate_value` rapportent déjà la LONGUEUR plutôt que
+/// la valeur quand elle dépasse leur plafond — c'est la discipline du dépôt. Mais
+/// trois messages la réinjectaient entière : le verbe inconnu, l'URL non
+/// parsable, et la clé inconnue d'une étape. Ces trois-là n'ont aucun plafond en
+/// amont : la seule borne est `MAX_LINE_BYTES` (1 Mio), donc un appelant pouvait
+/// se faire renvoyer ~1 Mio par appel en envoyant un verbe d'un mégaoctet.
+///
+/// Ça ne divulgue rien — l'appelant a envoyé la chaîne — et ça n'atteint pas le
+/// journal d'audit (la cible y est bornée ailleurs). C'est un amplificateur de
+/// RÉPONSE : `vibed` alloue et réécrit la charge pour la renvoyer. On borne par
+/// cohérence avec le reste du répartiteur, pas parce qu'un secret fuirait.
+///
+/// `chars().take()` et non un découpage d'octets : jamais de coupe au milieu d'un
+/// caractère multi-octets.
+fn elide(s: &str) -> String {
+    let mut out: String = s.chars().take(MAX_ECHO_CHARS).collect();
+    if out.chars().count() < s.chars().count() {
+        out.push_str(&format!("…[{} octets au total]", s.len()));
+    }
+    out
+}
+
 fn req_str<'a>(args: &'a Value, key: &str, verb: &str) -> Result<&'a str, String> {
     match args.get(key).and_then(Value::as_str) {
         Some(s) if !s.is_empty() => Ok(s),
@@ -762,8 +795,13 @@ pub(crate) fn parse_batch(payload: &Value) -> Result<BrowserBatch, String> {
             if let Some(obj) = s.as_object() {
                 for k in obj.keys() {
                     if !allowed.contains(&k.as_str()) {
+                        // `verb` est déjà borné par construction : on n'arrive ici
+                        // que si `allowed_step_keys` l'a reconnu, donc c'est une
+                        // des chaînes fixes du catalogue. `k`, lui, vient de
+                        // l'appelant sans plafond — d'où l'élision.
                         return Err(format!(
-                            "browser.batch: étape {i} ({verb}) : clé inconnue {k:?} — refusé"
+                            "browser.batch: étape {i} ({verb}) : clé inconnue {:?} — refusé",
+                            elide(k)
                         ));
                     }
                 }
@@ -1632,6 +1670,72 @@ mod tests {
             .unwrap_err()
             .contains("verbe inconnu"));
         assert!(plan_action("execute", &json!({})).is_err());
+    }
+
+    /// Un message d'erreur ne doit pas devenir un amplificateur de réponse.
+    ///
+    /// `validate_selector`/`validate_value` rapportent déjà la LONGUEUR plutôt que
+    /// la valeur. Trois messages la réinjectaient ENTIÈRE — le verbe inconnu,
+    /// l'URL non parsable, la clé inconnue d'une étape — et ces trois-là n'ont
+    /// aucun plafond en amont : la seule borne est MAX_LINE_BYTES (1 Mio). Un
+    /// appelant se faisait donc renvoyer ~1 Mio par appel en envoyant un verbe
+    /// d'un mégaoctet. Relevé par la relecture adverse de #204.
+    #[test]
+    fn une_valeur_d_appelant_citee_dans_une_erreur_est_bornee() {
+        let enorme = "z".repeat(200_000);
+
+        // Verbe inconnu.
+        let err = plan_action(&enorme, &json!({})).unwrap_err();
+        assert!(
+            err.contains("verbe inconnu"),
+            "{}",
+            &err[..err.len().min(80)]
+        );
+        assert!(
+            err.len() < 500,
+            "l'erreur réinjectait le verbe entier ({} octets)",
+            err.len()
+        );
+        assert!(err.contains("200000 octets au total"), "{err}");
+
+        // URL non parsable.
+        let err = plan_action("navigate", &json!({"url": enorme.clone()})).unwrap_err();
+        assert!(
+            err.contains("URL http(s) invalide"),
+            "{}",
+            &err[..err.len().min(80)]
+        );
+        assert!(err.len() < 500, "{} octets", err.len());
+
+        // Clé inconnue dans une étape de batch.
+        let err = parse_batch(&json!({
+            "steps": [{"verb": "read", &enorme: 1}]
+        }))
+        .unwrap_err();
+        assert!(
+            err.contains("clé inconnue"),
+            "{}",
+            &err[..err.len().min(80)]
+        );
+        assert!(err.len() < 500, "{} octets", err.len());
+
+        // Non-régression : une valeur COURTE reste citée en clair, sinon les
+        // refus ordinaires — le cas courant — deviendraient indiagnosticables.
+        let err = plan_action("evaluate", &json!({})).unwrap_err();
+        assert!(err.contains("evaluate"), "{err}");
+        assert!(!err.contains("octets au total"), "{err}");
+    }
+
+    /// L'élision coupe sur une frontière de caractère, jamais au milieu d'un
+    /// multi-octets (un découpage d'octets paniquerait).
+    #[test]
+    fn l_elision_ne_coupe_pas_un_caractere_multi_octets() {
+        let accents = "é".repeat(MAX_ECHO_CHARS + 50); // 2 octets par caractère
+        let out = elide(&accents);
+        assert!(out.starts_with('é'));
+        assert!(out.contains("octets au total"));
+        // Court : rendu tel quel, sans marqueur.
+        assert_eq!(elide("café"), "café");
     }
 
     // ----- batch : parse_batch + run_batch (modèle de session batch, ADR-022 addendum) -----
