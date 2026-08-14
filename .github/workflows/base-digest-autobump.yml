@@ -18,9 +18,19 @@
 #
 # ⚠️ PRÉREQUIS OPÉRATEUR (une seule fois) : activer, dans Settings → Actions →
 # General, « Allow GitHub Actions to create and approve pull requests » (OFF par
-# défaut). Sans ça, `gh pr create` échoue et le job devient rouge (loud, mais la
-# remédiation ne se fait pas). À valider par un `workflow_dispatch` à blanc après
-# activation (digest courant => "unchanged", aucune PR).
+# défaut). Sans ça, `gh pr create` échoue. À valider par un `workflow_dispatch` à
+# blanc après activation (digest courant => "unchanged", aucune PR).
+#
+# CE PRÉREQUIS A DÉJÀ COÛTÉ 19 JOURS DE BUILD CASSÉ (2026-07-26 → 2026-08-14).
+# Le réglage était OFF : `gh pr create` échouait chaque nuit, le job passait rouge,
+# et un cron rouge sur un dépôt privé ne réveille personne. Le bump partait sur la
+# branche sans jamais devenir une PR, pendant que `main` gardait un pin mort et que
+# TOUS les builds d'image échouaient. Le job « loud » ne l'était donc pas.
+# Depuis : si la PR est refusée, le workflow ouvre une ISSUE de remédiation
+# (`issues: write` n'est PAS soumis à ce réglage, et une issue notifie vraiment).
+# Elle porte le digest résolu, la commande de déblocage et le réglage à activer ;
+# elle est mise à jour, jamais dupliquée. Le job n'échoue que si NI la PR NI
+# l'issue ne passent — là, plus aucun canal de remédiation n'existe.
 #
 # Ne bumpe QUE sur PURGE réelle (pin qui ne résout plus), pas à chaque
 # republication nocturne de f44 — sinon PR + build COMPLET quotidiens pour rien.
@@ -38,6 +48,7 @@ on:
 permissions:
   contents: write # pousser la branche de bump
   pull-requests: write # ouvrir la PR
+  issues: write # REPLI : ouvrir l'issue de remédiation si la PR est refusée
   actions: write # `gh workflow run build-os.yml` (dispatch du build de vérif)
 
 concurrency:
@@ -118,12 +129,91 @@ jobs:
           git push --force-with-lease origin "$BRANCH"
 
           # Ouvre la PR si aucune n'est déjà ouverte pour cette branche.
-          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
-            gh pr create --base main --head "$BRANCH" \
-              --title "fix(os): auto-bump digest de base F44 (quay a purgé le pin)" \
-              --body "Le digest de base épinglé a été purgé par quay (base f44 vivante) — tout build cassait. Bump automatique vers le digest courant \`${new}\`, vérifié manifest-list multi-arch (amd64+arm64). À faire : attendre le build de vérification (déclenché par ce workflow), puis merger. Généré par base-digest-autobump.yml."
-          else
+          #
+          # REPLI SUR ISSUE — pourquoi ce chemin existe (panne réelle du 2026-07-26
+          # au 2026-08-14, 19 jours). Le prérequis opérateur en tête de fichier
+          # (« Allow GitHub Actions to create and approve pull requests ») était OFF :
+          # `gh pr create` échouait avec « GitHub Actions is not permitted to create
+          # or approve pull requests », le job devenait rouge... et un cron rouge sur
+          # un dépôt privé ne réveille personne. Le bump était poussé chaque jour sur
+          # la branche, sans PR, sans lecteur — pendant que `main` gardait un pin mort
+          # et que TOUS les builds d'image cassaient.
+          #
+          # Donc : si la PR est refusée, on ouvre une ISSUE. `issues: write` n'est PAS
+          # soumis au réglage qui bloque la création de PR, et une issue notifie
+          # vraiment. Elle porte le correctif exact ET le réglage à activer une fois
+          # pour toutes. IDEMPOTENT : une seule issue vivante à la fois (recherche par
+          # label), sinon un cron quotidien en ouvrirait une par jour.
+          pr_ok=0
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
             echo "PR déjà ouverte pour $BRANCH — branche mise à jour."
+            pr_ok=1
+          elif gh pr create --base main --head "$BRANCH" \
+              --title "fix(os): auto-bump digest de base F44 (quay a purgé le pin)" \
+              --body "Le digest de base épinglé a été purgé par quay (base f44 vivante) — tout build cassait. Bump automatique vers le digest courant \`${new}\`, vérifié manifest-list multi-arch (amd64+arm64). À faire : attendre le build de vérification (déclenché par ce workflow), puis merger. Généré par base-digest-autobump.yml."; then
+            pr_ok=1
+          fi
+
+          if [ "$pr_ok" -eq 0 ]; then
+            echo "::warning::gh pr create a échoué — repli sur une issue de remédiation."
+            # Le label sert de clé d'idempotence ; on le crée s'il manque (|| true :
+            # il existe déjà après le premier passage).
+            gh label create base-digest-purge \
+              --description "Digest de base F44 purgé : bump à appliquer à la main" \
+              --color B60205 2>/dev/null || true
+            existing="$(gh issue list --label base-digest-purge --state open \
+              --json number --jq '.[0].number // empty')"
+            # Corps construit par `printf` et NON par un heredoc : dans un bloc
+            # scalaire YAML (`run: |`), un heredoc doit être désindenté à la colonne
+            # 0 pour que son corps soit propre — ce qui casse le parsing du bloc.
+            # `printf '%s\n'` garde tout indenté côté YAML et rend un corps sans
+            # indentation parasite côté Markdown.
+            # Guillemets DOUBLES partout (backticks échappés) et non simples : le
+            # corps est en français, plein d'apostrophes — une chaîne '...' ne peut
+            # pas en contenir, et les contourner donnerait « nest » pour « n'est ».
+            body="$(printf '%s\n' \
+              "Le digest de base F44 épinglé a été **purgé par quay** — tant que \`main\` n'est pas bumpé, **tout build d'image casse** (\`buildah exited with code 125\`, *manifest unknown*)." \
+              "" \
+              "L'auto-bump a résolu le digest courant et **poussé la branche** \`$BRANCH\`, mais **n'a pas pu ouvrir la PR** :" \
+              "" \
+              '```' \
+              "GitHub Actions is not permitted to create or approve pull requests" \
+              '```' \
+              "" \
+              "**Digest courant vérifié multi-arch (amd64+arm64) :** \`${new}\`" \
+              "" \
+              "### Débloquer maintenant" \
+              "Ouvrir la PR à la main depuis la branche déjà poussée :" \
+              '```' \
+              "gh pr create --base main --head $BRANCH \\" \
+              '  --title "fix(os): bump digest de base F44 (quay a purgé le pin)"' \
+              '```' \
+              "" \
+              "### Supprimer la cause (une seule fois)" \
+              "**Settings → Actions → General → Workflow permissions** → cocher" \
+              "**« Allow GitHub Actions to create and approve pull requests »**." \
+              "Ensuite, \`workflow_dispatch\` à blanc sur \`base-digest-autobump\` pour valider." \
+              "" \
+              "<sub>Ouverte automatiquement par \`base-digest-autobump.yml\`. Cette issue est mise à jour, jamais dupliquée ; referme-la après le merge du bump.</sub>")"
+            if [ -n "$existing" ]; then
+              # Déjà ouverte : on commente seulement si le digest a changé depuis,
+              # pour ne pas empiler un commentaire par jour.
+              # `.body, .comments[].body` (et non une concaténation) : avec ZÉRO
+              # commentaire, `.body + .comments[].body` ne produit AUCUNE sortie —
+              # le grep échouerait toujours et on commenterait chaque jour.
+              if ! gh issue view "$existing" --json comments,body \
+                   --jq '.body, .comments[].body' | grep -qF "$new"; then
+                gh issue comment "$existing" --body "$body"
+              else
+                echo "Issue #$existing déjà à jour pour ${new} — pas de commentaire."
+              fi
+            elif ! gh issue create --label base-digest-purge \
+                --title "Digest de base F44 purgé — bump bloqué (PR refusée à Actions)" \
+                --body "$body"; then
+              # Ni PR ni issue : plus aucun canal de remédiation. Là, échouer fort.
+              echo "::error::ni la PR ni l'issue n'ont pu être créées — bump à appliquer à la main : ${new}"
+              exit 1
+            fi
           fi
 
           # Déclenche le build de vérification (le dispatch marche avec
