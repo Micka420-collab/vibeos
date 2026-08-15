@@ -1,16 +1,26 @@
 # 📊 STATUS — État d'avancement de VibeOS
 
-> ✅ **`main` à jour (2026-07-15)** — la nuit du 14→15 est **mergée** (#33→#45) :
-> `log.read` (T0, ADR-011), **4 correctifs sécurité réels** (#38 denylist mémoire
-> noyau/cross-user, #39 `/proc/<pid>` confiné, #42 egress anti-SSRF, #43 budget
-> agent sur horloge monotone), garde-fou CI anti-dérive (#33), note de trajectoire
-> Phase 4 (#34), assets du splash de boot (#35).
-> **PR ouvertes, en attente de revue humaine** : #46 (README traduits), #47
-> (historique de raisonnement HUD), #48 (épinglage des clés de dépôts tiers),
-> #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth).
+> 🔎 **Audit d'état du 2026-08-14** — mesuré sur le dépôt, pas relu depuis les docs :
+> **0 PR ouverte, 0 issue ouverte** (les #46→#50 listées ici sont mergées depuis
+> longtemps), **471 tests `vibed` verts** (454 lib + 14 e2e MCP + 3 politique),
+> clippy `-D warnings` + fmt propres, **22 outils** au catalogue MCP, 8 gardes CI
+> sur 9 vertes en local (la 9ᵉ exige `skopeo`). **Le dernier travail de fond date
+> du 2026-07-26** ; depuis, uniquement du Dependabot.
+>
+> 🔴 **Et le build d'image était cassé depuis 19 jours** (2026-07-26 → 2026-08-14) :
+> le digest de base F44 épinglé avait été **purgé par quay**, donc `build-os` rouge
+> sur `main`, **aucune image, aucune ISO** — et par ricochet *tous* les points
+> machine-gated bloqués en amont. L'auto-bump censé l'éviter tournait bien mais
+> **ne pouvait pas ouvrir sa PR** (réglage « Allow GitHub Actions to create and
+> approve pull requests » resté OFF), et son échec quotidien n'a réveillé personne.
+> **Corrigé** : pin bumpé vers `2f4f02e0`, et l'auto-bump ouvre désormais une
+> **issue** de remédiation quand la PR lui est refusée.
+> ⚠️ **Action opérateur qui reste** : activer ce réglage dans
+> *Settings → Actions → General*.
 
 > **Fichier vivant** : mis à jour à chaque session de travail. C'est le point d'entrée pour reprendre le projet — le « où en est-on, que reste-t-il ».
-> Dernière mise à jour : **2026-07-23 (session Opus)** — **identité VibeOS & correctif écran noir**. Le premier boot réel sur le PC de référence (Ryzen 7 3700X + RTX 3070 Ti) donnait un **écran noir** : ajout des args noyau NVIDIA `nvidia-drm.modeset=1` + blacklist `nouveau` (le RTX est le **seul** chemin d'affichage, pas d'iGPU ; Plasma 6 est Wayland-only), posés à la fois via `os/rootfs/usr/lib/bootc/kargs.d/10-vibeos-nvidia.toml` et `installer/vibeos.ks`. **Branding activé** (à la demande du mainteneur, fin de « Phase 5 non actif ») : greeter **SDDM VibeOS** + splash **Plymouth VibeOS** (initramfs régénéré au build, vérifié), `/usr/lib/os-release` réécrit (`ID=vibeos`, `ID_LIKE=fedora`) + logo — **plus de « Fedora »** au boot/login/`fastfetch`. **Login-naissance** : `vibeos-identity.service` publie l'identité **publique** du citoyen IA sous `/run/vibeos/citizen.json` (la mémoire privée reste 0700), et le greeter le **nomme**. ⚠️ **Secure Boot à désactiver** jusqu'à la signature MOK (Phase 4) — sinon le kmod non signé est refusé et l'écran reste noir. Validation réelle **machine-gated** (rebuild ISO + boot côté mainteneur). *Précédent : **2026-07-22 (session Opus)** — gestion des tokens & mémoire structurée ([ADR-030](docs/DECISIONS.md)), **412 tests verts**.*
+> Dernière mise à jour : **2026-08-14 (session Opus)** — **audit d'état + déblocage du build** (encadré ci-dessus). Aucune fonctionnalité livrée : la session a mesuré l'écart entre les docs et le dépôt, réparé le pin de base purgé et refermé le trou du garde-fou qui avait laissé courir 19 jours de panne. Ce fichier lui-même était le plus dérivé — il annonçait 412 tests (réel : 471), une surface de 20 outils (réel : 22) et 5 PR à merger (toutes mergées).
+> *Précédent : **2026-07-23 (session Opus)** — **identité VibeOS & correctif écran noir**.* Le premier boot réel sur le PC de référence (Ryzen 7 3700X + RTX 3070 Ti) donnait un **écran noir** : ajout des args noyau NVIDIA `nvidia-drm.modeset=1` + blacklist `nouveau` (le RTX est le **seul** chemin d'affichage, pas d'iGPU ; Plasma 6 est Wayland-only), posés à la fois via `os/rootfs/usr/lib/bootc/kargs.d/10-vibeos-nvidia.toml` et `installer/vibeos.ks`. **Branding activé** (à la demande du mainteneur, fin de « Phase 5 non actif ») : greeter **SDDM VibeOS** + splash **Plymouth VibeOS** (initramfs régénéré au build, vérifié), `/usr/lib/os-release` réécrit (`ID=vibeos`, `ID_LIKE=fedora`) + logo — **plus de « Fedora »** au boot/login/`fastfetch`. **Login-naissance** : `vibeos-identity.service` publie l'identité **publique** du citoyen IA sous `/run/vibeos/citizen.json` (la mémoire privée reste 0700), et le greeter le **nomme**. ⚠️ **Secure Boot à désactiver** jusqu'à la signature MOK (Phase 4) — sinon le kmod non signé est refusé et l'écran reste noir. Validation réelle **machine-gated** (rebuild ISO + boot côté mainteneur). *Précédent : **2026-07-22 (session Opus)** — gestion des tokens & mémoire structurée ([ADR-030](docs/DECISIONS.md)), **412 tests verts**.*
 > *Précédent : **2026-07-21 (session Fable 5)** — **perf couche basse** :*
 > chemins chauds `vibed` corrigés (audit/journal hors du réacteur tokio, catalogue
 > d'outils en cache) + **première config noyau de l'image**
@@ -34,12 +44,14 @@
 
 | | |
 |---|---|
-| **Phase actuelle** | Phase 1 « Première ISO » (reste : validation VM + NVIDIA) · Phase 2 « vibed + MCP » 🔄 bien avancée |
+| **Phase actuelle** | Phase 1 « Première ISO » (reste : validation VM + NVIDIA) · Phase 2 « vibed + MCP » 🔄 bien avancée · Phase 2.5 largement implémentée · **Phase 4 (chemin critique) toujours à zéro** |
 | **Version** | 0.1.0-dev (pré-alpha) |
-| **Dépôt GitHub** | [`Micka420-collab/vibeos`](https://github.com/Micka420-collab/vibeos) (privé) ✅ en ligne |
+| **Dépôt GitHub** | [`Micka420-collab/vibeos`](https://github.com/Micka420-collab/vibeos) (privé) ✅ en ligne — **0 PR ouverte, 0 issue ouverte** (2026-08-14) |
 | **Image OS** | `ghcr.io/micka420-collab/vibeos:0.1.0-dev` — **manifest multi-arch amd64+arm64 PUBLIÉ + SIGNÉ cosign** ✅ (Rekor #2062451740) |
-| **ISO** | **amd64 + arm64 générées** ✅ — artefacts CI `vibeos-iso-amd64` (7,0 Go) / `vibeos-iso-arm64` (6,3 Go) ; ISO amd64 aussi en local `F:\VibeOS-ISO\` |
+| **ISO** | **amd64 + arm64 générées** ✅ — artefacts CI `vibeos-iso-amd64` (7,0 Go) / `vibeos-iso-arm64` (6,3 Go) ; ISO amd64 aussi en local `F:\VibeOS-ISO\`. ⚠️ **Datent de la release v0.1.0-dev** — aucune ISO reconstruite depuis, le build étant resté cassé du 2026-07-26 au 2026-08-14 |
 | **Release** | **v0.1.0-dev — CI entièrement verte** (runners natifs) : build amd64+arm64 → manifest → cosign → 2 ISO |
+| **Tests** | **471 verts** (454 lib + 14 e2e MCP + 3 politique) · clippy `-D warnings` + fmt propres — mesuré le 2026-08-14 |
+| **Surface MCP** | **22 outils** au catalogue · 21 règles dans la politique livrée |
 | **Machine de référence** | Ryzen 7 3700X · RTX 3070 Ti · 16 Go — voir [docs/HARDWARE.md](docs/HARDWARE.md) |
 
 ## ✅ Fait
@@ -191,12 +203,47 @@
 
 ## 📋 Reste à faire (court terme)
 
-1. **Revoir et merger les 5 PR ouvertes** (côté utilisateur) : #46 (README traduits), #47 (historique de raisonnement HUD + 1er contrôle CI du JS du HUD), #48 (clés des dépôts tiers épinglées dans le dépôt — **vérifier les 2 empreintes hors-bande si tu veux l'assurance forte**), #49 (`policy.check` aligné sur le vrai chemin), #50 (modules Plymouth manquants). *(PR #11 : **mergée** le 2026-07-14 ; PR #4 : **fermée**. Fait.)*
-2. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (thème VibeOS Dark, wallpaper officiel, HUD au premier login) ; valider NVIDIA sur le PC de référence.
-3. **E2E Zed Tier B** (côté utilisateur, machine avec Zed) : lancer `zed/vibeos-claude-acp/scripts/e2e-zed.sh` — Tier A auto, puis la checklist éditeur (fs.read sans prompt, pkg.install qui prompte). Le Tier A (décisions live) est déjà vérifié.
-4. **Activer l'expédition de l'extension Zed** (`WITH_ZED_AGENT=1`) une fois le Tier B validé ; **brancher l'agent-runner** sur une vraie machine (TPM2 + egress live).
-5. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
-6. Mettre à jour ce fichier + README à chaque jalon.
+> *Les 5 PR (#46→#50) qui occupaient cette liste sont **mergées** ; le dépôt n'a
+> plus aucune PR ni issue ouverte. Ordre ci-dessous : ce qui débloque le reste
+> d'abord.*
+
+1. ⚠️ **Activer « Allow GitHub Actions to create and approve pull requests »**
+   (*Settings → Actions → General*) — **côté utilisateur, 1 minute**. Sans ce
+   réglage, `base-digest-autobump` ne peut pas ouvrir sa PR : c'est ce qui a laissé
+   courir **19 jours de build cassé**. Le repli sur issue livré le 2026-08-14 rend
+   la panne visible, mais ne remplace pas le réglage.
+2. **Merger le bump de digest** pour rendre `main` buildable, puis **vérifier que
+   `build-os` repasse vert** — tout le reste en dépend (pas d'image → pas d'ISO →
+   aucun point machine-gated atteignable).
+3. **Tester les ISO en VM** (côté utilisateur) : booter `vibeos-iso-amd64` en VM
+   Hyper-V (Gén. 2) jusqu'à SDDM + session Plasma 6 (thème VibeOS Dark, wallpaper
+   officiel, HUD au premier login) ; valider NVIDIA sur le PC de référence.
+   **Rebâtir l'ISO d'abord** : celles en artefacts datent de la release et ne
+   portent ni l'identité VibeOS ni les args noyau NVIDIA.
+   ⚠️ **Secure Boot désactivé** jusqu'à la signature MOK (Phase 4).
+   Ce seul test décoche les **3 critères Phase 2 restants**, la **Phase 1** entière
+   et `/usr/libexec/vibeos/verify-sandbox` (preuve du sandbox ADR-019 sur cible).
+4. **Trancher le séquencement Phase 4** — la question posée le 2026-07-14 dans la
+   note de trajectoire du ROADMAP §6 est **toujours ouverte un mois plus tard**,
+   et c'est la seule décision qui change la nature des mois à venir.
+5. **E2E Zed Tier B** (côté utilisateur, machine avec Zed) : lancer
+   `zed/vibeos-claude-acp/scripts/e2e-zed.sh` — Tier A auto, puis la checklist
+   éditeur (fs.read sans prompt, pkg.install qui prompte). Le Tier A est déjà vérifié.
+6. **Activer l'expédition de l'extension Zed** (`WITH_ZED_AGENT=1`) une fois le
+   Tier B validé ; **brancher l'agent-runner** sur une vraie machine (TPM2 + egress live).
+7. Rendre le paquet ghcr public ou le lier au dépôt (au choix).
+8. Mettre à jour ce fichier + README à chaque jalon. *(Ce fichier avait 3 semaines
+   de retard au 2026-08-14 — il annonçait 412 tests, 20 outils et 5 PR à merger.)*
+
+### 🔒 Décisions bloquées sur le mainteneur (aucune ne peut avancer côté agent)
+
+| # | Sujet | Ce qui manque, précisément |
+|---|---|---|
+| 1 | **[ADR-021](docs/DECISIONS.md) `deploy.*`** | `deploy.plan` est livré mais **refusé par défaut** : il manque tes cibles réelles (Fly/Vercel), le token scellé et les CIDR d'egress. Sans `[rule.deploy]`, l'outil est inerte |
+| 2 | **[ADR-024](docs/DECISIONS.md) `os.propose`** | Couche de validation **pure** livrée et testée, **délibérément non câblée** (absente du catalogue) — attend la ratification de l'ADR |
+| 3 | **[ADR-016](docs/DECISIONS.md) `pkg.install`** | Reste un **stub** : l'allowlist de paquets/dépôts sur OS immuable n'est pas tranchée |
+| 4 | **[ADR-022](docs/DECISIONS.md) navigateur** | `chromium-headless` (~300 Mo) dans l'image : oui ou non ? + module SELinux dédié |
+| 5 | **Séquencement Phase 4** | Assumer le séquencement (durcir avant la Phase 6) **ou** basculer maintenant sur le cœur Phase 4 en gelant le périmètre fonctionnel |
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
@@ -207,7 +254,25 @@
   *Hors ROADMAP* : « outils T1 réels **supplémentaires** » et preset **Panel Colorizer** ne sont **pas** des critères Phase 2 (le premier n'est pas au ROADMAP, le second est une revendication de `docs/DESKTOP.md`) — et tous deux sont **gouvernés** : un T1 de plus exige *quelle allowlist de cibles*, Panel Colorizer est un plasmoid tiers GPL-3.0 hors dépôts Fedora (même TOFU de supply-chain que les clés GPG). **Décisions Micka.**
 - **Phase 2.5 (v0.2.5) — « Autonomie encadrée & accès IA externes »** *(proposée, ~3-5 semaines)* : superviseur d'agent budgété (`vibectl agent run`, budget wall-clock + nombre d'appels, **kill-switch humain** `vibectl agent stop`), **auth par abonnement** (`claude setup-token`/`codex`) scellée **TPM2** via `systemd-creds`, **allowlist d'egress par unité** (`IPAddressAllow/Deny`), type de journal réservé `autonomous_session`. **Périmètre figé T0/T1** (pas d'anticipation T2/T3). Voir [ROADMAP.md](ROADMAP.md) §4 bis.
 - **Phase 3 (v0.3)** : mémoire chiffrée LUKS/TPM2, mode amnésique (generator), interview de naissance câblée, **sandbox par outil (systemd-run, seccomp, landlock)**.
+  **État réel mesuré le 2026-08-14** : le **sandbox par outil est implémenté**
+  ([ADR-019](docs/DECISIONS.md) : unités systemd transitoires + `SystemCallFilter` +
+  helper de faible privilège `vibed-tool` + outil `sandbox.probe`) mais **jamais
+  prouvé sur cible** — `/usr/libexec/vibeos/verify-sandbox` attend un boot.
+  Le generator amnésique et le retour d'usine (`vibectl memory reset`) sont livrés,
+  **non validés au boot**. L'interview de naissance existe
+  (`agent/genesis_interview.py`, opt-in) mais n'est pas câblée bout-en-bout.
+  ⛔ **LUKS = zéro** : aucun `crypttab` ni `cryptsetup` dans `os/` — c'est le
+  **gros du travail Phase 3 restant**, et il n'est bloqué par personne.
 - **Phase 4 (v0.4)** : durcissement (UKI / boot mesuré, SELinux dédiée `vibed_t`, hash-chaining audit, `User=vibed`).
+  **État réel mesuré le 2026-08-14 — le cœur est toujours à zéro**, un mois après
+  la note de trajectoire : **aucun fichier SELinux** (`.te`/`.fc`/`.if` absents du
+  dépôt), **aucun UKI / dm-verity / composefs**, et **`vibed` tourne toujours en
+  root** (`vibed.service` le documente honnêtement, ligne 11). Restent aussi la
+  **vérification cosign côté client** (staged, pas *enforced*), l'**ancrage externe
+  TPM/Rekor** de la chaîne d'audit, et la **signature MOK** des kmods NVIDIA — qui
+  bloque Secure Boot sur la machine de référence. Seul le durcissement
+  *périphérique* (chaîne d'audit SHA-256 + rotation) est fait.
+  → **Ne pas démarrer sans un go explicite du mainteneur** (ROADMAP §6).
 - **Phase 5 (v0.5)** : installateur brandé + identité visuelle complète.
 - **Phase 6 (v1.0)** : release publique.
 
