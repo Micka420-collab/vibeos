@@ -223,9 +223,10 @@
    ⚠️ **Secure Boot désactivé** jusqu'à la signature MOK (Phase 4).
    Ce seul test décoche les **3 critères Phase 2 restants**, la **Phase 1** entière
    et `/usr/libexec/vibeos/verify-sandbox` (preuve du sandbox ADR-019 sur cible).
-4. **Trancher le séquencement Phase 4** — la question posée le 2026-07-14 dans la
-   note de trajectoire du ROADMAP §6 est **toujours ouverte un mois plus tard**,
-   et c'est la seule décision qui change la nature des mois à venir.
+4. ~~Trancher le séquencement Phase 4~~ ✅ **fait le 2026-08-15 : assumé** —
+   valeur IA-native d'abord, durcissement **avant** la Phase 6 (qui ne s'ouvre pas
+   sans lui). Voir [ROADMAP.md](ROADMAP.md) §6 pour les 5 engagements que cette
+   décision porte, dont le risque accepté (`vibed` root) et son réexamen.
 5. **E2E Zed Tier B** (côté utilisateur, machine avec Zed) : lancer
    `zed/vibeos-claude-acp/scripts/e2e-zed.sh` — Tier A auto, puis la checklist
    éditeur (fs.read sans prompt, pkg.install qui prompte). Le Tier A est déjà vérifié.
@@ -243,7 +244,7 @@
 | 2 | **[ADR-024](docs/DECISIONS.md) `os.propose`** | Couche de validation **pure** livrée et testée, **délibérément non câblée** (absente du catalogue) — attend la ratification de l'ADR |
 | 3 | **[ADR-016](docs/DECISIONS.md) `pkg.install`** | Reste un **stub** : l'allowlist de paquets/dépôts sur OS immuable n'est pas tranchée |
 | 4 | **[ADR-022](docs/DECISIONS.md) navigateur** | `chromium-headless` (~300 Mo) dans l'image : oui ou non ? + module SELinux dédié |
-| 5 | **Séquencement Phase 4** | Assumer le séquencement (durcir avant la Phase 6) **ou** basculer maintenant sur le cœur Phase 4 en gelant le périmètre fonctionnel |
+| ~~5~~ | ~~**Séquencement Phase 4**~~ | ✅ **TRANCHÉ le 2026-08-15 : séquencement ASSUMÉ** — la valeur IA-native d'abord, le durcissement avant la Phase 6, qui **ne s'ouvre pas** tant que Phase 4 n'est pas faite. Risque accepté et nommé : `vibed` reste **root**, sans SELinux ni boot mesuré, dans l'intervalle. Détail et conditions de réexamen : [ROADMAP.md](ROADMAP.md) §6 |
 
 ## 📋 Reste à faire (moyen terme — voir [ROADMAP.md](ROADMAP.md))
 
