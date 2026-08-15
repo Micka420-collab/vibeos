@@ -23,7 +23,7 @@
 | 2 | v0.2 | vibed + MCP | 🔄 **Livrables complets ; 4/7 critères de sortie vérifiés** (2026-07-15). Les **3 restants sont machine-gated** (vibed sain après `kill -9`, handshake depuis le vrai Claude Code, démo T0+T1 tracée) → **test d'ISO**. Tout le reste est en place : vibed + HUD live + thème + MCP client + `memory.append` complet + T0 (`svc.status`/`fs.list`/`log.read`/`sectools.list`/`agent.*`/`policy.check`) + T1 (`fs.write`/`memory.append`) + audit chaîné + **fs.read/list confinés** + **approbation T2/T3 réelle** (livrée en avance, Phase 2.5) + **rate-limiting par uid** | 3–4 mois |
 | 2.5 | v0.2.5 | Autonomie encadrée & accès IA externes | 🔄 Largement implémenté (superviseur `vibectl agent run/stop/thinking`, **kill-switch mesuré 2,6 s**, **capture du raisonnement**, `policy.check`, **unité `vibeos-agent@` durcie + jeton scellé TPM2 + allowlist egress par hôte**) ; reste l'enforcement live (machine bootée). Périmètre figé T0/T1, plancher T2/T3 non levé | 3–5 semaines |
 | 3 | v0.3 | Genesis & mémoire | 🔄 Démarrée (generator amnésique + hardware.json schema 2 + ébauche vibectl livrés) | 2–3 mois |
-| 4 | v0.4 | Durcissement | 🔄 Amorcée (audit chaîné SHA-256 + rotation ; reste : ancrage TPM/Rekor, User=vibed, SELinux) | 4–6 mois |
+| 4 | v0.4 | Durcissement | ⏸️ **Report assumé (décision Micka, 2026-08-15 — §6)** : cœur non démarré (SELinux, UKI/boot mesuré, `User=vibed` = zéro), seul le périphérique est fait (audit chaîné SHA-256 + rotation). Reste le **chemin critique**, et **bloque l'ouverture de la Phase 6** | 4–6 mois |
 | 5 | v0.5 | Installateur & identité | Planifiée | 2–3 mois |
 | 6 | v1.0 | Release publique | Planifiée | 3–4 mois |
 | 7+ | v1.x → v2+ | Souveraineté progressive | Continue | Plusieurs années |
@@ -297,6 +297,39 @@ gantt
 > L'agent **n'a pas** pris cette décision et ne commencera pas Phase 4 sans un
 > go explicite ; cette note existe pour que le choix soit fait en connaissance
 > de cause plutôt que subi.
+
+> **✅ TRANCHÉ — 2026-08-15, par Micka : le séquencement est ASSUMÉ.**
+>
+> La valeur IA-native continue d'être livrée d'abord ; **le durcissement du
+> chemin critique est délibérément reporté, et doit atterrir avant la release
+> publique de Phase 6**. La question posée le 2026-07-14 est close : elle n'est
+> plus « ouverte par défaut », elle est **choisie**.
+>
+> **Ce que cette décision engage, écrit noir sur blanc pour qu'elle ne dérive pas
+> en oubli :**
+>
+> 1. **Phase 4 reste le chemin critique** — assumer le séquencement ne la
+>    déclasse pas. Elle reste l'engagement de plusieurs mois décrit ci-dessous ;
+>    seul son *démarrage* est reporté.
+> 2. **Phase 6 est le point de non-retour.** Une release publique sans SELinux
+>    `vibed_t`, sans boot mesuré et avec `vibed` en root serait une rupture de la
+>    promesse du projet (« un OS qui *marche* sans être défendable ne marche
+>    pas », §10). Phase 6 ne s'ouvre pas tant que Phase 4 n'est pas faite.
+> 3. **Le risque accepté, nommé** : jusque-là, `vibed` tourne **en root**, sans
+>    domaine SELinux dédié ni boot vérifié. La compensation actuelle est
+>    logicielle (default-deny, plancher T2/T3, denylist intégrée, confinement par
+>    uid, audit chaîné, rate-limiting, sandbox ADR-019) — **elle ne remplace pas
+>    un socle défensif**, elle le précède. Le projet reste **pré-alpha, à ne pas
+>    exposer à un usage hostile** dans l'intervalle.
+> 4. **Ce qui NE change pas** : les invariants restent non négociables — plancher
+>    T2/T3 jamais levé, default-deny absolu, audit de tout appel, aucune
+>    fonctionnalité ne contourne le moteur de politiques (§1.4). Assumer le
+>    séquencement autorise à *retarder* le durcissement, **jamais** à relâcher la
+>    gouvernance.
+> 5. **Réexamen** : cette décision se relit **à chaque fin de phase** (§10) et
+>    **immédiatement** si le projet cesse d'être mono-utilisateur ou si une ISO
+>    est diffusée hors de la machine de son auteur — deux événements qui
+>    changeraient le modèle de menace, donc les termes du choix.
 
 ### Livrables
 
