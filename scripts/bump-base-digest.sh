@@ -55,6 +55,18 @@ command -v skopeo >/dev/null || {
 	exit 2
 }
 
+# APRÈS LA BASCULE ADR-031, ce script n'a plus d'objet : la base est miroitée
+# dans NOTRE registre, et un digest qu'on héberge n'est jamais purgé par un
+# tiers. Sortir en SUCCÈS (et non en erreur « aucun pin trouvé ») est délibéré :
+# l'auto-bump tourne en cron quotidien, et le faire échouer à perpétuité
+# rallumerait précisément le bruit rouge permanent qui a déjà fait ignorer une
+# panne de 19 jours. Un job vert et muet est le bon comportement pour une corvée
+# devenue sans objet.
+if grep -qE 'ghcr\.io/[^:[:space:]"]+/vibeos-base:[0-9]+@sha256:[0-9a-f]{64}' "$CF"; then
+	echo "unchanged (base miroitée — ADR-031 : plus de purge amont possible, rien à bumper)"
+	exit 0
+fi
+
 # Digest épinglé actuellement dans le Containerfile (1re occurrence).
 # `if !` : sous `set -e`, un `x="$(pipeline)"` qui échoue quitterait AVANT le
 # garde `[ -n ]` — le message d'erreur serait mort. On teste donc l'assignation.

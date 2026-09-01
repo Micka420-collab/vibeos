@@ -17,13 +17,17 @@ synchro À LA MAIN. Le remède est toujours le même — le rendre mécanique.
 
 CE QU'IL VÉRIFIE
 
-1. TOUS les pins `quay.io/fedora/fedora-kinoite:NN@sha256:…` du dépôt portent le
-   MÊME tag et le MÊME digest. Un seul désaccord = rouge, avec les emplacements.
+1. TOUS les pins de base du dépôt portent le MÊME repo, le MÊME tag et le MÊME
+   digest. Deux formes sont reconnues — l'amont `quay.io/fedora/fedora-kinoite`
+   et le MIROIR `ghcr.io/…/vibeos-base` (ADR-031) — et le REPO compte autant que
+   le digest : pendant la migration, un site resté sur quay pendant que le
+   Containerfile est passé au miroir ferait construire depuis une base et en
+   annoncer une autre. Un seul désaccord = rouge, avec les emplacements.
 2. Tout fichier porteur d'un pin AUTRE que le Containerfile est déclaré dans
-   `EXTRA_PIN_SITES` de `scripts/bump-base-digest.sh`. Sans ça, l'auto-bump
-   laisserait ce fichier périmé au prochain bump — c'est exactement le bug
-   d'origine. Ajouter un site d'épinglage SANS l'apprendre au bumpeur fait
-   désormais rougir la CI.
+   `EXTRA_PIN_SITES` de CHAQUE réécriveur présent (`bump-base-digest.sh` ET
+   `mirror-base.sh`). Sans ça, ce fichier resterait périmé le jour où c'est
+   l'autre script qui tourne — exactement le bug d'origine. Ajouter un site
+   d'épinglage sans l'apprendre aux deux fait rougir la CI.
 
 CE QU'IL NE VÉRIFIE PAS
 
@@ -46,8 +50,19 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONTAINERFILE = ROOT / "os" / "Containerfile"
 BUMPER = ROOT / "scripts" / "bump-base-digest.sh"
+MIRRORER = ROOT / "scripts" / "mirror-base.sh"
 
-PIN_RE = re.compile(r"quay\.io/fedora/fedora-kinoite:(\d+)@(sha256:[0-9a-f]{64})")
+# DEUX FORMES de pin coexistent, et ce contrôle doit voir les deux :
+#   - l'AMONT quay, avant la bascule ADR-031 ;
+#   - le MIROIR ghcr (`…/vibeos-base`), après.
+# N'en reconnaître qu'une rendait ce contrôle aveugle le jour de la migration —
+# et il se serait éteint en annonçant « aucun pin trouvé », c'est-à-dire au pire
+# moment : celui où l'on déplace la base de la chaîne d'approvisionnement.
+# Le groupe 1 (repo) est capturé pour pouvoir exiger qu'un SEUL repo règne.
+PIN_RE = re.compile(
+    r"(quay\.io/fedora/fedora-kinoite|ghcr\.io/[^:\s\"]+/vibeos-base)"
+    r":(\d+)@(sha256:[0-9a-f]{64})"
+)
 
 errors = []
 
@@ -69,8 +84,8 @@ def tracked_files() -> list[pathlib.Path]:
     return [ROOT / name for name in out.split("\0") if name]
 
 
-def scan() -> list[tuple[pathlib.Path, int, str, str]]:
-    """Tous les pins du dépôt : (fichier, ligne, tag, digest)."""
+def scan() -> list[tuple[pathlib.Path, int, str, str, str]]:
+    """Tous les pins du dépôt : (fichier, ligne, repo, tag, digest)."""
     found = []
     for path in sorted(tracked_files()):
         if not path.is_file() or path.is_symlink():
@@ -84,8 +99,8 @@ def scan() -> list[tuple[pathlib.Path, int, str, str]]:
         except (UnicodeDecodeError, OSError):
             continue  # binaire ou illisible : aucun pin textuel à y trouver
         for lineno, line in enumerate(text.splitlines(), start=1):
-            for tag, digest in PIN_RE.findall(line):
-                found.append((path, lineno, tag, digest))
+            for repo, tag, digest in PIN_RE.findall(line):
+                found.append((path, lineno, repo, tag, digest))
     return found
 
 
@@ -93,16 +108,17 @@ pins = scan()
 
 if not pins:
     errors.append(
-        "aucun pin `quay.io/fedora/fedora-kinoite:NN@sha256:…` trouvé dans le dépôt — "
+        "aucun pin de base (`quay.io/fedora/fedora-kinoite:NN@sha256:…` ou "
+        "`ghcr.io/…/vibeos-base:NN@sha256:…`) trouvé dans le dépôt — "
         "soit l'épinglage a disparu (la base n'est plus reproductible), soit ce "
         "contrôle est devenu aveugle. Répare le motif, ne supprime pas le contrôle."
     )
 
 # --- 1. Un seul digest, partout ------------------------------------------------
 canonical = None
-for path, lineno, tag, digest in pins:
+for path, lineno, repo, tag, digest in pins:
     if path == CONTAINERFILE:
-        canonical = (tag, digest)
+        canonical = (repo, tag, digest)
         break
 if canonical is None and pins:
     errors.append(
@@ -111,24 +127,32 @@ if canonical is None and pins:
     )
 
 if canonical is not None:
-    ref_tag, ref_digest = canonical
-    for path, lineno, tag, digest in pins:
-        if (tag, digest) != (ref_tag, ref_digest):
+    ref_repo, ref_tag, ref_digest = canonical
+    for path, lineno, repo, tag, digest in pins:
+        # Le REPO fait partie de l'identité : pendant la migration, un site resté
+        # sur quay pendant que le Containerfile est passé au miroir construirait
+        # depuis une base et en annoncerait une autre. C'est la même dérive que
+        # le digest désaccordé, en pire — elle traverse deux registres.
+        if (repo, tag, digest) != (ref_repo, ref_tag, ref_digest):
             errors.append(
                 f"{path.relative_to(ROOT)}:{lineno} épingle "
-                f"fedora-kinoite:{tag}@{digest}\n"
+                f"{repo}:{tag}@{digest}\n"
                 f"        alors qu'os/Containerfile épingle "
-                f"fedora-kinoite:{ref_tag}@{ref_digest}.\n"
+                f"{ref_repo}:{ref_tag}@{ref_digest}.\n"
                 f"        Un seul digest de base doit exister dans le dépôt : "
                 f"l'image annoncerait sinon une base qui n'est pas celle construite.\n"
-                f"        Remède : bash scripts/bump-base-digest.sh os/Containerfile "
-                f"(il réécrit tous les sites)."
+                f"        Remède : bash scripts/mirror-base.sh os/Containerfile "
+                f"(ou bump-base-digest.sh avant la bascule ADR-031) — "
+                f"les deux réécrivent TOUS les sites."
             )
 
 # --- 2. Tout site non-Containerfile est connu du bumpeur -----------------------
-if BUMPER.is_file():
-    bumper_text = BUMPER.read_text(encoding="utf-8")
-    for path in sorted({p for p, _, _, _ in pins if p != CONTAINERFILE}):
+rewriters = [p for p in (BUMPER, MIRRORER) if p.is_file()]
+if rewriters:
+    # Un site doit être connu de TOUS les réécriveurs présents : il suffit qu'un
+    # seul l'ignore pour que le jour où c'est LUI qui tourne, le fichier reste
+    # périmé. Exiger « au moins un » rouvrirait exactement le bug d'origine.
+    for path in sorted({p for p, _, _, _, _ in pins if p != CONTAINERFILE}):
         rel = path.relative_to(ROOT).as_posix()
         # On exige la forme EXACTE que le bumpeur utilise pour déclarer un site,
         # `"$ROOT/<rel>"`, guillemets compris — pas le chemin nu quelque part
@@ -137,20 +161,26 @@ if BUMPER.is_file():
         # en laissant `# TODO: réajouter os/…/image-info.json` gardait la CI
         # verte alors que le bumpeur ne réécrivait plus ce fichier — soit
         # précisément la dérive que ce contrôle existe pour interdire.
-        if f'"$ROOT/{rel}"' not in bumper_text:
+        missing = [
+            r.name
+            for r in rewriters
+            if f'"$ROOT/{rel}"' not in r.read_text(encoding="utf-8")
+        ]
+        if missing:
             errors.append(
                 f"{rel} porte un pin de base mais n'est pas déclaré dans "
-                f"EXTRA_PIN_SITES de scripts/bump-base-digest.sh.\n"
+                f"EXTRA_PIN_SITES de : {', '.join(missing)}.\n"
                 f"        Au prochain bump automatique, ce fichier garderait "
                 f"l'ancien digest — la dérive silencieuse que ce contrôle existe "
                 f"pour empêcher.\n"
                 f'        Remède : ajoute littéralement "$ROOT/{rel}" (guillemets '
-                f"compris) à EXTRA_PIN_SITES ; une mention en commentaire ne compte pas."
+                f"compris) à EXTRA_PIN_SITES de chacun ; une mention en commentaire "
+                f"ne compte pas."
             )
 else:
     errors.append(
-        "scripts/bump-base-digest.sh introuvable — l'auto-bump ne peut plus "
-        "réécrire les pins ; ce contrôle ne peut plus vérifier qu'il les connaît tous."
+        "ni scripts/bump-base-digest.sh ni scripts/mirror-base.sh — plus rien ne "
+        "réécrit les pins ; ce contrôle ne peut plus vérifier qu'ils sont tous connus."
     )
 
 # --- Verdict -------------------------------------------------------------------
@@ -160,9 +190,10 @@ if errors:
         print(f"  - {e}", file=sys.stderr)
     sys.exit(1)
 
-ref_tag, ref_digest = canonical
-sites = len({p for p, _, _, _ in pins})
+ref_repo, ref_tag, ref_digest = canonical
+sites = len({p for p, _, _, _, _ in pins})
+kind = "miroir" if ref_repo.startswith("ghcr.io/") else "amont quay"
 print(
-    f"\033[32mok\033[0m    un seul digest de base, cohérent sur {sites} fichier(s) "
-    f"({len(pins)} occurrence(s)) : fedora-kinoite:{ref_tag}@{ref_digest}"
+    f"\033[32mok\033[0m    un seul digest de base ({kind}), cohérent sur {sites} "
+    f"fichier(s) ({len(pins)} occurrence(s)) : {ref_repo}:{ref_tag}@{ref_digest}"
 )

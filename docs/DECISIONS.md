@@ -2174,3 +2174,55 @@ Avec ces prérequis, le tool de draft est réellement inerte et **peut être liv
   5. la **vérification de signature côté machine** — tant que la vérif cosign client est
      recalée en Phase 4 (ADR-008), `bootc` ne **refuse** pas encore une image non
      signée : la « version signée » n'est pas encore vérifiée *par la machine*.
+
+---
+
+## ADR-031 — Miroiter la base Fedora dans notre registre : cesser de subir le calendrier de purge de quay — *décidé (2026-09-01, demande de Micka), machinerie livrée*
+
+**Statut** : **DÉCIDÉ.** La machinerie est livrée (`scripts/mirror-base.sh`, `.github/workflows/base-mirror.yml`, gardes adaptées) ; la **bascule effective du pin** intervient au premier miroitage, qui exige des credentials CI. Demande de Micka, après trois purges constatées en une seule session de travail : *« miroiter la base »*.
+
+### Contexte — une classe de panne, pas une panne
+
+`quay.io/fedora/fedora-kinoite:44` est une base **vivante** : Fedora la republie chaque nuit et quay **purge les anciens index**. Le digest épinglé dans `os/Containerfile` cesse alors de résoudre (« manifest unknown ») et **tout build casse d'un coup**.
+
+Ce n'est pas une hypothèse. Mesuré sur ce dépôt :
+
+| Date | Événement |
+|---|---|
+| 2026-07-16, 07-17 | Purges deux jours de suite → bumps manuels |
+| 2026-07-19, 07-20 | Deux purges de plus, dont une en pleine nuit de merges |
+| 2026-07-26 → 08-14 | **19 jours de build cassé** — l'auto-bump ne pouvait pas ouvrir sa PR (réglage GitHub OFF), et un cron rouge n'a réveillé personne |
+| 2026-08-15 | Le pin posé **la veille** était déjà purgé au moment du merge → `main` rouge à nouveau |
+| 2026-09-01 | Le pin de `main` de nouveau purgé (404) |
+
+**La demi-vie observée d'un pin est d'environ 24 h.**
+
+### Décision
+
+Copier l'image Fedora dans **notre** registre (`ghcr.io/<owner>/vibeos-base`) et épingler **notre copie**. Un digest que nous hébergeons n'est jamais purgé par un tiers.
+
+### Pourquoi pas les alternatives
+
+- **Continuer à bumper** (statu quo, manuel ou auto-bump) — c'est un **tapis roulant, pas une sortie** : un pin qui vit 24 h n'a de valeur que s'il est mergé *et* buildé dans la journée. Toute PR non mergée en 24 h relance la panne. Exige une discipline de merge quotidienne, indéfiniment, sur un projet à un mainteneur. **Rejeté : la charge est perpétuelle et la panne revient au premier jour d'inattention.**
+- **Résoudre le digest au moment du build** (plus de pin figé) — robuste et sans stockage, mais on perd la **reproductibilité** : le dépôt ne dirait plus sur quelle base l'image a été construite, et deux builds du même commit donneraient des images différentes. **Rejeté : recul de posture supply-chain**, incompatible avec l'immutabilité revendiquée (§1.5 du ROADMAP).
+- **Épingler par tag `:44`** — même perte de reproductibilité, en pire. **Rejeté.**
+
+### Ce que ça change à la posture supply-chain (et ce que ça ne change pas)
+
+**La source de confiance ne change pas.** L'image miroitée **est** l'image Fedora, copiée telle quelle. Ce qui change, c'est **qui la conserve**. Deux propriétés rendent l'affirmation vérifiable plutôt que déclarative :
+
+1. **`skopeo copy --all`** recopie le manifeste **octet pour octet**, toutes arches comprises. Les digests étant adressés par contenu, le digest du miroir est normalement **identique** à celui de l'amont — la provenance devient une **preuve cryptographique**. Le script le **vérifie** au lieu de le supposer, et signale fort toute divergence (cas légitime : conversion de format par le registre de destination).
+2. **`os/base-provenance.json`** consigne ref et digest amont, ref et digest miroir, l'égalité des deux, et la date. Versionné, diffable, auditable. Sans ce fichier, « on héberge la base » deviendrait « on ne sait plus d'où elle vient ».
+
+**Risque accepté, nommé** : la disponibilité de la base dépend désormais de notre registre. Une suppression du paquet, une politique de rétention ou un passage en privé casserait le pull — `check-base-digest-fresh.sh` détecte ce cas et le **distingue explicitement** d'une purge amont, parce que le remède n'est pas le même (re-bumper serait la mauvaise réponse).
+
+### Ce que ce workflow n'est PAS
+
+**Pas un auto-upgrade.** Lancer `base-mirror.yml` adopte le contenu courant de `:44` comme nouvelle base : c'est une **montée de version délibérée**, revue en PR. Le cron **mensuel** existe pour que les correctifs de sécurité de la base ne soient pas oubliés — pas pour rebâtir chaque nuit. Tout l'intérêt de l'opération est de reprendre **le calendrier du projet** au lieu de subir celui des purges.
+
+### Conséquences
+
+- `bump-base-digest.sh` et `base-digest-autobump.yml` deviennent **sans objet** une fois la bascule faite. Le bumpeur sort désormais en **succès muet** sur un pin miroité, délibérément : le faire échouer à perpétuité rallumerait le bruit rouge permanent qui a déjà fait ignorer 19 jours de panne.
+- Les deux gardes apprennent les **deux formes** de pin (amont et miroir). N'en reconnaître qu'une aurait éteint le contrôle **le jour même de la migration** — au pire moment.
+- Le guard de synchronisation compare désormais le **repo** autant que le digest : pendant la migration, un site resté sur quay pendant que le Containerfile est passé au miroir ferait construire depuis une base et en annoncer une autre.
+- **Prérequis opérateur, une fois** : rendre le paquet ghcr `vibeos-base` **public**. C'est la copie d'une image publique Fedora — rien de secret. Sans ça le pull **anonyme** échoue, ce qui casserait les builds de PR (qui ne se connectent pas à ghcr) **et** les builds locaux en WSL de [BUILD.md](BUILD.md). Le garde de fraîcheur tourne sur la PR de bascule elle-même et nomme ce cas.

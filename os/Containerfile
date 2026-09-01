@@ -196,7 +196,7 @@ FROM zed-agent-${WITH_ZED_AGENT} AS zed-agent-selected
 #
 # Pour re-résoudre le digest courant :
 #   skopeo inspect --format '{{.Digest}}' docker://quay.io/fedora/fedora-kinoite:44
-FROM quay.io/fedora/fedora-kinoite:44@sha256:a768a5e461f4ab14fc3fe5ff422a57e3e015f316e7ac73a128440afb7616e939
+FROM quay.io/fedora/fedora-kinoite:44@sha256:f899ef3512a36677c6c0879ceef5268e0c168cb0d75d6b5055a8f0b12070d572
 
 # Version de l'image, injectée par la CI depuis le tag (`v0.2.1-dev` -> `0.2.1-dev`).
 #
@@ -217,7 +217,7 @@ LABEL org.opencontainers.image.title="VibeOS" \
       org.opencontainers.image.description="AI-native, security-first, immutable Linux distribution for vibecoding" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.source="https://github.com/Micka420-collab/vibeos" \
-      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:a768a5e461f4ab14fc3fe5ff422a57e3e015f316e7ac73a128440afb7616e939"
+      org.opencontainers.image.base.name="quay.io/fedora/fedora-kinoite:44@sha256:f899ef3512a36677c6c0879ceef5268e0c168cb0d75d6b5055a8f0b12070d572"
 
 # TARGETARCH is auto-populated by podman/buildah when building with --platform
 # (amd64 | arm64). Defaulted to amd64 for plain single-arch local builds.
