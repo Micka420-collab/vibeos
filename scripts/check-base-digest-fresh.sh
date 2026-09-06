@@ -39,10 +39,14 @@ command -v skopeo >/dev/null 2>&1 \
 
 [[ -r "$CONTAINERFILE" ]] || die "cannot read ${CONTAINERFILE}"
 
-# Le digest de la base qui SHIP (ligne fedora-kinoite, pas les builders fedora:NN).
-ref="$(grep -oE 'quay\.io/fedora/fedora-kinoite:[0-9]+@sha256:[a-f0-9]{64}' "$CONTAINERFILE" | head -1)"
+# Le digest de la base qui SHIP (ligne fedora-kinoite ou vibeos-base, pas les
+# builders fedora:NN). DEUX FORMES acceptées : l'amont quay (avant la bascule
+# ADR-031) et le MIROIR ghcr (après). Ne reconnaître que la première rendait ce
+# contrôle aveugle le jour de la migration — un garde-fou qui s'éteint en silence
+# au moment précis où l'on touche à la chaîne d'approvisionnement.
+ref="$(grep -oE '(quay\.io/fedora/fedora-kinoite|ghcr\.io/[^:[:space:]"]+/vibeos-base):[0-9]+@sha256:[a-f0-9]{64}' "$CONTAINERFILE" | head -1)"
 [[ -n "$ref" ]] \
-  || die "aucun pin fedora-kinoite:NN@sha256:… trouvé dans ${CONTAINERFILE} — ce contrôle vient de devenir aveugle. Répare le motif, ne supprime pas le contrôle."
+  || die "aucun pin fedora-kinoite:NN@sha256:… ni vibeos-base:NN@sha256:… trouvé dans ${CONTAINERFILE} — ce contrôle vient de devenir aveugle. Répare le motif, ne supprime pas le contrôle."
 
 tag="${ref%@*}"          # quay.io/fedora/fedora-kinoite:44
 pinned="${ref##*@}"      # sha256:...
@@ -56,7 +60,21 @@ if skopeo inspect --raw "docker://${repo}@${pinned}" >/dev/null 2>&1; then
 fi
 
 current="$(skopeo inspect --format '{{.Digest}}' "docker://${tag}" 2>/dev/null || echo '?')"
+
+# Le remède DÉPEND de la forme du pin, et se tromper de remède coûte cher.
+# Sur un pin miroité, un digest qui ne résout plus n'est PAS une purge amont :
+# c'est notre propre registre qui a perdu la copie (rétention, suppression du
+# paquet, visibilité changée). Re-bumper serait la mauvaise réponse.
+if [[ "$ref" == ghcr.io/* ]]; then
+  die "le digest MIROITÉ ne résout plus : ${pinned}
+        Ce n'est pas une purge amont — le miroir est NOTRE registre. Causes probables :
+        paquet supprimé, rétention, ou visibilité passée en privé (le pull anonyme échoue alors).
+        Remède : vérifier le paquet vibeos-base sur ghcr (visibilité PUBLIQUE attendue),
+        puis re-miroiter : bash scripts/mirror-base.sh ${CONTAINERFILE}"
+fi
+
 die "le digest épinglé NE RÉSOUT PLUS (purgé par quay) : ${pinned}
         ${tag} pointe désormais sur : ${current}
-        Remède : bumper le digest dans ${CONTAINERFILE} (2 occurrences).
-        Ré-résoudre : skopeo inspect --format '{{.Digest}}' docker://${tag}"
+        Remède DURABLE (ADR-031) : miroiter la base — bash scripts/mirror-base.sh ${CONTAINERFILE}
+        (un digest qu'on héberge n'est jamais purgé ; re-bumper ne tient que ~24 h).
+        Rustine : bash scripts/bump-base-digest.sh ${CONTAINERFILE}"

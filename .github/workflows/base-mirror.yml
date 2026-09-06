@@ -1,0 +1,174 @@
+# base-mirror.yml — miroiter la base Fedora dans NOTRE registre (ADR-031).
+#
+# POURQUOI CE WORKFLOW EXISTE (et pourquoi il remplace le tapis roulant)
+#
+# `quay.io/fedora/fedora-kinoite:44` est une base VIVANTE : quay purge les anciens
+# index et un digest épinglé cesse de résoudre en ~24 h. Mesuré sur ce dépôt :
+# purges les 16, 17, 19, 20 juillet ; puis une panne de 19 jours (2026-07-26 →
+# 2026-08-14) ; puis DEUX purges de plus en 48 h, dont une sur un pin posé la
+# veille. Bumper ne règle rien : un pin qui vit 24 h n'a de valeur que s'il est
+# mergé ET buildé dans la journée. On ne répare pas, on court après.
+#
+# Ici, on copie l'image Fedora dans ghcr et on épingle NOTRE copie. Un digest
+# qu'on héberge n'est jamais purgé par un tiers : le pin redevient stable jusqu'à
+# ce qu'on décide de le changer. La classe de panne disparaît.
+#
+# CE N'EST PAS UN AUTO-UPGRADE. Le lancer adopte le contenu courant de `:44`
+# comme nouvelle base — une montée de version DÉLIBÉRÉE, revue en PR. Le cron
+# mensuel existe pour que les correctifs de sécurité de la base ne soient pas
+# oubliés, pas pour rebâtir chaque nuit. C'est tout l'intérêt de l'opération :
+# reprendre le calendrier du projet au lieu de subir celui des purges de quay.
+#
+# POSTURE SUPPLY-CHAIN : la source de confiance NE CHANGE PAS. L'image miroitée
+# est l'image Fedora, copiée `--all` (toutes arches) octet pour octet — le digest
+# du miroir est normalement IDENTIQUE à celui de l'amont, ce que le script
+# vérifie et consigne dans `os/base-provenance.json`. On change qui CONSERVE la
+# copie, pas qui la produit.
+#
+# ⚠️ PRÉREQUIS OPÉRATEUR (une seule fois, au premier miroitage) : rendre le
+# paquet ghcr `vibeos-base` PUBLIC (Packages → vibeos-base → Package settings →
+# Change visibility → Public). C'est une copie d'une image publique Fedora :
+# rien de secret. Sans ça, le pull ANONYME échoue et casserait aussi bien les
+# builds de PR (qui ne se connectent pas à ghcr) que les builds locaux en WSL
+# décrits dans docs/BUILD.md. `check-base-digest-fresh.sh` détecte ce cas et le
+# nomme explicitement.
+name: base-mirror
+
+on:
+  schedule:
+    # Mensuel (1er du mois, 07:00 UTC) : les correctifs de sécurité de la base
+    # remontent sans qu'on y pense, sans churn quotidien.
+    - cron: "0 7 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # pousser la branche de bascule
+  packages: write # pousser l'image miroitée sur ghcr
+  pull-requests: write # ouvrir la PR
+  issues: write # REPLI si la création de PR est refusée (cf. base-digest-autobump)
+
+concurrency:
+  group: base-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Miroiter la base et proposer la bascule
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRANCH: auto/mirror-base
+      MIRROR_REPO: ghcr.io/${{ github.repository_owner }}/vibeos-base
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Log in to ghcr.io (destination du miroir)
+        run: |
+          skopeo login ghcr.io \
+            -u "${{ github.actor }}" \
+            --password-stdin <<<"${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Miroiter et réécrire les pins
+        id: mirror
+        run: |
+          set -euo pipefail
+          # MIRROR_REPO est dérivé de github.repository_owner : le workflow suit
+          # le dépôt s'il est transféré, au lieu de pousser vers un propriétaire
+          # codé en dur qui ne serait plus le bon.
+          out="$(MIRROR_REPO="${MIRROR_REPO,,}" bash scripts/mirror-base.sh os/Containerfile)"
+          echo "$out"
+          if printf '%s' "$out" | grep -q '^unchanged'; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "new_ref=$(printf '%s' "$out" | awk '{print $NF}')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ouvrir / mettre à jour la PR de bascule
+        if: steps.mirror.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          new="${{ steps.mirror.outputs.new_ref }}"
+
+          # Anti-écrasement d'un correctif humain : si la branche existe déjà et
+          # que son DERNIER commit n'est pas du bot, on n'y touche pas. Le fetch
+          # explicite est requis (checkout ne récupère pas les autres branches).
+          if git fetch origin "$BRANCH" 2>/dev/null; then
+            last="$(git log -1 --format='%an' FETCH_HEAD 2>/dev/null || true)"
+            if [ -n "$last" ] && [ "$last" != "vibeos-mirror[bot]" ]; then
+              echo "::warning::origin/$BRANCH a un dernier commit non-bot ($last) — je ne l'écrase pas."
+              exit 0
+            fi
+          fi
+
+          git config user.name "vibeos-mirror[bot]"
+          git config user.email "vibeos-mirror@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add os/Containerfile os/rootfs/usr/lib/vibeos/image-info.json os/base-provenance.json
+          if git diff --cached --quiet; then
+            echo "Pins inchangés — rien à pousser."
+            exit 0
+          fi
+          git commit \
+            -m "fix(os): base miroitée -> ${new}" \
+            -m "Copie --all (multi-arch) de la base Fedora courante vers notre registre, et épinglage de NOTRE copie (ADR-031). Provenance amont dans os/base-provenance.json. Un digest qu'on héberge n'est jamais purgé : ce pin est stable jusqu'à la prochaine montée de version délibérée. Généré par base-mirror.yml."
+          git push --force-with-lease origin "$BRANCH"
+
+          # Même repli que base-digest-autobump : `issues: write` n'est pas soumis
+          # au réglage qui bloque la création de PR par Actions, et une issue
+          # notifie vraiment — un cron rouge, non (19 jours de panne l'ont prouvé).
+          pr_ok=0
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            echo "PR déjà ouverte pour $BRANCH — branche mise à jour."
+            pr_ok=1
+          elif gh pr create --base main --head "$BRANCH" \
+              --title "fix(os): basculer la base sur le miroir (ADR-031)" \
+              --body "Base Fedora copiée telle quelle dans notre registre et épinglée depuis là : \`${new}\`. Provenance amont tracée dans \`os/base-provenance.json\`. Un digest qu'on héberge n'est jamais purgé — cette PR ferme la classe de panne des purges quay. À faire : attendre le build vert, puis merger. Généré par base-mirror.yml."; then
+            pr_ok=1
+          fi
+
+          if [ "$pr_ok" -eq 0 ]; then
+            echo "::warning::gh pr create refusé — repli sur une issue de remédiation."
+            gh label create base-mirror \
+              --description "Bascule de la base sur le miroir à appliquer à la main" \
+              --color 1D76DB 2>/dev/null || true
+            existing="$(gh issue list --label base-mirror --state open --json number --jq '.[0].number // empty')"
+            body="$(printf '%s\n' \
+              "La base a été **miroitée** vers notre registre, mais la PR de bascule **n'a pas pu être ouverte** :" \
+              "" \
+              '```' \
+              "GitHub Actions is not permitted to create or approve pull requests" \
+              '```' \
+              "" \
+              "**Nouvelle référence de base :** \`${new}\`" \
+              "" \
+              "### Débloquer" \
+              '```' \
+              "gh pr create --base main --head $BRANCH --title \"fix(os): basculer la base sur le miroir (ADR-031)\"" \
+              '```' \
+              "" \
+              "### Supprimer la cause (une seule fois)" \
+              "**Settings → Actions → General → Workflow permissions** → cocher" \
+              "**« Allow GitHub Actions to create and approve pull requests »**." \
+              "" \
+              "<sub>Ouverte automatiquement par \`base-mirror.yml\`. Mise à jour, jamais dupliquée.</sub>")"
+            if [ -n "$existing" ]; then
+              if ! gh issue view "$existing" --json comments,body --jq '.body, .comments[].body' | grep -qF "$new"; then
+                gh issue comment "$existing" --body "$body"
+              fi
+            elif ! gh issue create --label base-mirror \
+                --title "Bascule de la base sur le miroir bloquée (PR refusée à Actions)" \
+                --body "$body"; then
+              echo "::error::ni PR ni issue — bascule à appliquer à la main : ${new}"
+              exit 1
+            fi
+          fi
