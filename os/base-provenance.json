@@ -2,7 +2,7 @@
   "_comment": "Provenance de la base de l'image (ADR-031). Écrit par scripts/mirror-base.sh ; ne pas éditer à la main. NOTE : ref et digest sont des champs SÉPARÉS, délibérément — les concaténer produirait une chaîne 'repo:tag@sha256:...' que check-base-digest-sync.py compterait comme un SITE D'ÉPINGLAGE de plus à tenir en synchro, alors que ce fichier est un relevé de provenance, pas une entrée de build.",
   "state": "not_mirrored",
   "upstream_ref": "quay.io/fedora/fedora-kinoite:44",
-  "upstream_digest": "sha256:f899ef3512a36677c6c0879ceef5268e0c168cb0d75d6b5055a8f0b12070d572",
+  "upstream_digest": "sha256:244a3b259fac230d2fecad7e448fdfa6c2526fa8b4e00761f162c8924e88c82b",
   "mirror_ref": null,
   "mirror_digest": null,
   "digest_identical": null,

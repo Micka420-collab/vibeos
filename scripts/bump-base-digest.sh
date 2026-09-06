@@ -45,6 +45,41 @@ TAG="44"
 # arbre à moitié bumpé.
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 EXTRA_PIN_SITES=("$ROOT/os/rootfs/usr/lib/vibeos/image-info.json")
+PROVENANCE="$ROOT/os/base-provenance.json"
+
+# La PROVENANCE suit le pin tant qu'on n'est pas miroité. `os/base-provenance.json`
+# enregistre de quelle image amont l'image est bâtie ; laissée en arrière, elle
+# désignerait une base PURGÉE que plus rien ne construit — un relevé de provenance
+# qui ment, pire que pas de relevé du tout.
+#
+# Ce fichier n'est PAS dans EXTRA_PIN_SITES à dessein : il ne porte pas de
+# référence `repo:tag@digest` (ref et digest y sont des champs séparés), donc la
+# réécriture « tout ou rien » ne le voit pas. On le réconcilie ici, et
+# check-base-digest-sync.py refuse désormais la divergence.
+#
+# Appelée sur LES DEUX chemins — après un bump ET avant la sortie « unchanged ».
+# Ne la réserver qu'au bump laissait un cas irréparable : pin déjà à jour mais
+# provenance en retard, que ce script signalait sans pouvoir corriger.
+sync_provenance() {
+	local digest="$1" tmp
+	[ -f "$PROVENANCE" ] || return 0
+	grep -q '"state"[[:space:]]*:[[:space:]]*"not_mirrored"' "$PROVENANCE" || return 0
+	grep -qF -- "$digest" "$PROVENANCE" && return 0 # déjà aligné
+
+	tmp="$(mktemp)"
+	sed -E "s#(\"upstream_digest\"[[:space:]]*:[[:space:]]*\")sha256:[0-9a-f]{64}(\")#\1${digest}\2#" \
+		"$PROVENANCE" >"$tmp"
+	if grep -qF -- "$digest" "$tmp"; then
+		cat "$tmp" >"$PROVENANCE"
+		rm -f "$tmp"
+		echo "provenance recalée sur ${digest}"
+	else
+		rm -f "$tmp"
+		echo "erreur: $PROVENANCE n'a pas pu être recalé sur ${digest} — corrige-le à la main" >&2
+		exit 10
+	fi
+}
+
 
 command -v skopeo >/dev/null || {
 	echo "erreur: skopeo requis" >&2
@@ -80,6 +115,7 @@ fi
 # que quay le purge. Bumper à chaque dérive de tag ouvrirait une PR + un build
 # COMPLET quotidiens pour rien. Donc : si le pin résout encore, on ne touche à rien.
 if skopeo inspect --raw "docker://${REPO}@${pinned}" >/dev/null 2>&1; then
+	sync_provenance "$pinned"
 	echo "unchanged (${pinned} résout encore)"
 	exit 0
 fi
@@ -166,4 +202,5 @@ for site in "${sites[@]}"; do
 	cat "$STAGE/$i" >"$site"
 	i=$((i + 1))
 done
+sync_provenance "$current"
 echo "changed ${pinned} -> ${current}"

@@ -183,6 +183,50 @@ else:
         "réécrit les pins ; ce contrôle ne peut plus vérifier qu'ils sont tous connus."
     )
 
+# --- 3. La provenance ne ment pas ------------------------------------------------
+# `os/base-provenance.json` dit de quelle image amont l'image est bâtie. Il ne
+# porte PAS de référence `repo:tag@digest` (ref et digest y sont des champs
+# séparés, délibérément), donc il échappe au balayage ci-dessus : sans ce contrôle,
+# un bump le laisserait désigner une base purgée que plus rien ne construit — un
+# relevé de provenance qui ment, pire que pas de relevé.
+PROVENANCE = ROOT / "os" / "base-provenance.json"
+if canonical is not None and PROVENANCE.is_file():
+    import json
+
+    try:
+        prov = json.loads(PROVENANCE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        errors.append(f"os/base-provenance.json illisible ({exc}) — provenance invérifiable.")
+    else:
+        state = prov.get("state")
+        if state == "not_mirrored":
+            # Avant la bascule : le pin EST l'amont, la provenance doit le refléter.
+            if prov.get("upstream_digest") != ref_digest:
+                errors.append(
+                    f"os/base-provenance.json déclare upstream_digest="
+                    f"{prov.get('upstream_digest')}\n"
+                    f"        alors que le pin est {ref_digest}.\n"
+                    f"        La provenance désignerait une base qui n'est pas celle "
+                    f"construite.\n"
+                    f"        Remède : bash scripts/bump-base-digest.sh os/Containerfile "
+                    f"(il recale la provenance depuis ce correctif)."
+                )
+        elif state == "mirrored":
+            # Après la bascule : le pin est le MIROIR, la provenance doit le refléter.
+            if prov.get("mirror_digest") != ref_digest:
+                errors.append(
+                    f"os/base-provenance.json déclare mirror_digest="
+                    f"{prov.get('mirror_digest')}\n"
+                    f"        alors que le pin est {ref_digest}.\n"
+                    f"        Remède : bash scripts/mirror-base.sh os/Containerfile."
+                )
+        else:
+            errors.append(
+                f"os/base-provenance.json porte state={state!r} — attendu "
+                f"\"not_mirrored\" ou \"mirrored\". Un état inconnu rend la "
+                f"provenance invérifiable ; répare le fichier, pas ce contrôle."
+            )
+
 # --- Verdict -------------------------------------------------------------------
 if errors:
     print("\033[31mFAIL\033[0m  digest de base désynchronisé\n", file=sys.stderr)
